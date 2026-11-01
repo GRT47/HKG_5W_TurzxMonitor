@@ -70,7 +70,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.0.0";
+    public static final String MONITOR_VERSION = "1.1.0";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -138,6 +138,7 @@ public class TurzxMonitorMain {
     public static final int HEV_FLAG_DATC_CLMTPWRCNSMPTN_W = 79;
     public static final int HEV_FLAG_EV_BATTERYCONDITIONING = 94;
 
+    public static final int DATC_FLAG_TEMP = 2;
     public static final int DATC_FLAG_BLOWER_LEVEL = 5;
     public static final int DATC_FLAG_BLOWER_MODE = 6;
     public static final int DATC_FLAG_AUTO = 8;
@@ -148,7 +149,8 @@ public class TurzxMonitorMain {
     public static final int DATC_FLAG_SYNC = 22;
     public static final int DATC_FLAG_ADS_ON_OFF = 23;
     public static final int DATC_FLAG_DRIVER_ONLY = 24;
-    public static final int DATC_FLAG_TEMP_DR_C = 28;
+    public static final int DATC_FLAG_TEMP_DR_C = 2;
+    public static final int DATC_FLAG_TEMP_DR_C_LEGACY = 28;
     public static final int DATC_FLAG_TEMP_PS_C = 29;
     public static final int DATC_FLAG_TEMP_OUTSIDE_C = 32;
 
@@ -214,8 +216,9 @@ public class TurzxMonitorMain {
         public boolean hasClimateData = false;
         public boolean hvacOn = true;
         public boolean hvacAuto = true;
-        public boolean hvacAc = true;
-        public boolean hvacSync = false;
+        public boolean hvacAc = false;
+        public boolean hvacHeat = false;
+        public boolean hvacSync = true;
         public boolean hvacDriverOnly = false;
         public boolean hvacFrontDefog = false;
         public boolean hvacRecirc = true;
@@ -223,7 +226,7 @@ public class TurzxMonitorMain {
         public int hvacBlowerStep = 3;      // 0..8
         public int hvacBlowerMode = 2;      // 1=VENT, 2=B/L, 3=FLOOR, 4=MIX, 5=DEF
         public double hvacDrTempC = 22.0;
-        public double hvacPsTempC = 22.5;
+        public double hvacPsTempC = 22.0;
         public double outdoorTempC = 18.0;
         public double inCarTempC = 22.5;
 
@@ -249,12 +252,13 @@ public class TurzxMonitorMain {
 
         // 4. Now Playing Media
         public String mediaSource = "Bluetooth Audio";
-        public String mediaTitle = "밤양갱 (Bam Yang Gang)";
-        public String mediaArtist = "비비 (BIBI)";
-        public String mediaAlbum = "밤양갱 - Single";
-        public boolean mediaPlaying = true;
-        public int mediaPositionSec = 108;
-        public int mediaDurationSec = 166;
+        public String mediaTitle = "미디어 재생 대기 중";
+        public String mediaArtist = "Bluetooth · USB · Radio";
+        public String mediaAlbum = "";
+        public boolean mediaPlaying = false;
+        public int mediaPositionSec = 0;
+        public int mediaDurationSec = 0;
+        public Object albumArtBitmap = null;
 
         public double getEffectiveSocPct() {
             if (displaySocPct >= 0.0) return displaySocPct;
@@ -1035,144 +1039,278 @@ public class TurzxMonitorMain {
             Method drawText = canvasCls.getMethod("drawText", String.class, float.class, float.class, paintCls);
             Method drawPath = canvasCls.getMethod("drawPath", pathCls, paintCls);
 
-            // 0. Deep OLED Pitch-Black Cluster Background (#06080D)
-            setColor.invoke(pFill, Integer.valueOf(0xFF06080D));
+            // =================================================================
+            // 0. ccNC 'Seon (선)' Dark Gray Ground (#171719) — Zero Top Header!
+            //    Matches turzx_92_mockup.html 1:1 (960x231 dp @ 2.0x = 1920x462)
+            // =================================================================
+            setColor.invoke(pFill, Integer.valueOf(0xFF171719));
             drawRect.invoke(c, 0f, 0f, 1920f, 462f, pFill);
 
-            // Top Seon Horizon Accent Line
-            setColor.invoke(pFill, Integer.valueOf(0xFF0F2942));
-            drawRect.invoke(c, 0f, 0f, 1920f, 2f, pFill);
-
-            // -----------------------------------------------------------------
-            // TOP STATUS STRIP (y = 4..34)
-            // -----------------------------------------------------------------
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    12f, 5f, 1908f, 35f, 8f, 0xFF0B111C, 0xFF1E293B, 1f);
-
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 14f);
-            setColor.invoke(pText, Integer.valueOf(0xFF38BDF8));
-            drawText.invoke(c, "HKG 5W TURZX 9.2 CLUSTER HUD", 26f, 25f, pText);
-
-            // EV Ready Badge
-            int rdyBg = s.evReady ? 0xFF064E3B : 0xFF1E293B;
-            int rdyFg = s.evReady ? 0xFF34D399 : 0xFF94A3B8;
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    290f, 8f, 405f, 32f, 6f, rdyBg, rdyFg, 1f);
-            setTextAlign.invoke(pText, alignCenter);
-            setTextSize.invoke(pText, 12.5f);
-            setColor.invoke(pText, Integer.valueOf(rdyFg));
-            drawText.invoke(c, s.evReady ? "EV READY" : "IG ON / STANDBY", 347.5f, 24.5f, pText);
-
-            // Comma 3X Link Status Pill
-            int commaBg = s.carrotConnected ? 0xFF064E3B : 0xFF1E293B;
-            int commaFg = s.carrotConnected ? 0xFF34D399 : 0xFF94A3B8;
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    418f, 8f, 610f, 32f, 6f, commaBg, commaFg, 1f);
-            setColor.invoke(pText, Integer.valueOf(commaFg));
-            drawText.invoke(c, s.carrotConnected ? ("COMMA 3X · " + (s.carrotActive ? "ACTIVE" : "ONLINE")) : "COMMA 3X · STANDBY", 514f, 24.5f, pText);
-
-            // Right side of Top Strip: Indoor / Outdoor Temps + Clock
-            setTextAlign.invoke(pText, alignRight);
-            setTextSize.invoke(pText, 14f);
-            setColor.invoke(pText, Integer.valueOf(0xFFE2E8F0));
-            String inTempStr = (s.inCarTempC > -50.0) ? String.format(Locale.US, "실내 %.1f°C", s.inCarTempC) : "실내 --.-°C";
-            String outTempStr = (s.outdoorTempC > -50.0) ? String.format(Locale.US, "실외 %.1f°C", s.outdoorTempC) : "실외 --.-°C";
-            String clockStr = new SimpleDateFormat("HH:mm", Locale.US).format(new Date());
-            drawText.invoke(c, inTempStr + "   |   " + outTempStr + "   |   " + clockStr, 1892f, 25f, pText);
-
             // =================================================================
-            // COLUMN 1: EV INSTRUMENT CLUSTER (x = 12..624, y = 42..454)
+            // COLUMN 1: 2x2 EV INSTRUMENT GRID + RIGHT TPMS STRIP
+            //           (x = 12..596, y = 12..450, w = 584, h = 438)
             // =================================================================
-            // 2x2 EV Grid (y = 42..330) + Bottom TPMS Card (y = 338..454)
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    12f, 12f, 596f, 450f, 16f, 0xFF131217, 0xFF222224, 2.0f);
+
+            // Hairline rules inside Column 1 (#1B1A1F, 2px)
+            setColor.invoke(pStroke, Integer.valueOf(0xFF1B1A1F));
+            setStrokeW.invoke(pStroke, 2.0f);
+            drawLine.invoke(c, 408f, 14f, 408f, 448f, pStroke); // Split EV 2x2 (12..408) | TPMS (408..596)
+            drawLine.invoke(c, 210f, 14f, 210f, 448f, pStroke); // Split EV col 1 | col 2
+            drawLine.invoke(c, 14f, 231f, 408f, 231f, pStroke); // Split EV row 1 | row 2
+
+            // Cell [1,1]: 배터리 잔량 (x = 12..210, y = 12..231)
             double soc = s.getEffectiveSocPct();
-            String socValStr = (soc >= 0.0) ? String.format(Locale.US, "%.1f%%", soc) : "--.-%";
+            String socValStr = (soc >= 0.0) ? String.format(Locale.US, "%.1f", soc) : "--.-";
             String sohStr = (s.sohPct > 0.0) ? String.format(Locale.US, "SOH %.1f%%", s.sohPct) : "SOH 100%";
             String kwhStr = (s.remainEnergyKwh > 0.0)
-                    ? String.format(Locale.US, "가용 %.1f kWh · BMS %.1f%%", s.remainEnergyKwh, s.bmsSocPct >= 0 ? s.bmsSocPct : soc)
-                    : "BMS 고전압 배터리";
-            drawEvMetricCard(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawText, setColor, setStrokeW, setTextSize, setTextAlign,
+                    ? String.format(Locale.US, "%.1f kWh · BMS %.1f%%", s.remainEnergyKwh, s.bmsSocPct >= 0 ? s.bmsSocPct : soc)
+                    : (soc >= 0.0 ? String.format(Locale.US, "%.1f kWh · BMS %.1f%%", soc * 0.64, s.bmsSocPct >= 0 ? s.bmsSocPct : soc) : "BMS 고전압 배터리");
+            drawCcncEvCell(c, rf, pFill, pText, setRf, drawRoundRect, drawText, setColor, setTextSize, setTextAlign,
                     alignLeft, alignRight,
-                    12f, 42f, 314f, 182f,
-                    "고전압 배터리 (SoC)", sohStr, socValStr, kwhStr,
-                    soc >= 0 ? (int) Math.round(soc) : 50, 0xFF38BDF8);
+                    12f, 12f, 210f, 231f,
+                    "배터리 잔량", sohStr, 0xFF44A282,
+                    socValStr, "%", 0xFFFFFFFF,
+                    soc >= 0 ? (int) Math.round(soc) : 50, 0xFF4A8AD6,
+                    kwhStr);
 
-            // [1,2] DTE & Economy
+            // Cell [1,2]: 주행가능거리 (x = 210..408, y = 12..231)
             String unit = s.distanceUnitMiles ? "mi" : "km";
-            String dteValStr = (s.dteKm >= 0) ? (s.dteKm + " " + unit) : ("--- " + unit);
+            int effectiveDte = s.dteKm;
+            if (!isValidDteValue(effectiveDte) && soc > 0.0) {
+                double econ = (s.avgEconomyKmKwh > 1.0) ? s.avgEconomyKmKwh : 6.2;
+                double kwh = (s.remainEnergyKwh > 0.5) ? s.remainEnergyKwh : (soc * 0.64);
+                effectiveDte = (int) Math.round(kwh * econ);
+            }
+            String dteValStr = (effectiveDte > 0) ? String.valueOf(effectiveDte) : "---";
             String dteBadge = (s.dteAirconOffDeltaKm != 0)
-                    ? String.format(Locale.US, "공조OFF %+d%s", s.dteAirconOffDeltaKm, unit)
+                    ? String.format(Locale.US, "공조 %+d%s", s.dteAirconOffDeltaKm, unit)
                     : "주행가능";
             String econStr = (s.avgEconomyKmKwh > 0.0)
-                    ? String.format(Locale.US, "평균 전비 %.1f %s/kWh", s.avgEconomyKmKwh, unit)
-                    : "평균 전비 -.- km/kWh";
-            int dtePct = (s.dteKm > 0) ? Math.min(100, (s.dteKm * 100) / 420) : 45;
-            drawEvMetricCard(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawText, setColor, setStrokeW, setTextSize, setTextAlign,
+                    ? String.format(Locale.US, "전비 %.1f %s/kWh", s.avgEconomyKmKwh, unit)
+                    : "전비 6.2 km/kWh";
+            int dtePct = (effectiveDte > 0) ? Math.min(100, (effectiveDte * 100) / 420) : 50;
+            drawCcncEvCell(c, rf, pFill, pText, setRf, drawRoundRect, drawText, setColor, setTextSize, setTextAlign,
                     alignLeft, alignRight,
-                    322f, 42f, 624f, 182f,
-                    "주행가능거리 (DTE)", dteBadge, dteValStr, econStr,
-                    dtePct, 0xFF10B981);
+                    210f, 12f, 408f, 231f,
+                    "주행가능거리", dteBadge, 0xFF4A8AD6,
+                    dteValStr, unit, 0xFFFFFFFF,
+                    dtePct, 0xFF44A282,
+                    econStr);
 
-            // [2,1] Real-Time Power & 4-Channel Subsystems
+            // Cell [2,1]: 실시간 전력 (x = 12..210, y = 231..450)
             double totalKw = s.getTotalPowerKw();
-            String pwrValStr = String.format(Locale.US, "%.1f kW", Math.abs(totalKw));
-            String pwrBadge = (totalKw < -0.3) ? "회생/충전" : "실시간 소모";
-            int pwrColor = (totalKw < -0.3) ? 0xFF34D399 : 0xFF38BDF8;
-            String pwrSubStr = String.format(Locale.US, "모터 %.1f · 공조 %.1f · 전장 %.2f kW",
-                    Math.max(0.0, s.getEffectiveDriveMotorKw()), s.climatePowerKw, s.electronicsPowerKw);
-            int pwrPct = Math.min(100, (int) Math.round((Math.abs(totalKw) / 80.0) * 100.0));
-            drawEvMetricCard(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawText, setColor, setStrokeW, setTextSize, setTextAlign,
+            boolean isRegen = totalKw < -0.2;
+            String pwrValStr = isRegen
+                    ? String.format(Locale.US, "-%.1f", Math.abs(totalKw))
+                    : String.format(Locale.US, "+%.1f", Math.abs(totalKw));
+            String pwrBadge = isRegen ? "회생" : (s.charging ? "충전" : "방전");
+            int pwrColor = isRegen ? 0xFF44A282 : 0xFFFFFFFF;
+            String pwrSubStr = String.format(Locale.US, "구동 %.1f · 공조 %.1f",
+                    Math.max(0.0, s.getEffectiveDriveMotorKw()), Math.max(0.0, s.climatePowerKw));
+            int pwrPct = Math.min(100, Math.max(6, (int) Math.round((Math.abs(totalKw) / 60.0) * 100.0)));
+            drawCcncEvCell(c, rf, pFill, pText, setRf, drawRoundRect, drawText, setColor, setTextSize, setTextAlign,
                     alignLeft, alignRight,
-                    12f, 190f, 314f, 330f,
-                    "실시간 소비전력", pwrBadge, pwrValStr, pwrSubStr,
-                    pwrPct, pwrColor);
+                    12f, 231f, 210f, 450f,
+                    "실시간 전력", pwrBadge, isRegen ? 0xFF44A282 : 0xFFBDBDC0,
+                    pwrValStr, "kW", pwrColor,
+                    pwrPct, pwrColor,
+                    pwrSubStr);
 
-            // [2,2] Cell Balancing & Thermal
+            // Cell [2,2]: 배터리 온도 (x = 210..408, y = 231..450)
             Integer repTemp = s.getRepresentativeBattTempC();
-            String tempValStr = (repTemp != null) ? (repTemp.intValue() + "°C") : "21°C";
-            String cellBadge = (s.cellDiffMv >= 0) ? ("Δ" + s.cellDiffMv + "mV 정상") : "Δ0mV 최상";
-            String cellSubStr = (s.cellMaxVoltV > 0.0)
-                    ? String.format(Locale.US, "셀 %.2f~%.2fV · 12V보조 %.1fV",
-                    s.cellMinVoltV, s.cellMaxVoltV, s.auxBattVoltV > 0 ? s.auxBattVoltV : 14.1)
-                    : "셀 3.60~3.60V · 12V보조 14.0V";
-            drawEvMetricCard(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawText, setColor, setStrokeW, setTextSize, setTextAlign,
+            int battT = (repTemp != null) ? repTemp.intValue() : 22;
+            String tempValStr = String.format(Locale.US, "%d.0", battT);
+            String cellBadge = (s.cellDiffMv >= 0) ? ("Δ" + s.cellDiffMv + "mV") : "Δ0mV";
+            double cellV = (s.cellMaxVoltV > 0.0) ? s.cellMaxVoltV : 3.72;
+            double auxV = (s.auxBattVoltV > 0.0) ? s.auxBattVoltV : 14.2;
+            String cellSubStr = String.format(Locale.US, "%.2fV · 12V %.1fV", cellV, auxV);
+            int tempPct = Math.max(15, Math.min(100, ((battT + 10) * 100) / 55));
+            drawCcncEvCell(c, rf, pFill, pText, setRf, drawRoundRect, drawText, setColor, setTextSize, setTextAlign,
                     alignLeft, alignRight,
-                    322f, 190f, 624f, 330f,
-                    "배터리 온도 · 셀밸런싱", cellBadge, tempValStr, cellSubStr,
-                    65, 0xFF34D399);
+                    210f, 231f, 408f, 450f,
+                    "배터리 온도", cellBadge, 0xFF44A282,
+                    tempValStr, "°C", 0xFFFFFFFF,
+                    tempPct, 0xFF44A282,
+                    cellSubStr);
 
-            // Bottom TPMS 4-Wheel Tire Pressure Card (y = 338..454)
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    12f, 338f, 624f, 454f, 12f, 0xFF0D1524, 0xFF1E293B, 1.5f);
+            // Right TPMS Strip (x = 408..596, y = 12..450)
+            drawTpmsStrip(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawCircle, drawLine, drawText,
+                    setColor, setStrokeW, setTextSize, setTextAlign, alignLeft, alignCenter, alignRight, s);
+
+            // =================================================================
+            // COLUMN 2: 3D COMMA ADAS ROAD + SPEED STAMP + SDI + TBT (x = 608..1190, y = 12..450)
+            // =================================================================
+            drawColumn2AdasHud(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawCircle, drawLine, drawText, drawPath,
+                    setColor, setStrokeW, setTextSize, setTextAlign, alignLeft, alignCenter, alignRight, pathCls, s);
+
+            // =================================================================
+            // COLUMN 3: 1:1 MEDIA (TOP) + DATC CLIMATE (BOTTOM) (x = 1202..1908, y = 12..450)
+            // =================================================================
+            drawColumn3MediaAndClimate(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawCircle, drawLine, drawText, drawPath,
+                    setColor, setStrokeW, setTextSize, setTextAlign, alignLeft, alignCenter, alignRight, canvasCls, paintCls, rectFCls, pathCls, s);
+        }
+
+        private static void drawCcncEvCell(
+                Object c,
+                Object rf,
+                Object pFill,
+                Object pText,
+                Method setRf,
+                Method drawRoundRect,
+                Method drawText,
+                Method setColor,
+                Method setTextSize,
+                Method setTextAlign,
+                Object alignLeft,
+                Object alignRight,
+                float x0,
+                float y0,
+                float x1,
+                float y1,
+                String label,
+                String badge,
+                int badgeColor,
+                String heroNum,
+                String heroUnit,
+                int heroColor,
+                int barPct,
+                int barColor,
+                String subText
+        ) throws Exception {
+            float padX = 18f;
+            // Top label & right badge
             setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 13f);
-            setColor.invoke(pText, Integer.valueOf(0xFF94A3B8));
-            drawText.invoke(c, "TPMS 타이어 공기압 (psi)", 26f, 360f, pText);
+            setTextSize.invoke(pText, 19.5f);
+            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
+            drawText.invoke(c, label, x0 + padX, y0 + 36f, pText);
 
-            // Top-down car outline in center of TPMS card (cx = 318, cy = 398)
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    282f, 354f, 354f, 442f, 16f, 0xFF162238, 0xFF38BDF8, 1.5f);
-            // 4 tire pills & PSI labels
-            setTextSize.invoke(pText, 18f);
-            setColor.invoke(pText, Integer.valueOf(0xFFF8FAFC));
             setTextAlign.invoke(pText, alignRight);
-            drawText.invoke(c, String.format(Locale.US, "FL  %.0f psi", s.tpmsFlPsi), 265f, 384f, pText);
-            drawText.invoke(c, String.format(Locale.US, "RL  %.0f psi", s.tpmsRlPsi), 265f, 430f, pText);
+            setTextSize.invoke(pText, 18.5f);
+            setColor.invoke(pText, Integer.valueOf(badgeColor));
+            drawText.invoke(c, badge, x1 - padX, y0 + 36f, pText);
+
+            // Hero number + unit
             setTextAlign.invoke(pText, alignLeft);
-            drawText.invoke(c, String.format(Locale.US, "%.0f psi  FR", s.tpmsFrPsi), 371f, 384f, pText);
-            drawText.invoke(c, String.format(Locale.US, "%.0f psi  RR", s.tpmsRrPsi), 371f, 430f, pText);
+            float heroFont = (heroNum.length() >= 5) ? 48f : 54f;
+            setTextSize.invoke(pText, heroFont);
+            setColor.invoke(pText, Integer.valueOf(heroColor));
+            drawText.invoke(c, heroNum, x0 + padX, y0 + 114f, pText);
 
-            // =================================================================
-            // COLUMN 2: CARROTNAVI + 3D COMMA ADAS HUD (x = 634..1216, y = 42..454)
-            // =================================================================
-            drawColumn2AdasHud(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawCircle, drawLine, drawText, drawPath,
-                    setColor, setStrokeW, setTextSize, setTextAlign, alignLeft, alignCenter, alignRight, pathCls, s);
+            float numApproxW = heroNum.length() * (heroFont * 0.56f);
+            setTextSize.invoke(pText, 23f);
+            setColor.invoke(pText, Integer.valueOf(0xFFBDBDC0));
+            drawText.invoke(c, heroUnit, Math.min(x1 - padX - 28f, x0 + padX + numApproxW + 4f), y0 + 112f, pText);
 
-            // =================================================================
-            // COLUMN 3: 1:1 MEDIA (TOP 50%) + DATC CLIMATE (BOTTOM 50%) (x = 1226..1908)
-            // =================================================================
-            drawColumn3MediaAndClimate(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawCircle, drawLine, drawText, drawPath,
-                    setColor, setStrokeW, setTextSize, setTextAlign, alignLeft, alignCenter, alignRight, pathCls, s);
+            // Thin 8px Progress Bar (#212023 rail)
+            drawProgressBar(c, rf, pFill, setRf, drawRoundRect, setColor,
+                    x0 + padX, y1 - 56f, x1 - padX, y1 - 48f, barPct, barColor);
+
+            // Sub-caption
+            setTextAlign.invoke(pText, alignLeft);
+            setTextSize.invoke(pText, 17.5f);
+            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
+            drawText.invoke(c, subText, x0 + padX, y1 - 18f, pText);
+        }
+
+        private static void drawTpmsStrip(
+                Object c,
+                Object rf,
+                Object pFill,
+                Object pStroke,
+                Object pText,
+                Method setRf,
+                Method drawRoundRect,
+                Method drawCircle,
+                Method drawLine,
+                Method drawText,
+                Method setColor,
+                Method setStrokeW,
+                Method setTextSize,
+                Method setTextAlign,
+                Object alignLeft,
+                Object alignCenter,
+                Object alignRight,
+                TelemetrySnapshot s
+        ) throws Exception {
+            float x0 = 408f;
+            float x1 = 596f;
+            float cx = 502f;
+
+            // Header: 타이어 공기압 psi
+            setTextAlign.invoke(pText, alignLeft);
+            setTextSize.invoke(pText, 19.5f);
+            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
+            drawText.invoke(c, "타이어 공기압", x0 + 18f, 48f, pText);
+
+            setTextAlign.invoke(pText, alignRight);
+            setTextSize.invoke(pText, 18.5f);
+            setColor.invoke(pText, Integer.valueOf(0xFF4A8AD6));
+            drawText.invoke(c, "psi", x1 - 18f, 48f, pText);
+
+            // 4 tire blocks around top-down car silhouette
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    cx - 33f, 152f, cx - 23f, 182f, 4f, 0xFF2A2B32, 0xFF44A282, 2.0f);
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    cx + 23f, 152f, cx + 33f, 182f, 4f, 0xFF2A2B32, 0xFF44A282, 2.0f);
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    cx - 33f, 256f, cx - 23f, 286f, 4f, 0xFF2A2B32, 0xFF44A282, 2.0f);
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    cx + 23f, 256f, cx + 33f, 286f, 4f, 0xFF2A2B32, 0xFF44A282, 2.0f);
+
+            // Top-down sculpted vehicle chassis (cx = 502, y = 132..312)
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    cx - 26f, 132f, cx + 26f, 312f, 20f, 0xFF1E1F24, 0xFF464852, 2.2f);
+            // Glasshouse / panoramic roof
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    cx - 19f, 168f, cx + 19f, 278f, 10f, 0xFF121317, 0xFF32343C, 1.5f);
+            // Front DRL & Rear LED lightbar accents
+            setColor.invoke(pStroke, Integer.valueOf(0xFF78BCFF));
+            setStrokeW.invoke(pStroke, 2.5f);
+            drawLine.invoke(c, cx - 16f, 137f, cx + 16f, 137f, pStroke);
+            setColor.invoke(pStroke, Integer.valueOf(0xFFE5566F));
+            drawLine.invoke(c, cx - 16f, 307f, cx + 16f, 307f, pStroke);
+
+            // 4 Wheel PSI readouts
+            setTextAlign.invoke(pText, alignRight);
+            setTextSize.invoke(pText, 16f);
+            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
+            drawText.invoke(c, "FL", cx - 40f, 158f, pText);
+            drawText.invoke(c, "RL", cx - 40f, 260f, pText);
+
+            setTextSize.invoke(pText, 32f);
+            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
+            drawText.invoke(c, String.format(Locale.US, "%.0f", s.tpmsFlPsi), cx - 40f, 190f, pText);
+            drawText.invoke(c, String.format(Locale.US, "%.0f", s.tpmsRlPsi), cx - 40f, 292f, pText);
+
+            setTextAlign.invoke(pText, alignLeft);
+            setTextSize.invoke(pText, 16f);
+            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
+            drawText.invoke(c, "FR", cx + 40f, 158f, pText);
+            drawText.invoke(c, "RR", cx + 40f, 260f, pText);
+
+            setTextSize.invoke(pText, 32f);
+            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
+            drawText.invoke(c, String.format(Locale.US, "%.0f", s.tpmsFrPsi), cx + 40f, 190f, pText);
+            drawText.invoke(c, String.format(Locale.US, "%.0f", s.tpmsRrPsi), cx + 40f, 292f, pText);
+
+            // Bottom TPMS summary divider & status
+            setColor.invoke(pStroke, Integer.valueOf(0xFF1B1A1F));
+            setStrokeW.invoke(pStroke, 2.0f);
+            drawLine.invoke(c, x0 + 16f, 392f, x1 - 16f, 392f, pStroke);
+
+            float maxPsi = Math.max(Math.max(s.tpmsFlPsi, s.tpmsFrPsi), Math.max(s.tpmsRlPsi, s.tpmsRrPsi));
+            float minPsi = Math.min(Math.min(s.tpmsFlPsi, s.tpmsFrPsi), Math.min(s.tpmsRlPsi, s.tpmsRrPsi));
+            float diffPsi = Math.max(0f, maxPsi - minPsi);
+
+            setColor.invoke(pFill, Integer.valueOf(0xFF44A282));
+            drawCircle.invoke(c, x0 + 34f, 420f, 5.5f, pFill);
+
+            setTextAlign.invoke(pText, alignLeft);
+            setTextSize.invoke(pText, 18.5f);
+            setColor.invoke(pText, Integer.valueOf(0xFFBDBDC0));
+            drawText.invoke(c, String.format(Locale.US, "정상 · 편차 %.1f", diffPsi), x0 + 48f, 426f, pText);
         }
 
         private static void drawColumn2AdasHud(
@@ -1183,6 +1321,7 @@ public class TurzxMonitorMain {
                 Object pText,
                 Method setRf,
                 Method drawRoundRect,
+                Method drawRect,
                 Method drawCircle,
                 Method drawLine,
                 Method drawText,
@@ -1197,156 +1336,321 @@ public class TurzxMonitorMain {
                 Class<?> pathCls,
                 TelemetrySnapshot s
         ) throws Exception {
-            float x0 = 634f;
-            float y0 = 42f;
-            float x1 = 1216f;
-            float y1 = 454f;
-            float cx = (x0 + x1) * 0.5f; // 925f
-            float horizonY = y0 + 165f;  // 207f
+            float x0 = 608f;
+            float y0 = 12f;
+            float x1 = 1190f;
+            float y1 = 450f;
+            float cx = (x0 + x1) * 0.5f; // 899f
+            float horizonY = y0 + 130f;  // 142f
 
-            // Background card for Column 2
+            // 1. Sky (#0D0D10) & Ground (#12141B)
             drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0, y0, x1, y1, 14f, 0xFF080E1A, 0xFF1E293B, 1.5f);
+                    x0, y0, x1, y1, 16f, 0xFF0D0D10, 0xFF222224, 0f);
+            setRf.invoke(rf, x0, horizonY, x1, y1);
+            setColor.invoke(pFill, Integer.valueOf(0xFF12141B));
+            drawRoundRect.invoke(c, rf, 16f, 16f, pFill);
 
-            // Horizon line & subtle perspective grid
-            setColor.invoke(pStroke, Integer.valueOf(0xFF1E3A5F));
-            setStrokeW.invoke(pStroke, 1.2f);
-            drawLine.invoke(c, x0 + 8f, horizonY, x1 - 8f, horizonY, pStroke);
+            // Horizon glow line
+            setColor.invoke(pStroke, Integer.valueOf(0xFF232736));
+            setStrokeW.invoke(pStroke, 2.0f);
+            drawLine.invoke(c, x0 + 4f, horizonY, x1 - 4f, horizonY, pStroke);
 
             float curveShift = (s.pathPoly != null && s.pathPoly.length > 2)
-                    ? Math.max(-42f, Math.min(42f, s.pathPoly[2] * 95000f))
-                    : 8f;
+                    ? Math.max(-44f, Math.min(44f, s.pathPoly[2] * 95000f))
+                    : 10f;
 
-            // 3D Driving Path Carpet Polygon (Cyan-Emerald translucent fill)
-            Object carpetPath = pathCls.getConstructor().newInstance();
             Method moveTo = pathCls.getMethod("moveTo", float.class, float.class);
             Method lineTo = pathCls.getMethod("lineTo", float.class, float.class);
             Method closeP = pathCls.getMethod("close");
 
-            moveTo.invoke(carpetPath, cx - 26f + curveShift, horizonY + 12f);
-            lineTo.invoke(carpetPath, cx + 26f + curveShift, horizonY + 12f);
-            lineTo.invoke(carpetPath, cx + 150f, y1 - 6f);
-            lineTo.invoke(carpetPath, cx - 150f, y1 - 6f);
-            closeP.invoke(carpetPath);
+            // 2. 3-Lane Asphalt Surface (#161922)
+            Object roadPath = pathCls.getConstructor().newInstance();
+            moveTo.invoke(roadPath, cx - 110f + curveShift, horizonY + 2f);
+            lineTo.invoke(roadPath, cx + 110f + curveShift, horizonY + 2f);
+            lineTo.invoke(roadPath, x1 - 8f, y1 - 4f);
+            lineTo.invoke(roadPath, x0 + 8f, y1 - 4f);
+            closeP.invoke(roadPath);
+            setColor.invoke(pFill, Integer.valueOf(0xFF161922));
+            drawPath.invoke(c, roadPath, pFill);
 
-            setColor.invoke(pFill, Integer.valueOf(0x4410B981));
+            // 3. Ego Lane Surface (#1B202C)
+            Object egoPath = pathCls.getConstructor().newInstance();
+            moveTo.invoke(egoPath, cx - 34f + curveShift, horizonY + 2f);
+            lineTo.invoke(egoPath, cx + 34f + curveShift, horizonY + 2f);
+            lineTo.invoke(egoPath, cx + 168f, y1 - 4f);
+            lineTo.invoke(egoPath, cx - 168f, y1 - 4f);
+            closeP.invoke(egoPath);
+            setColor.invoke(pFill, Integer.valueOf(0xFF1B202C));
+            drawPath.invoke(c, egoPath, pFill);
+
+            // 4. Comma 3X Path Carpet (#44A282 translucent) + Chevrons
+            Object carpetPath = pathCls.getConstructor().newInstance();
+            moveTo.invoke(carpetPath, cx - 22f + curveShift, horizonY + 8f);
+            lineTo.invoke(carpetPath, cx + 22f + curveShift, horizonY + 8f);
+            lineTo.invoke(carpetPath, cx + 128f, y1 - 4f);
+            lineTo.invoke(carpetPath, cx - 128f, y1 - 4f);
+            closeP.invoke(carpetPath);
+            setColor.invoke(pFill, Integer.valueOf(0x4044A282));
             drawPath.invoke(c, carpetPath, pFill);
 
-            // Left & Right 3D Lane Lines
-            setColor.invoke(pStroke, Integer.valueOf(0xFF38BDF8));
-            setStrokeW.invoke(pStroke, 3.0f);
-            drawLine.invoke(c, cx - 28f + curveShift, horizonY + 12f, cx - 156f, y1 - 6f, pStroke);
-            drawLine.invoke(c, cx + 28f + curveShift, horizonY + 12f, cx + 156f, y1 - 6f, pStroke);
-
-            // Center trajectory guide line
-            setColor.invoke(pStroke, Integer.valueOf(0xAA34D399));
-            setStrokeW.invoke(pStroke, 2.0f);
-            drawLine.invoke(c, cx + curveShift, horizonY + 18f, cx, y1 - 10f, pStroke);
-
-            // 3D Lead Vehicle Box & Distance Badge
-            if (s.hasLeadCar && s.leadDistM > 0f) {
-                float leadCx = cx + curveShift * 0.65f;
-                float leadCy = horizonY + 58f;
-                drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                        leadCx - 38f, leadCy - 24f, leadCx + 38f, leadCy + 18f, 8f, 0xCC0F172A, 0xFF38BDF8, 2.0f);
-                // Taillight accents
-                setColor.invoke(pFill, Integer.valueOf(0xFFEF4444));
-                setRf.invoke(rf, leadCx - 32f, leadCy - 6f, leadCx - 16f, leadCy + 2f);
-                drawRoundRect.invoke(c, rf, 3f, 3f, pFill);
-                setRf.invoke(rf, leadCx + 16f, leadCy - 6f, leadCx + 32f, leadCy + 2f);
-                drawRoundRect.invoke(c, rf, 3f, 3f, pFill);
-
-                // Lead distance pill
-                drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                        leadCx - 36f, leadCy + 24f, leadCx + 36f, leadCy + 46f, 6f, 0xEE064E3B, 0xFF10B981, 1.2f);
-                setTextAlign.invoke(pText, alignCenter);
-                setTextSize.invoke(pText, 13.5f);
-                setColor.invoke(pText, Integer.valueOf(0xFF6EE7B7));
-                drawText.invoke(c, String.format(Locale.US, "%.0fm", s.leadDistM), leadCx, leadCy + 40f, pText);
+            // Distance rungs & chevrons inside path carpet
+            setColor.invoke(pStroke, Integer.valueOf(0x8844A282));
+            setStrokeW.invoke(pStroke, 2.2f);
+            float[] tSteps = new float[]{0.22f, 0.44f, 0.68f, 0.90f};
+            for (int i = 0; i < tSteps.length; i++) {
+                float t = tSteps[i];
+                float ry = horizonY + 12f + t * (y1 - horizonY - 20f);
+                float rCx = cx + (1.0f - t) * curveShift;
+                float halfW = 16f + t * 88f;
+                drawLine.invoke(c, rCx - halfW, ry, rCx, ry - (6f + t * 8f), pStroke);
+                drawLine.invoke(c, rCx, ry - (6f + t * 8f), rCx + halfW, ry, pStroke);
             }
 
-            // -----------------------------------------------------------------
-            // TOP-LEFT OF COLUMN 2: SDI SPEED LIMIT CIRCLE (RED CAMERA vs BLUE NORMAL) + TBT
-            // -----------------------------------------------------------------
-            boolean isCameraActive = (s.carrotSdiType >= 0) && (s.carrotSdiDistM > 0 || s.carrotSdiSpeedLimit > 0);
-            int signLimit = (s.carrotSdiSpeedLimit > 0) ? s.carrotSdiSpeedLimit : 80;
-            float signCx = x0 + 48f;
-            float signCy = y0 + 50f;
-            float signR = 32f;
+            // 5. Outer Adjacent Lane Lines (#558A8C92) & Ego Recognized Lane Lines (#78BCFF)
+            setColor.invoke(pStroke, Integer.valueOf(0x558A8C92));
+            setStrokeW.invoke(pStroke, 2.2f);
+            drawLine.invoke(c, cx - 96f + curveShift, horizonY + 4f, x0 + 18f, y1 - 6f, pStroke);
+            drawLine.invoke(c, cx + 96f + curveShift, horizonY + 4f, x1 - 18f, y1 - 6f, pStroke);
 
-            if (isCameraActive) {
-                // RED Circular Speed Camera Sign
-                setColor.invoke(pFill, Integer.valueOf(0xFFF8FAFC));
-                drawCircle.invoke(c, signCx, signCy, signR, pFill);
-                setColor.invoke(pStroke, Integer.valueOf(0xFFEF4444));
-                setStrokeW.invoke(pStroke, 6.5f);
-                drawCircle.invoke(c, signCx, signCy, signR - 3f, pStroke);
-                setTextAlign.invoke(pText, alignCenter);
-                setTextSize.invoke(pText, 24f);
-                setColor.invoke(pText, Integer.valueOf(0xFF0F172A));
-                drawText.invoke(c, String.valueOf(signLimit), signCx, signCy + 8f, pText);
-            } else {
-                // BLUE Circular Normal Speed Limit Sign (Idle / No Camera)
-                setColor.invoke(pFill, Integer.valueOf(0xFF1E3A8A));
-                drawCircle.invoke(c, signCx, signCy, signR, pFill);
-                setColor.invoke(pStroke, Integer.valueOf(0xFF3B82F6));
-                setStrokeW.invoke(pStroke, 5.5f);
-                drawCircle.invoke(c, signCx, signCy, signR - 3f, pStroke);
-                setTextAlign.invoke(pText, alignCenter);
-                setTextSize.invoke(pText, 24f);
-                setColor.invoke(pText, Integer.valueOf(0xFFF8FAFC));
-                drawText.invoke(c, String.valueOf(signLimit), signCx, signCy + 8f, pText);
-            }
+            setColor.invoke(pStroke, Integer.valueOf(0xEE78BCFF));
+            setStrokeW.invoke(pStroke, 4.0f);
+            drawLine.invoke(c, cx - 34f + curveShift, horizonY + 4f, cx - 168f, y1 - 6f, pStroke);
+            drawLine.invoke(c, cx + 34f + curveShift, horizonY + 4f, cx + 168f, y1 - 6f, pStroke);
 
-            // SDI Camera Distance / Status Label under sign
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 12.5f);
-            setColor.invoke(pText, Integer.valueOf(isCameraActive ? 0xFFFCA5A5 : 0xFF93C5FD));
-            String sdiLabel = isCameraActive
-                    ? String.format(Locale.US, "단속 %dm", Math.max(0, s.carrotSdiDistM))
-                    : "단속 없음";
-            drawText.invoke(c, sdiLabel, x0 + 18f, y0 + 100f, pText);
-
-            // TBT Turn-by-Turn Card at bottom of Column 2
+            // 6. Surround Traffic: Ghost Car in Right Adjacent Lane
+            float gcx = cx + 112f + curveShift * 0.4f;
+            float gby = horizonY + 132f;
             drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0 + 14f, y1 - 54f, x1 - 14f, y1 - 10f, 10f, 0xDD0F172A, 0xFF334155, 1.2f);
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 16f);
-            setColor.invoke(pText, Integer.valueOf(0xFF38BDF8));
-            String tbtDistStr = (s.carrotTbtDistM > 0) ? (s.carrotTbtDistM + "m 앞") : "380m 앞";
-            drawText.invoke(c, "↱ " + tbtDistStr, x0 + 28f, y1 - 26f, pText);
-            setTextSize.invoke(pText, 14f);
-            setColor.invoke(pText, Integer.valueOf(0xFFE2E8F0));
-            drawText.invoke(c, s.carrotTbtRoad != null ? s.carrotTbtRoad : "경부고속도로 · 판교 JC 방면", x0 + 145f, y1 - 26f, pText);
+                    gcx - 30f, gby - 38f, gcx + 30f, gby, 8f, 0x99222732, 0x668A94A6, 1.5f);
+            setColor.invoke(pFill, Integer.valueOf(0x88E5566F));
+            drawRect.invoke(c, gcx - 25f, gby - 20f, gcx - 10f, gby - 15f, pFill);
+            drawRect.invoke(c, gcx + 10f, gby - 20f, gcx + 25f, gby - 15f, pFill);
 
-            // -----------------------------------------------------------------
-            // TOP-CENTER OF COLUMN 2: HERO SPEED + CRUISE + GEAR PILL
-            // -----------------------------------------------------------------
+            // 7. 3D Sculpted Lead Vehicle + LED Tail Lightbar + Radar Target Brackets
+            if (s.hasLeadCar && s.leadDistM > 0f) {
+                float lcx = cx + curveShift * 0.55f;
+                float lby = horizonY + 124f;
+                float carW = 104f;
+                float carH = 70f;
+                float bodyTopY = lby - carH * 0.62f;
+                float roofTopY = lby - carH * 0.96f;
+
+                // Rear tires
+                drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                        lcx - 48f, lby - 18f, lcx - 32f, lby, 4f, 0xFF090A0F, 0xFF2F3340, 1.5f);
+                drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                        lcx + 32f, lby - 18f, lcx + 48f, lby, 4f, 0xFF090A0F, 0xFF2F3340, 1.5f);
+
+                // Sculpted vehicle body polygon
+                Object bodyP = pathCls.getConstructor().newInstance();
+                moveTo.invoke(bodyP, lcx - 50f, lby - 6f);
+                lineTo.invoke(bodyP, lcx - 51f, bodyTopY);
+                lineTo.invoke(bodyP, lcx - 35f, roofTopY);
+                lineTo.invoke(bodyP, lcx + 35f, roofTopY);
+                lineTo.invoke(bodyP, lcx + 51f, bodyTopY);
+                lineTo.invoke(bodyP, lcx + 50f, lby - 6f);
+                closeP.invoke(bodyP);
+                setColor.invoke(pFill, Integer.valueOf(0xFF1F232E));
+                drawPath.invoke(c, bodyP, pFill);
+                setColor.invoke(pStroke, Integer.valueOf(0xFF525868));
+                setStrokeW.invoke(pStroke, 2.0f);
+                drawPath.invoke(c, bodyP, pStroke);
+
+                // Rear windshield glass
+                Object glassP = pathCls.getConstructor().newInstance();
+                moveTo.invoke(glassP, lcx - 38f, bodyTopY - 2f);
+                lineTo.invoke(glassP, lcx - 29f, roofTopY + 5f);
+                lineTo.invoke(glassP, lcx + 29f, roofTopY + 5f);
+                lineTo.invoke(glassP, lcx + 38f, bodyTopY - 2f);
+                closeP.invoke(glassP);
+                setColor.invoke(pFill, Integer.valueOf(0xFF141822));
+                drawPath.invoke(c, glassP, pFill);
+
+                // Full-width parametric LED tail lightbar (#E5566F)
+                float lampY = bodyTopY + 3f;
+                setColor.invoke(pFill, Integer.valueOf(0xFFE5566F));
+                setRf.invoke(rf, lcx - 46f, lampY, lcx + 46f, lampY + 7f);
+                drawRoundRect.invoke(c, rf, 3f, 3f, pFill);
+                setColor.invoke(pFill, Integer.valueOf(0xFFFFB3C0));
+                drawRect.invoke(c, lcx - 43f, lampY + 1.5f, lcx - 22f, lampY + 5.5f, pFill);
+                drawRect.invoke(c, lcx + 22f, lampY + 1.5f, lcx + 43f, lampY + 5.5f, pFill);
+
+                // Corner Target Lock Brackets around Lead Vehicle
+                int radarColor = (s.leadDistM <= 20f) ? 0xFFE5566F : 0xFFD9A441;
+                float bx0 = lcx - 57f;
+                float bx1 = lcx + 57f;
+                float by0 = roofTopY - 6f;
+                float by1 = lby + 4f;
+                float brk = 12f;
+                setColor.invoke(pStroke, Integer.valueOf(radarColor));
+                setStrokeW.invoke(pStroke, 2.5f);
+                drawLine.invoke(c, bx0, by0 + brk, bx0, by0, pStroke);
+                drawLine.invoke(c, bx0, by0, bx0 + brk, by0, pStroke);
+                drawLine.invoke(c, bx1 - brk, by0, bx1, by0, pStroke);
+                drawLine.invoke(c, bx1, by0, bx1, by0 + brk, pStroke);
+                drawLine.invoke(c, bx0, by1 - brk, bx0, by1, pStroke);
+                drawLine.invoke(c, bx0, by1, bx0 + brk, by1, pStroke);
+                drawLine.invoke(c, bx1 - brk, by1, bx1, by1, pStroke);
+                drawLine.invoke(c, bx1, by1, bx1, by1 - brk, pStroke);
+
+                // Crisp Distance Tag Right Above Top Bracket
+                drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                        lcx - 36f, by0 - 32f, lcx + 36f, by0 - 6f, 6f, 0xEB131217, radarColor, 2.0f);
+                setTextAlign.invoke(pText, alignCenter);
+                setTextSize.invoke(pText, 18f);
+                setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
+                drawText.invoke(c, String.format(Locale.US, "%.0fm", s.leadDistM), lcx, by0 - 13f, pText);
+            }
+
+            // Outer border of Column 2
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    x0, y0, x1, y1, 16f, 0x00000000, 0xFF222224, 2.0f);
+
+            // =================================================================
+            // FLOATING TOP-LEFT HUD STACK: speed-stamp + sdi-compact-widget
+            // =================================================================
+            float sx0 = x0 + 16f; // 624
+            float sy0 = y0 + 14f; // 26
+            float sx1 = sx0 + 266f; // 890
+            float sy1 = sy0 + 70f;  // 96
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    sx0, sy0, sx1, sy1, 12f, 0xEB131217, 0xFF222224, 2.0f);
+            // Top 4px positive accent bar (#44A282)
+            setColor.invoke(pFill, Integer.valueOf(0xFF44A282));
+            drawRect.invoke(c, sx0 + 8f, sy0, sx1 - 8f, sy0 + 4f, pFill);
+
+            // Gear + Green dot
+            String gear = (s.gearPos != null && !s.gearPos.isEmpty()) ? s.gearPos : "D";
+            setTextAlign.invoke(pText, alignCenter);
+            setTextSize.invoke(pText, 32f);
+            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
+            drawText.invoke(c, gear, sx0 + 28f, sy0 + 47f, pText);
+            setColor.invoke(pFill, Integer.valueOf(0xFF44A282));
+            drawCircle.invoke(c, sx0 + 50f, sy0 + 36f, 5f, pFill);
+
+            // Vertical dividers inside speed-stamp
+            setColor.invoke(pStroke, Integer.valueOf(0xFF222224));
+            setStrokeW.invoke(pStroke, 2.0f);
+            drawLine.invoke(c, sx0 + 66f, sy0 + 12f, sx0 + 66f, sy1 - 12f, pStroke);
+            drawLine.invoke(c, sx0 + 180f, sy0 + 12f, sx0 + 180f, sy1 - 12f, pStroke);
+
+            // Speed number
             int displaySpd = (s.carrotSpeedKph >= 0) ? s.carrotSpeedKph : 0;
             setTextAlign.invoke(pText, alignCenter);
-            setTextSize.invoke(pText, 58f);
-            setColor.invoke(pText, Integer.valueOf(0xFFF8FAFC));
-            drawText.invoke(c, String.valueOf(displaySpd), cx, y0 + 66f, pText);
+            setTextSize.invoke(pText, 48f);
+            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
+            drawText.invoke(c, String.valueOf(displaySpd), sx0 + 123f, sy0 + 53f, pText);
 
-            setTextSize.invoke(pText, 13f);
-            setColor.invoke(pText, Integer.valueOf(0xFF94A3B8));
-            drawText.invoke(c, "km/h", cx, y0 + 84f, pText);
+            // MAX Cruise speed
+            int cruiseSpd = (s.carrotCruiseKph > 0) ? s.carrotCruiseKph : 80;
+            setTextSize.invoke(pText, 15f);
+            setColor.invoke(pText, Integer.valueOf(0xFF44A282));
+            drawText.invoke(c, "MAX", sx0 + 223f, sy0 + 28f, pText);
+            setTextSize.invoke(pText, 28f);
+            drawText.invoke(c, String.valueOf(cruiseSpd), sx0 + 223f, sy0 + 56f, pText);
 
-            // Cruise Set Pill & Gear Pill on Top-Right of Column 2
-            int cruiseSpd = (s.carrotCruiseKph > 0) ? s.carrotCruiseKph : 90;
+            // SDI Compact Widget underneath speed-stamp (y = 108..234)
+            boolean isCameraActive = (s.carrotSdiType >= 0) && (s.carrotSdiDistM > 0 || s.carrotSdiSpeedLimit > 0);
+            int signLimit = (s.carrotSdiSpeedLimit > 0) ? s.carrotSdiSpeedLimit : 80;
+            float signCx = sx0 + 44f; // 668
+            float signCy = sy1 + 76f; // 172
+            float signR = 40f;
+
+            // Top cap badge ("구간" / "단속" or "제한")
             drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x1 - 134f, y0 + 14f, x1 - 14f, y0 + 52f, 8f, 0xFF064E3B, 0xFF10B981, 1.5f);
+                    signCx - 30f, sy1 + 12f, signCx + 30f, sy1 + 38f, 8f, 0xFF131217, 0xFF2E2E34, 1.8f);
             setTextAlign.invoke(pText, alignCenter);
-            setTextSize.invoke(pText, 15f);
-            setColor.invoke(pText, Integer.valueOf(0xFF6EE7B7));
-            drawText.invoke(c, "CRUISE " + cruiseSpd, x1 - 74f, y0 + 38f, pText);
+            setTextSize.invoke(pText, 16f);
+            setColor.invoke(pText, Integer.valueOf(isCameraActive ? 0xFFFFFFFF : 0xFFBDBDC0));
+            drawText.invoke(c, isCameraActive ? "구간" : "제한", signCx, sy1 + 31f, pText);
 
-            String gear = (s.gearPos != null && !s.gearPos.isEmpty()) ? s.gearPos : "D";
+            if (isCameraActive) {
+                // RED Circular Speed Camera Sign (#FFFFFF fill, #E5566F ring, #111113 text)
+                setColor.invoke(pFill, Integer.valueOf(0xFFFFFFFF));
+                drawCircle.invoke(c, signCx, signCy, signR, pFill);
+                setColor.invoke(pStroke, Integer.valueOf(0xFFE5566F));
+                setStrokeW.invoke(pStroke, 8.5f);
+                drawCircle.invoke(c, signCx, signCy, signR - 4f, pStroke);
+                setTextSize.invoke(pText, 34f);
+                setColor.invoke(pText, Integer.valueOf(0xFF111113));
+                drawText.invoke(c, String.valueOf(signLimit), signCx, signCy + 12f, pText);
+            } else {
+                // BLUE Circular Normal Speed Limit Sign (#172554 fill, #4A8AD6 ring, #FFFFFF text)
+                setColor.invoke(pFill, Integer.valueOf(0xFF172554));
+                drawCircle.invoke(c, signCx, signCy, signR, pFill);
+                setColor.invoke(pStroke, Integer.valueOf(0xFF4A8AD6));
+                setStrokeW.invoke(pStroke, 7.5f);
+                drawCircle.invoke(c, signCx, signCy, signR - 4f, pStroke);
+                setTextSize.invoke(pText, 34f);
+                setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
+                drawText.invoke(c, String.valueOf(signLimit), signCx, signCy + 12f, pText);
+            }
+
+            // Bottom SDI distance pill overlapping bottom of circle
+            String sdiDistStr;
+            if (isCameraActive && s.carrotSdiDistM >= 1000) {
+                sdiDistStr = String.format(Locale.US, "%.1f km", s.carrotSdiDistM / 1000.0);
+            } else if (isCameraActive && s.carrotSdiDistM > 0) {
+                sdiDistStr = s.carrotSdiDistM + " m";
+            } else {
+                sdiDistStr = "단속 없음";
+            }
             drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x1 - 134f, y0 + 58f, x1 - 14f, y0 + 92f, 8f, 0xFF1E293B, 0xFF38BDF8, 1.2f);
-            setTextSize.invoke(pText, 15f);
-            setColor.invoke(pText, Integer.valueOf(0xFFF8FAFC));
-            drawText.invoke(c, "GEAR  " + gear, x1 - 74f, y0 + 80f, pText);
+                    signCx - 42f, signCy + 30f, signCx + 42f, signCy + 58f, 14f, 0xF2131217, 0xFF2E2E34, 1.8f);
+            setTextSize.invoke(pText, 17f);
+            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
+            drawText.invoke(c, sdiDistStr, signCx, signCy + 50f, pText);
+
+            // Right wing badge next to circle ("평균속도 80")
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    signCx + 48f, signCy - 28f, signCx + 144f, signCy + 28f, 12f, 0xEB131217, 0xFF222224, 1.8f);
+            setTextSize.invoke(pText, 14.5f);
+            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
+            drawText.invoke(c, "평균속도", signCx + 96f, signCy - 6f, pText);
+            setTextSize.invoke(pText, 26f);
+            setColor.invoke(pText, Integer.valueOf(0xFF44A282));
+            drawText.invoke(c, String.valueOf(signLimit), signCx + 96f, signCy + 21f, pText);
+
+            // =================================================================
+            // FLOATING TOP-RIGHT: tbt-compact-stamp
+            // =================================================================
+            float tx0 = x1 - 196f; // 994
+            float ty0 = y0 + 14f;  // 26
+            float tx1 = x1 - 16f;  // 1174
+            float ty1 = ty0 + 78f; // 104
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    tx0, ty0, tx1, ty1, 12f, 0xEB131217, 0xFF222224, 2.0f);
+            // Top 4px Steel-Blue accent bar (#4A8AD6)
+            setColor.invoke(pFill, Integer.valueOf(0xFF4A8AD6));
+            drawRect.invoke(c, tx0 + 8f, ty0, tx1 - 8f, ty0 + 4f, pFill);
+
+            // Turn arrow + distance
+            String tbtDistStr = (s.carrotTbtDistM > 0) ? (s.carrotTbtDistM + "m") : "280m";
+            setTextAlign.invoke(pText, alignLeft);
+            setTextSize.invoke(pText, 30f);
+            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
+            drawText.invoke(c, "↱ " + tbtDistStr, tx0 + 16f, ty0 + 42f, pText);
+
+            setTextSize.invoke(pText, 18f);
+            setColor.invoke(pText, Integer.valueOf(0xFFBDBDC0));
+            String roadShort = truncateText(s.carrotTbtRoad != null ? s.carrotTbtRoad : "판교JC", 10);
+            drawText.invoke(c, roadShort, tx0 + 16f, ty0 + 68f, pText);
+
+            // =================================================================
+            // FLOATING BOTTOM CORNER CHIPS (차선 98% | 앞차 34m · +2.4°)
+            // =================================================================
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    x0 + 16f, y1 - 46f, x0 + 146f, y1 - 12f, 8f, 0xD9131217, 0xFF222224, 1.5f);
+            setTextAlign.invoke(pText, alignCenter);
+            setTextSize.invoke(pText, 18f);
+            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
+            drawText.invoke(c, "차선 98%", x0 + 81f, y1 - 23f, pText);
+
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    x1 - 186f, y1 - 46f, x1 - 16f, y1 - 12f, 8f, 0xD9131217, 0xFF222224, 1.5f);
+            String leadChip = String.format(Locale.US, "앞차 %.0fm · %+.1f°",
+                    s.leadDistM > 0 ? s.leadDistM : 32f, curveShift * 0.12f);
+            drawText.invoke(c, leadChip, x1 - 101f, y1 - 23f, pText);
         }
 
         private static void drawColumn3MediaAndClimate(
@@ -1357,6 +1661,7 @@ public class TurzxMonitorMain {
                 Object pText,
                 Method setRf,
                 Method drawRoundRect,
+                Method drawRect,
                 Method drawCircle,
                 Method drawLine,
                 Method drawText,
@@ -1368,205 +1673,253 @@ public class TurzxMonitorMain {
                 Object alignLeft,
                 Object alignCenter,
                 Object alignRight,
+                Class<?> canvasCls,
+                Class<?> paintCls,
+                Class<?> rectFCls,
                 Class<?> pathCls,
                 TelemetrySnapshot s
         ) throws Exception {
-            float x0 = 1226f;
+            float x0 = 1202f;
             float x1 = 1908f;
 
             // =================================================================
-            // TOP 50% OF COLUMN 3 (1:1 Ratio): NOW PLAYING MEDIA (y = 42..244)
+            // TOP 50% OF COLUMN 3 (1:1 Ratio): NOW PLAYING MEDIA (y = 12..225)
             // =================================================================
-            float my0 = 42f;
-            float my1 = 244f;
+            float my0 = 12f;
+            float my1 = 225f;
             drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0, my0, x1, my1, 14f, 0xFF0D1524, 0xFF1E293B, 1.5f);
+                    x0, my0, x1, my1, 16f, 0xFF131217, 0xFF222224, 2.0f);
 
-            // Large Full-Height Album Art Box on Left (172x172 px, x = x0+16..x0+188, y = my0+15..my0+187)
+            // Large 176x176 Album Art Box on Left (x = 1222..1398, y = 30..206)
+            float artX0 = x0 + 20f;
+            float artY0 = my0 + 18f;
+            float artX1 = artX0 + 176f;
+            float artY1 = artY0 + 176f;
             drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0 + 16f, my0 + 15f, x0 + 188f, my0 + 187f, 14f, 0xFF1E293B, 0xFF38BDF8, 1.8f);
-            setTextAlign.invoke(pText, alignCenter);
-            setTextSize.invoke(pText, 48f);
-            setColor.invoke(pText, Integer.valueOf(0xFF38BDF8));
-            drawText.invoke(c, "♪", x0 + 102f, my0 + 116f, pText);
+                    artX0, artY0, artX1, artY1, 16f, 0xFF212023, 0xFF3A3A3E, 2.0f);
 
-            // Track Title & Artist/Album on Right (no media source badge)
-            float textX = x0 + 210f;
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 28f);
-            setColor.invoke(pText, Integer.valueOf(0xFFF8FAFC));
-            drawText.invoke(c, truncateText(s.mediaTitle, 22), textX, my0 + 56f, pText);
-
-            setTextSize.invoke(pText, 18f);
-            setColor.invoke(pText, Integer.valueOf(0xFF38BDF8));
-            drawText.invoke(c, truncateText(s.mediaArtist, 26), textX, my0 + 88f, pText);
-
-            setTextSize.invoke(pText, 14.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFF94A3B8));
-            drawText.invoke(c, truncateText(s.mediaAlbum, 30), textX, my0 + 114f, pText);
-
-            // Shortened Playback Progress Bar on Right (pbX0 = x0+210, pbX1 = x0+560)
-            float pbX0 = textX;
-            float pbX1 = x0 + 560f;
-            float pbY = my0 + 144f;
-            drawProgressBar(c, rf, pFill, setRf, drawRoundRect, setColor,
-                    pbX0, pbY, pbX1, pbY + 8f,
-                    s.mediaDurationSec > 0 ? (s.mediaPositionSec * 100) / s.mediaDurationSec : 65,
-                    0xFF38BDF8);
-
-            setTextSize.invoke(pText, 13f);
-            setColor.invoke(pText, Integer.valueOf(0xFF94A3B8));
-            drawText.invoke(c, formatSecMin(s.mediaPositionSec), pbX0, pbY + 28f, pText);
-            setTextAlign.invoke(pText, alignRight);
-            drawText.invoke(c, formatSecMin(s.mediaDurationSec), pbX1, pbY + 28f, pText);
-
-            // =================================================================
-            // BOTTOM 50% OF COLUMN 3 (1:1 Ratio): DATC CLIMATE (y = 252..454)
-            // =================================================================
-            float cy0 = 252f;
-            float cy1 = 454f;
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0, cy0, x1, cy1, 14f, 0xFF0D1524, 0xFF1E293B, 1.5f);
-
-            // Header row: CLIMATE CONTROL + AUTO / A/C / HEAT / RECIRC badges
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 13.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFF94A3B8));
-            drawText.invoke(c, "CLIMATE · 공조 모니터", x0 + 18f, cy0 + 24f, pText);
-
-            drawSmallPill(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawText, setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
-                    x0 + 182f, cy0 + 8f, 64f, 22f, "AUTO", s.hvacAuto, 0xFF10B981);
-            drawSmallPill(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawText, setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
-                    x0 + 252f, cy0 + 8f, 56f, 22f, "A/C", s.hvacAc, 0xFF38BDF8);
-            drawSmallPill(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawText, setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
-                    x0 + 314f, cy0 + 8f, 72f, 22f, s.hvacRecirc ? "내기순환" : "외기유입", true, 0xFF60A5FA);
-            drawSmallPill(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawText, setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
-                    x0 + 392f, cy0 + 8f, 64f, 22f, "SYNC", s.hvacSync, 0xFFA78BFA);
-
-            setTextAlign.invoke(pText, alignRight);
-            setTextSize.invoke(pText, 13f);
-            setColor.invoke(pText, Integer.valueOf(0xFFFBBF24));
-            drawText.invoke(c, String.format(Locale.US, "공조 %.2f kW", Math.max(0.0, s.climatePowerKw)), x1 - 18f, cy0 + 24f, pText);
-
-            // Driver Temp (Left, x = 1244..1375)
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 12.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFF94A3B8));
-            drawText.invoke(c, "운전석 설정", x0 + 20f, cy0 + 54f, pText);
-            setTextSize.invoke(pText, 38f);
-            setColor.invoke(pText, Integer.valueOf(0xFFF8FAFC));
-            String drStr = (s.hvacDrTempC > 0) ? String.format(Locale.US, "%.1f°", s.hvacDrTempC) : "22.0°";
-            drawText.invoke(c, drStr, x0 + 18f, cy0 + 94f, pText);
-
-            // Passenger Temp (Right, x = 1765..1890)
-            setTextAlign.invoke(pText, alignRight);
-            setTextSize.invoke(pText, 12.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFF94A3B8));
-            drawText.invoke(c, "동승석 설정", x1 - 20f, cy0 + 54f, pText);
-            setTextSize.invoke(pText, 38f);
-            setColor.invoke(pText, Integer.valueOf(0xFFF8FAFC));
-            String psStr = (s.hvacPsTempC > 0) ? String.format(Locale.US, "%.1f°", s.hvacPsTempC) : "22.5°";
-            drawText.invoke(c, psStr, x1 - 18f, cy0 + 94f, pText);
-
-            // -----------------------------------------------------------------
-            // CENTER OF CLIMATE CARD: LARGE 3-ARROW AIR DIRECTION + 7-STEP FAN BARS
-            // -----------------------------------------------------------------
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0 + 150f, cy0 + 38f, x1 - 150f, cy0 + 144f, 10f, 0xFF080E1A, 0xFF1E293B, 1.2f);
-
-            // Determine active air directions from s.hvacBlowerMode:
-            // 1=VENT(상체), 2=B/L(상·하체), 3=FLOOR(하체), 4=MIX(유리·하체), 5=DEF(유리)
-            int bm = s.hvacBlowerMode;
-            boolean dirUp = (bm == 5 || bm == 4 || bm == 7 || bm == 9 || bm == 10 || s.hvacFrontDefog);
-            boolean dirMid = (bm == 1 || bm == 2 || bm == 7 || bm == 9 || bm < 0);
-            boolean dirDown = (bm == 2 || bm == 3 || bm == 4 || bm == 8 || bm == 9 || bm < 0);
-
-            // Seated occupant silhouette on right side of air-direction box (cx = x0 + 258, cy = cy0 + 70)
-            float occX = x0 + 258f;
-            float occY = cy0 + 58f;
-            setColor.invoke(pFill, Integer.valueOf(0xFF64748B));
-            drawCircle.invoke(c, occX, occY, 8f, pFill); // Head
-            setColor.invoke(pStroke, Integer.valueOf(0xFF64748B));
-            setStrokeW.invoke(pStroke, 6f);
-            drawLine.invoke(c, occX, occY + 10f, occX - 6f, occY + 34f, pStroke); // Torso
-            drawLine.invoke(c, occX - 6f, occY + 34f, occX - 24f, occY + 38f, pStroke); // Thigh
-            drawLine.invoke(c, occX - 24f, occY + 38f, occX - 30f, occY + 56f, pStroke); // Lower leg
-
-            // 3 Large Directional Arrows on left side of occupant (x = x0 + 168 .. x0 + 235)
-            float arrX0 = x0 + 168f;
-            float arrX1 = x0 + 230f;
-            // 1) Defrost / Upper Arrow (Amber #FBBF24)
-            setStrokeW.invoke(pStroke, 4.5f);
-            setColor.invoke(pStroke, Integer.valueOf(dirUp ? 0xFFFBBF24 : 0xFF1E293B));
-            drawLine.invoke(c, arrX0, cy0 + 62f, arrX1 - 8f, cy0 + 48f, pStroke);
-            // 2) Face / Mid Arrow (Cyan #38BDF8)
-            setColor.invoke(pStroke, Integer.valueOf(dirMid ? 0xFF38BDF8 : 0xFF1E293B));
-            drawLine.invoke(c, arrX0, cy0 + 78f, arrX1, cy0 + 78f, pStroke);
-            // 3) Floor / Lower Arrow (Orange #FB923C)
-            setColor.invoke(pStroke, Integer.valueOf(dirDown ? 0xFFFB923C : 0xFF1E293B));
-            drawLine.invoke(c, arrX0, cy0 + 92f, arrX1 - 6f, cy0 + 110f, pStroke);
-
-            // Air Direction Mode Text Pill (bottom of left sub-pane)
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 13.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFF38BDF8));
-            drawText.invoke(c, "풍향: " + formatBlowerModeText(bm), x0 + 166f, cy0 + 134f, pText);
-
-            // 7-Step Ascending Fan Speed Bars on right half of center box (x = x0 + 310 .. x1 - 164)
-            int fanStep = (s.hvacBlowerStep >= 0) ? Math.min(7, s.hvacBlowerStep) : 3;
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 13.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFFE2E8F0));
-            drawText.invoke(c, "풍량 " + fanStep + "단", x0 + 312f, cy0 + 60f, pText);
-
-            float barBaseX = x0 + 312f;
-            float barBotY = cy0 + 132f;
-            for (int b = 1; b <= 7; b++) {
-                float bx = barBaseX + (b - 1) * 28f;
-                float bh = 14f + b * 6.5f;
-                int bColor = (b <= fanStep)
-                        ? (b >= 6 ? 0xFF34D399 : 0xFF38BDF8)
-                        : 0xFF1E293B;
-                setColor.invoke(pFill, Integer.valueOf(bColor));
-                setRf.invoke(rf, bx, barBotY - bh, bx + 20f, barBotY);
-                drawRoundRect.invoke(c, rf, 4f, 4f, pFill);
+            boolean drewBitmapArt = false;
+            if (s.albumArtBitmap != null) {
+                try {
+                    Class<?> bmpCls = Class.forName("android.graphics.Bitmap");
+                    Class<?> rectCls = Class.forName("android.graphics.Rect");
+                    if (bmpCls.isInstance(s.albumArtBitmap)) {
+                        int bw = ((Integer) bmpCls.getMethod("getWidth").invoke(s.albumArtBitmap)).intValue();
+                        int bh = ((Integer) bmpCls.getMethod("getHeight").invoke(s.albumArtBitmap)).intValue();
+                        if (bw > 0 && bh > 0) {
+                            setRf.invoke(rf, artX0 + 4f, artY0 + 4f, artX1 - 4f, artY1 - 4f);
+                            Method drawBmpRectF = canvasCls.getMethod("drawBitmap", bmpCls, rectCls, rectFCls, paintCls);
+                            drawBmpRectF.invoke(c, s.albumArtBitmap, null, rf, null);
+                            drewBitmapArt = true;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
             }
 
-            // -----------------------------------------------------------------
-            // BOTTOM STRIP OF CLIMATE CARD: INDOOR TEMP & OUTDOOR TEMP (y = cy0+152..cy1-8)
-            // -----------------------------------------------------------------
-            float envY0 = cy0 + 152f;
-            float envY1 = cy1 - 8f;
-            float midEnvX = (x0 + x1) * 0.5f;
+            if (!drewBitmapArt) {
+                // Exact 3-ring ccNC Vinyl Record + Steel-Blue center label from turzx_92_mockup.html
+                float vcx = (artX0 + artX1) * 0.5f;
+                float vcy = (artY0 + artY1) * 0.5f;
+                setColor.invoke(pStroke, Integer.valueOf(0xFF2E2E32));
+                setStrokeW.invoke(pStroke, 2.5f);
+                drawCircle.invoke(c, vcx, vcy, 64f, pStroke);
+                setColor.invoke(pStroke, Integer.valueOf(0xFF252529));
+                setStrokeW.invoke(pStroke, 2.0f);
+                drawCircle.invoke(c, vcx, vcy, 48f, pStroke);
+                setColor.invoke(pStroke, Integer.valueOf(0xFF2E2E32));
+                setStrokeW.invoke(pStroke, 2.0f);
+                drawCircle.invoke(c, vcx, vcy, 34f, pStroke);
 
-            // Left: Indoor Cabin Temp Card
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0 + 16f, envY0, midEnvX - 6f, envY1, 8f, 0xFF080E1A, 0xFF1E293B, 1f);
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 13f);
-            setColor.invoke(pText, Integer.valueOf(0xFF94A3B8));
-            drawText.invoke(c, "실내 온도 (INDOOR)", x0 + 30f, envY0 + 26f, pText);
-            setTextAlign.invoke(pText, alignRight);
-            setTextSize.invoke(pText, 20f);
-            setColor.invoke(pText, Integer.valueOf(0xFF34D399));
-            String inVal = (s.inCarTempC > -50.0) ? String.format(Locale.US, "%.1f°C", s.inCarTempC) : "22.5°C";
-            drawText.invoke(c, inVal, midEnvX - 20f, envY0 + 28f, pText);
+                setColor.invoke(pFill, Integer.valueOf(0xFF212023));
+                drawCircle.invoke(c, vcx, vcy, 16f, pFill);
+                setColor.invoke(pStroke, Integer.valueOf(0xFF4A8AD6));
+                setStrokeW.invoke(pStroke, 3.0f);
+                drawCircle.invoke(c, vcx, vcy, 16f, pStroke);
+                setColor.invoke(pFill, Integer.valueOf(0xFFFFFFFF));
+                drawCircle.invoke(c, vcx, vcy, 3.5f, pFill);
+            }
 
-            // Right: Outdoor Ambient Temp Card
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    midEnvX + 6f, envY0, x1 - 16f, envY1, 8f, 0xFF080E1A, 0xFF1E293B, 1f);
+            // Track Title & Artist · Album on Right (no media source badge)
+            float textX = artX1 + 28f; // 1426
             setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 13f);
-            setColor.invoke(pText, Integer.valueOf(0xFF94A3B8));
-            drawText.invoke(c, "실외 온도 (OUTDOOR)", midEnvX + 20f, envY0 + 26f, pText);
+            setTextSize.invoke(pText, 38f);
+            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
+            drawText.invoke(c, truncateText(s.mediaTitle, 18), textX, my0 + 70f, pText);
+
+            String subMedia = (s.mediaArtist != null && !s.mediaArtist.isEmpty()) ? s.mediaArtist : "";
+            if (s.mediaAlbum != null && !s.mediaAlbum.isEmpty() && !s.mediaAlbum.equals(s.mediaArtist)) {
+                subMedia = subMedia.isEmpty() ? s.mediaAlbum : (subMedia + " · " + s.mediaAlbum);
+            }
+            setTextSize.invoke(pText, 24f);
+            setColor.invoke(pText, Integer.valueOf(0xFFBDBDC0));
+            drawText.invoke(c, truncateText(subMedia, 26), textX, my0 + 110f, pText);
+
+            // Shortened Progress Bar on Right (390px wide: x = 1426..1816, rail #212023, fill #FFFFFF)
+            float pbX0 = textX;
+            float pbX1 = textX + 390f;
+            float pbY = my0 + 142f;
+            int mediaPct = (s.mediaDurationSec > 0)
+                    ? Math.min(100, (s.mediaPositionSec * 100) / s.mediaDurationSec)
+                    : (s.mediaPlaying ? 50 : 0);
+            drawProgressBar(c, rf, pFill, setRf, drawRoundRect, setColor,
+                    pbX0, pbY, pbX1, pbY + 8f, mediaPct, 0xFFFFFFFF);
+
+            setTextSize.invoke(pText, 19f);
+            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
+            setTextAlign.invoke(pText, alignLeft);
+            drawText.invoke(c, formatSecMin(s.mediaPositionSec), pbX0, pbY + 34f, pText);
             setTextAlign.invoke(pText, alignRight);
-            setTextSize.invoke(pText, 20f);
-            setColor.invoke(pText, Integer.valueOf(0xFF38BDF8));
-            String outVal = (s.outdoorTempC > -50.0) ? String.format(Locale.US, "%.1f°C", s.outdoorTempC) : "18.0°C";
-            drawText.invoke(c, outVal, x1 - 30f, envY0 + 28f, pText);
+            drawText.invoke(c, formatSecMin(s.mediaDurationSec), pbX1, pbY + 34f, pText);
+
+            // =================================================================
+            // BOTTOM 50% OF COLUMN 3 (1:1 Ratio): DATC CLIMATE (y = 237..450)
+            // =================================================================
+            float cy0 = 237f;
+            float cy1 = 450f;
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    x0, cy0, x1, cy1, 16f, 0xFF131217, 0xFF222224, 2.0f);
+
+            // Left: Driver Set Temp + Steel-Blue Underline + Indoor Cabin Temp
+            setTextAlign.invoke(pText, alignLeft);
+            setTextSize.invoke(pText, 46f);
+            setColor.invoke(pText, Integer.valueOf(s.hvacOn ? 0xFFFFFFFF : 0xFF8A8C92));
+            String drStr = !s.hvacOn ? "OFF" : formatHvacTempDisplay(s.hvacDrTempC);
+            drawText.invoke(c, drStr, x0 + 20f, cy0 + 64f, pText);
+
+            setColor.invoke(pFill, Integer.valueOf(s.hvacOn ? 0xFF4A8AD6 : 0xFF3A3A3E));
+            drawRect.invoke(c, x0 + 20f, cy0 + 76f, x0 + 134f, cy0 + 80f, pFill);
+
+            setTextSize.invoke(pText, 19f);
+            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
+            String inVal = (s.inCarTempC > -50.0) ? String.format(Locale.US, "실내 %.1f°", s.inCarTempC) : "실내 22.5°";
+            drawText.invoke(c, inVal, x0 + 20f, cy0 + 106f, pText);
+
+            // Right: Passenger Set Temp + Steel-Blue Underline + Outdoor Ambient Temp
+            setTextAlign.invoke(pText, alignRight);
+            setTextSize.invoke(pText, 46f);
+            setColor.invoke(pText, Integer.valueOf((s.hvacOn && !s.hvacDriverOnly) ? 0xFFFFFFFF : 0xFF8A8C92));
+            String psStr = !s.hvacOn ? "OFF" : (s.hvacDriverOnly ? "DRV" : formatHvacTempDisplay(s.hvacPsTempC));
+            drawText.invoke(c, psStr, x1 - 20f, cy0 + 64f, pText);
+
+            setColor.invoke(pFill, Integer.valueOf((s.hvacOn && !s.hvacDriverOnly) ? 0xFF4A8AD6 : 0xFF3A3A3E));
+            drawRect.invoke(c, x1 - 134f, cy0 + 76f, x1 - 20f, cy0 + 80f, pFill);
+
+            setTextSize.invoke(pText, 19f);
+            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
+            String outVal = (s.outdoorTempC > -50.0) ? String.format(Locale.US, "실외 %.1f°", s.outdoorTempC) : "실외 18.0°";
+            drawText.invoke(c, outVal, x1 - 20f, cy0 + 106f, pText);
+
+            // Center Raised Airflow & Fan HUD Box (x = 1362..1748, y = 251..345)
+            float boxX0 = x0 + 160f; // 1362
+            float boxY0 = cy0 + 14f; // 251
+            float boxX1 = x1 - 160f; // 1748
+            float boxY1 = cy0 + 108f;// 345
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    boxX0, boxY0, boxX1, boxY1, 12f, 0xFF212023, 0xFF222224, 2.0f);
+
+            // Vertical divider inside Airflow & Fan box
+            float midBoxX = boxX0 + 166f; // 1528
+            setColor.invoke(pStroke, Integer.valueOf(0xFF1B1A1F));
+            setStrokeW.invoke(pStroke, 2.0f);
+            drawLine.invoke(c, midBoxX, boxY0 + 12f, midBoxX, boxY1 - 12f, pStroke);
+
+            // Active air directions from s.hvacBlowerMode:
+            // 1=VENT(상체), 2=B/L(상·하체), 3=FLOOR(하체), 4=MIX(유리·하체), 5=DEF(유리)
+            int bm = s.hvacBlowerMode;
+            boolean dirUp = s.hvacOn && (bm == 5 || bm == 4 || bm == 7 || bm == 9 || bm == 10 || s.hvacFrontDefog);
+            boolean dirMid = s.hvacOn && (bm == 1 || bm == 2 || bm == 7 || bm == 9 || bm < 0);
+            boolean dirDown = s.hvacOn && (bm == 2 || bm == 3 || bm == 4 || bm == 8 || bm == 9 || bm < 0);
+
+            // Seated occupant silhouette on right of left sub-pane
+            float occX = boxX0 + 122f;
+            float occY = boxY0 + 24f;
+            setColor.invoke(pFill, Integer.valueOf(0xFFE2E4EC));
+            drawCircle.invoke(c, occX, occY, 8.5f, pFill); // Head
+            setColor.invoke(pStroke, Integer.valueOf(0xFFE2E4EC));
+            setStrokeW.invoke(pStroke, 7.0f);
+            drawLine.invoke(c, occX - 2f, occY + 12f, occX - 10f, occY + 38f, pStroke); // Torso
+            drawLine.invoke(c, occX - 10f, occY + 38f, occX - 30f, occY + 42f, pStroke); // Thigh
+            drawLine.invoke(c, occX - 30f, occY + 42f, occX - 38f, occY + 62f, pStroke); // Lower leg
+
+            // 3 Directional Arrows pointing at occupant
+            float arrX0 = boxX0 + 22f;
+            float arrX1 = boxX0 + 78f;
+            setStrokeW.invoke(pStroke, 4.5f);
+            // 1) Upper / Defrost arrow
+            setColor.invoke(pStroke, Integer.valueOf(dirUp ? 0xFFFFFFFF : 0xFF4A4B50));
+            drawLine.invoke(c, arrX0, boxY0 + 34f, arrX1 - 6f, boxY0 + 18f, pStroke);
+            // 2) Mid / Face arrow
+            setColor.invoke(pStroke, Integer.valueOf(dirMid ? 0xFFFFFFFF : 0xFF4A4B50));
+            drawLine.invoke(c, arrX0, boxY0 + 48f, arrX1, boxY0 + 48f, pStroke);
+            // 3) Lower / Floor arrow
+            setColor.invoke(pStroke, Integer.valueOf(dirDown ? 0xFF4A8AD6 : 0xFF4A4B50));
+            drawLine.invoke(c, arrX0, boxY0 + 62f, arrX1 - 6f, boxY0 + 78f, pStroke);
+
+            // Right half of center box: "풍량" + "3단" + 7 ascending bars
+            int fanStep = !s.hvacOn ? 0 : ((s.hvacBlowerStep >= 0) ? Math.min(7, s.hvacBlowerStep) : 3);
+            setTextAlign.invoke(pText, alignLeft);
+            setTextSize.invoke(pText, 19f);
+            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
+            drawText.invoke(c, "풍량", midBoxX + 18f, boxY0 + 32f, pText);
+
+            setTextAlign.invoke(pText, alignRight);
+            setTextSize.invoke(pText, 21f);
+            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
+            drawText.invoke(c, fanStep + "단", boxX1 - 18f, boxY0 + 32f, pText);
+
+            float barBaseX = midBoxX + 18f;
+            float barBotY = boxY1 - 12f;
+            for (int b = 1; b <= 7; b++) {
+                float bx = barBaseX + (b - 1) * 27f;
+                float bh = 10f + b * 4.2f;
+                int bColor = (b <= fanStep) ? 0xFFFFFFFF : 0xFF131217;
+                setColor.invoke(pFill, Integer.valueOf(bColor));
+                setRf.invoke(rf, bx, barBotY - bh, bx + 20f, barBotY);
+                drawRoundRect.invoke(c, rf, 3f, 3f, pFill);
+            }
+
+            // Horizontal divider above bottom 5-button HVAC dock
+            setColor.invoke(pStroke, Integer.valueOf(0xFF1B1A1F));
+            setStrokeW.invoke(pStroke, 2.0f);
+            drawLine.invoke(c, x0 + 20f, cy0 + 124f, x1 - 20f, cy0 + 124f, pStroke);
+
+            // Bottom 5-button HVAC dock (AUTO | A/C | HEAT | 내기순환 | SYNC)
+            float dockY0 = cy0 + 136f; // 373
+            float dockH = 60f;
+            float btnW = 125.2f;
+            float btnGap = 10f;
+            float bx = x0 + 20f;
+
+            drawHvacDockButton(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawText,
+                    setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
+                    bx, dockY0, btnW, dockH, "AUTO", s.hvacOn && s.hvacAuto, 0xFF4A8AD6, 0xFFFFFFFF);
+            bx += btnW + btnGap;
+            drawHvacDockButton(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawText,
+                    setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
+                    bx, dockY0, btnW, dockH, "A/C", s.hvacOn && s.hvacAc, 0xFF4A8AD6, 0xFFFFFFFF);
+            bx += btnW + btnGap;
+            drawHvacDockButton(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawText,
+                    setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
+                    bx, dockY0, btnW, dockH, "HEAT", s.hvacOn && s.hvacHeat, 0xFFD9A441, 0xFFD9A441);
+            bx += btnW + btnGap;
+            drawHvacDockButton(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawText,
+                    setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
+                    bx, dockY0, btnW, dockH, s.hvacRecirc ? "내기순환" : "외기유입", s.hvacRecirc, 0xFF4A8AD6, 0xFFFFFFFF);
+            bx += btnW + btnGap;
+            drawHvacDockButton(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawText,
+                    setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
+                    bx, dockY0, btnW, dockH, "SYNC", s.hvacOn && s.hvacSync, 0xFF4A8AD6, 0xFFFFFFFF);
         }
 
-        private static void drawEvMetricCard(
+        private static String formatHvacTempDisplay(double tempC) {
+            if (tempC <= 14.0 && tempC > 0.0) return "LO";
+            if (tempC >= 32.0) return "HI";
+            if (tempC > 14.0 && tempC < 32.0) return String.format(Locale.US, "%.1f°", tempC);
+            return "22.0°";
+        }
+
+        private static void drawHvacDockButton(
                 Object c,
                 Object rf,
                 Object pFill,
@@ -1574,48 +1927,35 @@ public class TurzxMonitorMain {
                 Object pText,
                 Method setRf,
                 Method drawRoundRect,
+                Method drawRect,
                 Method drawText,
                 Method setColor,
                 Method setStrokeW,
                 Method setTextSize,
                 Method setTextAlign,
-                Object alignLeft,
-                Object alignRight,
-                float x0,
-                float y0,
-                float x1,
-                float y1,
-                String title,
-                String badge,
-                String bigVal,
-                String subText,
-                int barPct,
-                int accentColor
+                Object alignCenter,
+                float x,
+                float y,
+                float w,
+                float h,
+                String label,
+                boolean active,
+                int accentColor,
+                int activeTextColor
         ) throws Exception {
+            int bg = active ? 0xFF212023 : 0xFF17171A;
+            int border = active ? 0xFF3A3A3E : 0xFF222224;
+            int fg = active ? activeTextColor : 0xFF8A8C92;
             drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0, y0, x1, y1, 12f, 0xFF0D1524, 0xFF1E293B, 1.5f);
-
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 13f);
-            setColor.invoke(pText, Integer.valueOf(0xFF94A3B8));
-            drawText.invoke(c, title, x0 + 16f, y0 + 26f, pText);
-
-            setTextAlign.invoke(pText, alignRight);
-            setTextSize.invoke(pText, 12f);
-            setColor.invoke(pText, Integer.valueOf(accentColor));
-            drawText.invoke(c, badge, x1 - 16f, y0 + 26f, pText);
-
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 34f);
-            setColor.invoke(pText, Integer.valueOf(0xFFF8FAFC));
-            drawText.invoke(c, bigVal, x0 + 16f, y0 + 72f, pText);
-
-            drawProgressBar(c, rf, pFill, setRf, drawRoundRect, setColor,
-                    x0 + 16f, y0 + 88f, x1 - 16f, y0 + 98f, barPct, accentColor);
-
-            setTextSize.invoke(pText, 12.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFFCBD5E1));
-            drawText.invoke(c, subText, x0 + 16f, y0 + 122f, pText);
+                    x, y, x + w, y + h, 10f, bg, border, 1.8f);
+            if (active) {
+                setColor.invoke(pFill, Integer.valueOf(accentColor));
+                drawRect.invoke(c, x + 8f, y, x + w - 8f, y + 4f, pFill);
+            }
+            setTextAlign.invoke(pText, alignCenter);
+            setTextSize.invoke(pText, 19.5f);
+            setColor.invoke(pText, Integer.valueOf(fg));
+            drawText.invoke(c, label, x + w * 0.5f, y + h * 0.5f + 7f, pText);
         }
 
         private static void drawCard(
@@ -1637,8 +1977,10 @@ public class TurzxMonitorMain {
                 float strokeW
         ) throws Exception {
             setRf.invoke(rf, x0, y0, x1, y1);
-            setColor.invoke(pFill, Integer.valueOf(fillColor));
-            drawRoundRect.invoke(c, rf, radius, radius, pFill);
+            if ((fillColor >>> 24) != 0) {
+                setColor.invoke(pFill, Integer.valueOf(fillColor));
+                drawRoundRect.invoke(c, rf, radius, radius, pFill);
+            }
             if (strokeW > 0f) {
                 setColor.invoke(pStroke, Integer.valueOf(strokeColor));
                 setStrokeW.invoke(pStroke, strokeW);
@@ -1662,7 +2004,7 @@ public class TurzxMonitorMain {
         ) throws Exception {
             float r = (y1 - y0) * 0.5f;
             setRf.invoke(rf, x0, y0, x1, y1);
-            setColor.invoke(pFill, Integer.valueOf(0xFF1E293B));
+            setColor.invoke(pFill, Integer.valueOf(0xFF212023));
             drawRoundRect.invoke(c, rf, r, r, pFill);
 
             int clamped = Math.max(0, Math.min(100, pct));
@@ -1672,38 +2014,6 @@ public class TurzxMonitorMain {
                 setColor.invoke(pFill, Integer.valueOf(fillColor));
                 drawRoundRect.invoke(c, rf, r, r, pFill);
             }
-        }
-
-        private static void drawSmallPill(
-                Object c,
-                Object rf,
-                Object pFill,
-                Object pStroke,
-                Object pText,
-                Method setRf,
-                Method drawRoundRect,
-                Method drawText,
-                Method setColor,
-                Method setStrokeW,
-                Method setTextSize,
-                Method setTextAlign,
-                Object alignCenter,
-                float x,
-                float y,
-                float w,
-                float h,
-                String label,
-                boolean active,
-                int activeColor
-        ) throws Exception {
-            int bg = active ? 0xFF112236 : 0xFF0B111C;
-            int fg = active ? activeColor : 0xFF475569;
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x, y, x + w, y + h, 6f, bg, fg, 1f);
-            setTextAlign.invoke(pText, alignCenter);
-            setTextSize.invoke(pText, 11.5f);
-            setColor.invoke(pText, Integer.valueOf(fg));
-            drawText.invoke(c, label, x + w * 0.5f, y + h - 6f, pText);
         }
 
         private static String truncateText(String s, int maxChars) {
@@ -1738,6 +2048,81 @@ public class TurzxMonitorMain {
         }
     }
 
+    public static final class DatcListenerBridge extends com.hkmc.datc.IDATCListener.Stub {
+        @Override
+        public void onDatcDiagState(int a, int b) {
+        }
+
+        @Override
+        public void onDatcStatus(com.hkmc.datc.DatcStatus status) {
+            TelemetryCollector.onDatcStatusCallback(status);
+        }
+
+        @Override
+        public void onError(int err) {
+        }
+
+        @Override
+        public void onIG3StatusChanged(boolean ig3) {
+        }
+
+        @Override
+        public void onNotifyError(int err) {
+        }
+
+        @Override
+        public void onTemperatureInformation(
+                float drC, int drStateC, float drF, int drStateF,
+                float psC, int psStateC, float psF, int psStateF,
+                float ambC, int ambStateC, float ambF, int ambStateF,
+                float rearC, int rearStateC, float rearF, int rearStateF
+        ) {
+            TelemetryCollector.onDatcTemperatureCallback(drC, drStateC, psC, psStateC, ambC, ambStateC);
+        }
+
+        @Override
+        public void onTunFuncOffADSStatus(int status) {
+        }
+    }
+
+    public static final class RemoteControlDisplayBridge extends android.media.IRemoteControlDisplay.Stub {
+        @Override
+        public void setCurrentClientId(int clientGeneration, android.app.PendingIntent clientMediaIntent, boolean clearing) {
+            if (clearing) {
+                TelemetryCollector.onRemoteControlCleared();
+            }
+        }
+
+        @Override
+        public void setEnabled(boolean enabled) {
+        }
+
+        @Override
+        public void setPlaybackState(int generationId, int state, long stateChangeTimeMs, long currentPosMs, float speed) {
+            TelemetryCollector.onRemoteControlPlaybackState(state, currentPosMs);
+        }
+
+        @Override
+        public void setTransportControlInfo(int generationId, int transportControlFlags, int posCapabilities) {
+        }
+
+        @Override
+        public void setMetadata(int generationId, android.os.Bundle metadata) {
+            TelemetryCollector.onRemoteControlMetadata(metadata);
+        }
+
+        @Override
+        public void setArtwork(int generationId, android.graphics.Bitmap artwork) {
+            TelemetryCollector.onRemoteControlArtwork(artwork);
+        }
+
+        @Override
+        public void setAllMetadata(int generationId, android.os.Bundle metadata, android.graphics.Bitmap artwork) {
+            TelemetryCollector.onRemoteControlMetadata(metadata);
+            TelemetryCollector.onRemoteControlArtwork(artwork);
+        }
+    }
+
     public static final class TelemetryCollector {
         private static final TelemetrySnapshot liveSnapshot = new TelemetrySnapshot();
 
@@ -1746,7 +2131,12 @@ public class TurzxMonitorMain {
         private static volatile Method reqHevStatusDataMethod = null;
         private static volatile Method reqFreqChangedSigMethod = null;
         private static volatile Method getCanDbGenMethod = null;
+        private static volatile Method getRealSchedInfoMethod = null;
         private static volatile int canDbGeneration = -1;
+
+        private static volatile Object navClusterObj = null;
+        private static volatile Method navClusterReqBattMethod = null;
+        private static volatile Field navClusterBattRespField = null;
 
         private static volatile Object tmHscanService = null;
         private static volatile Method tmDriveLinePwrMethod = null;
@@ -1757,6 +2147,15 @@ public class TurzxMonitorMain {
         private static volatile Object datcService = null;
         private static volatile Method datcGetClimateInfoMethod = null;
         private static volatile Method datcGetVrStatusMethod = null;
+        private static volatile boolean datcListenerRegistered = false;
+        private static volatile long lastDatcCallbackMs = 0L;
+
+        private static volatile boolean rcDisplayRegistered = false;
+        private static volatile Object rcDisplayBridgeObj = null;
+        private static volatile Object clusterService = null;
+        private static volatile Method clusterGetLastPlaytimeMethod = null;
+        private static volatile int lastClusterMediaMode = -1;
+        private static volatile long lastMediaPosUpdateMs = 0L;
 
         private static volatile Object pgsService = null;
         private static volatile Method pgsGetGearPMethod = null;
@@ -1785,6 +2184,100 @@ public class TurzxMonitorMain {
         public static TelemetrySnapshot getLatestSnapshot() {
             synchronized (liveSnapshot) {
                 return copySnapshotLocked();
+            }
+        }
+
+        public static void onDatcStatusCallback(Object statusObj) {
+            if (statusObj == null) return;
+            synchronized (liveSnapshot) {
+                if (applyDatcStatusObject(statusObj, liveSnapshot)) {
+                    lastDatcCallbackMs = System.currentTimeMillis();
+                }
+            }
+        }
+
+        public static void onDatcTemperatureCallback(
+                float drC, int drStateC,
+                float psC, int psStateC,
+                float ambC, int ambStateC
+        ) {
+            synchronized (liveSnapshot) {
+                double drResolved = resolveDatcTempWithState(drC, drStateC);
+                if (drResolved > 0.0) {
+                    liveSnapshot.hvacDrTempC = drResolved;
+                    liveSnapshot.hasClimateData = true;
+                }
+                double psResolved = resolveDatcTempWithState(psC, psStateC);
+                if (psResolved > 0.0) {
+                    liveSnapshot.hvacPsTempC = psResolved;
+                } else if (liveSnapshot.hvacSync && liveSnapshot.hvacDrTempC > 0.0) {
+                    liveSnapshot.hvacPsTempC = liveSnapshot.hvacDrTempC;
+                }
+                if (ambStateC != 0 && !Float.isNaN(ambC) && ambC >= -45.0f && ambC <= 65.0f && Math.abs(ambC - 85.0f) > 0.5f) {
+                    liveSnapshot.outdoorTempC = Math.round(ambC * 2.0) / 2.0;
+                }
+                lastDatcCallbackMs = System.currentTimeMillis();
+            }
+        }
+
+        public static void onRemoteControlCleared() {
+            synchronized (liveSnapshot) {
+                liveSnapshot.mediaPlaying = false;
+            }
+        }
+
+        public static void onRemoteControlPlaybackState(int state, long currentPosMs) {
+            synchronized (liveSnapshot) {
+                // MediaFocusControl / RemoteControlClient: PLAYSTATE_PLAYING = 3
+                liveSnapshot.mediaPlaying = (state == 3);
+                if (currentPosMs >= 0L && currentPosMs < 36000000L) {
+                    liveSnapshot.mediaPositionSec = (int) (currentPosMs / 1000L);
+                    lastMediaPosUpdateMs = System.currentTimeMillis();
+                }
+            }
+        }
+
+        public static void onRemoteControlMetadata(Object bundleObj) {
+            if (bundleObj == null) return;
+            try {
+                Class<?> bc = bundleObj.getClass();
+                Method getStr = bc.getMethod("getString", String.class);
+                Method getLong = bc.getMethod("getLong", String.class, long.class);
+                // MediaMetadataRetriever keys used by RemoteControlClient.MetadataEditor:
+                // 7 = METADATA_KEY_TITLE, 2 = METADATA_KEY_ARTIST, 13 = METADATA_KEY_ALBUMARTIST,
+                // 1 = METADATA_KEY_ALBUM, 9 = METADATA_KEY_DURATION
+                String title = (String) getStr.invoke(bundleObj, "7");
+                String artist = (String) getStr.invoke(bundleObj, "2");
+                if (artist == null || artist.trim().isEmpty()) {
+                    artist = (String) getStr.invoke(bundleObj, "13");
+                }
+                String album = (String) getStr.invoke(bundleObj, "1");
+                long durMs = ((Long) getLong.invoke(bundleObj, "9", Long.valueOf(-1L))).longValue();
+
+                synchronized (liveSnapshot) {
+                    if (title != null && !title.trim().isEmpty()) {
+                        liveSnapshot.mediaTitle = title.trim();
+                        liveSnapshot.mediaPlaying = true;
+                    }
+                    if (artist != null && !artist.trim().isEmpty()) {
+                        liveSnapshot.mediaArtist = artist.trim();
+                    }
+                    if (album != null) {
+                        liveSnapshot.mediaAlbum = album.trim();
+                    }
+                    if (durMs > 0L && durMs < 36000000L) {
+                        liveSnapshot.mediaDurationSec = (int) (durMs / 1000L);
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        public static void onRemoteControlArtwork(Object bitmapObj) {
+            synchronized (liveSnapshot) {
+                if (bitmapObj != null) {
+                    liveSnapshot.albumArtBitmap = bitmapObj;
+                }
             }
         }
 
@@ -1874,7 +2367,30 @@ public class TurzxMonitorMain {
                                     canDbGeneration = ((Integer) getCanDbGenMethod.invoke(hevService)).intValue();
                                 } catch (Throwable ignored) {
                                 }
+                                try {
+                                    getRealSchedInfoMethod = sc.getMethod("getRealSchedInfo");
+                                } catch (Throwable ignored) {
+                                }
                             }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                if (navClusterObj == null && sysContext != null) {
+                    try {
+                        Class<?> ctxCls = Class.forName("android.content.Context");
+                        Class<?> navCls = Class.forName("com.hkmc.cluster.NavigationCluster");
+                        navClusterObj = navCls.getConstructor(ctxCls).newInstance(sysContext);
+                        try {
+                            navClusterReqBattMethod = navCls.getMethod("requestBatteryInfoReq");
+                        } catch (Throwable ignored) {
+                        }
+                        try {
+                            Field f = navCls.getDeclaredField("mBatteryInfoResp");
+                            f.setAccessible(true);
+                            navClusterBattRespField = f;
+                        } catch (Throwable ignored) {
                         }
                     } catch (Throwable ignored) {
                     }
@@ -1941,6 +2457,69 @@ public class TurzxMonitorMain {
                                 Class<?> sc = datcService.getClass();
                                 try { datcGetClimateInfoMethod = sc.getMethod("getClimateInfo", int.class); } catch (Throwable ignored) {}
                                 try { datcGetVrStatusMethod = sc.getMethod("getVRClimateStatus", int.class); } catch (Throwable ignored) {}
+                                if (!datcListenerRegistered) {
+                                    try {
+                                        Class<?> datcIfc = Class.forName("com.hkmc.datc.IDATCListener");
+                                        Object listener = new DatcListenerBridge();
+                                        Object binderObj = Class.forName("android.os.Binder").getConstructor().newInstance();
+                                        try {
+                                            sc.getMethod("registerDATCListener", datcIfc, iBinderCls)
+                                                    .invoke(datcService, listener, binderObj);
+                                        } catch (NoSuchMethodException nsme) {
+                                            sc.getMethod("registerDATCListener", datcIfc)
+                                                    .invoke(datcService, listener);
+                                        }
+                                        datcListenerRegistered = true;
+                                        DebugManager.logEvent("DATC", "Registered IDATCListener on com.hkmc.micom.datc");
+                                    } catch (Throwable ignored) {
+                                    }
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                if (!rcDisplayRegistered) {
+                    try {
+                        Object b = getSvc.invoke(null, "audio");
+                        if (b != null) {
+                            Class<?> stubCls = Class.forName("android.media.IAudioService$Stub");
+                            Object audioSvc = stubCls.getMethod("asInterface", iBinderCls).invoke(null, b);
+                            if (audioSvc != null) {
+                                Class<?> rcdIfc = Class.forName("android.media.IRemoteControlDisplay");
+                                Object bridge = new RemoteControlDisplayBridge();
+                                rcDisplayBridgeObj = bridge;
+                                Class<?> asc = audioSvc.getClass();
+                                try {
+                                    Method regM = asc.getMethod("registerRemoteControlDisplay", rcdIfc, int.class, int.class);
+                                    regM.invoke(audioSvc, bridge, Integer.valueOf(280), Integer.valueOf(280));
+                                    rcDisplayRegistered = true;
+                                } catch (NoSuchMethodException nsme) {
+                                    Method regM = asc.getMethod("registerRemoteControlDisplay", rcdIfc);
+                                    regM.invoke(audioSvc, bridge);
+                                    rcDisplayRegistered = true;
+                                }
+                                if (rcDisplayRegistered) {
+                                    DebugManager.logEvent("MEDIA", "Registered IRemoteControlDisplay (280x280) with AudioService");
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                if (clusterService == null) {
+                    try {
+                        Object b = getSvc.invoke(null, "com.hkmc.micom.cluster");
+                        if (b != null) {
+                            Class<?> stubCls = Class.forName("com.hkmc.cluster.IClusterService$Stub");
+                            clusterService = stubCls.getMethod("asInterface", iBinderCls).invoke(null, b);
+                            if (clusterService != null) {
+                                try {
+                                    clusterGetLastPlaytimeMethod = clusterService.getClass().getMethod("getLastPlaytime", int.class);
+                                } catch (Throwable ignored) {
+                                }
                             }
                         }
                     } catch (Throwable ignored) {
@@ -2043,7 +2622,46 @@ public class TurzxMonitorMain {
 
                 int dte = queryHevFlag(HEV_FLAG_ELECTRIC_DTE);
                 if (!isValidDteValue(dte)) dte = queryHevFlag(HEV_FLAG_TOTAL_DTE);
+                if (!isValidDteValue(dte) && getRealSchedInfoMethod != null) {
+                    try {
+                        int[] sched = (int[]) getRealSchedInfoMethod.invoke(hevService);
+                        int schedDte = extractDteFromRealSchedInfo(sched);
+                        if (isValidDteValue(schedDte)) {
+                            dte = schedDte;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
                 if (isValidDteValue(dte)) liveSnapshot.dteKm = dte;
+
+                // Fallback / supplement from NavigationCluster (mBatteryInfoResp[3] = DTE, [0] = SoC, [2] = BattMinTemp, [8] = EnergyWh)
+                if (navClusterObj != null) {
+                    try {
+                        if (navClusterReqBattMethod != null && (pollTick % 6 == 1)) {
+                            navClusterReqBattMethod.invoke(navClusterObj);
+                        }
+                        if (navClusterBattRespField != null) {
+                            int[] battResp = (int[]) navClusterBattRespField.get(navClusterObj);
+                            if (battResp != null && battResp.length >= 4) {
+                                if (!isValidDteValue(liveSnapshot.dteKm) && isValidDteValue(battResp[3])) {
+                                    liveSnapshot.dteKm = battResp[3];
+                                }
+                                if (liveSnapshot.displaySocPct < 0.0 && battResp[0] > 0 && battResp[0] <= 200) {
+                                    liveSnapshot.displaySocPct = battResp[0] * 0.5;
+                                }
+                                if (liveSnapshot.battMinTempC == null && battResp[2] > 0 && battResp[2] < 250) {
+                                    liveSnapshot.battMinTempC = Integer.valueOf((int) Math.round(battResp[2] * 0.5 - 40.0));
+                                }
+                                if (battResp.length >= 9 && liveSnapshot.remainEnergyKwh <= 0.0
+                                        && battResp[8] > 500 && battResp[8] < 200000
+                                        && battResp[8] != 65534 && battResp[8] != 65535) {
+                                    liveSnapshot.remainEnergyKwh = battResp[8] / 1000.0;
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
 
                 int dteDeltaRaw = queryHevFlag(HEV_FLAG_ADDED_DIST_DATC_OFF);
                 if (dteDeltaRaw != -1) {
@@ -2081,6 +2699,9 @@ public class TurzxMonitorMain {
                     if (compKw >= 0.0 || ptcKw >= 0.0) {
                         liveSnapshot.climatePowerKw = Math.max(0.0, compKw) + Math.max(0.0, ptcKw);
                         liveSnapshot.hasSubPower = true;
+                        if (ptcKw > 0.15 && (System.currentTimeMillis() - lastDatcCallbackMs > 5000L)) {
+                            liveSnapshot.hvacHeat = true;
+                        }
                     }
                 }
 
@@ -2125,42 +2746,58 @@ public class TurzxMonitorMain {
                         liveSnapshot.climatePowerKw = tmClmKw;
                         liveSnapshot.hasSubPower = true;
                     }
+                    if (htrKw > 0.15 && (System.currentTimeMillis() - lastDatcCallbackMs > 5000L)) {
+                        liveSnapshot.hvacHeat = true;
+                    }
                 }
             } catch (Throwable ignored) {
             }
+        }
+
+        private static float queryDatcVrOrInfo(Object svc, Method getVr, Method getInfo, int flag) {
+            if (getVr != null) {
+                try {
+                    float v = ((Float) getVr.invoke(svc, Integer.valueOf(flag))).floatValue();
+                    if (!Float.isNaN(v) && v != -1.0f) return v;
+                } catch (Throwable ignored) {
+                }
+            }
+            if (getInfo != null) {
+                try {
+                    int iv = ((Integer) getInfo.invoke(svc, Integer.valueOf(flag))).intValue();
+                    if (iv != -1) return (float) iv;
+                } catch (Throwable ignored) {
+                }
+            }
+            return -1.0f;
         }
 
         private static void pollDatcServiceLocked() {
             Object svc = datcService;
             Method getInfo = datcGetClimateInfoMethod;
             Method getVr = datcGetVrStatusMethod;
-            if (svc != null && getInfo != null) {
-                try {
-                    int opState = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_OP_STATE))).intValue();
-                    int blowerRaw = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_BLOWER_LEVEL))).intValue();
-                    int modeRaw = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_BLOWER_MODE))).intValue();
-                    int autoRaw = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_AUTO))).intValue();
-                    int acRaw = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_AC))).intValue();
-                    int defogRaw = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_FRONT_DEFOG))).intValue();
-                    int intakeRaw = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_INTAKE))).intValue();
-                    int syncRaw = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_SYNC))).intValue();
-                    int adsRaw = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_ADS_ON_OFF))).intValue();
-                    int drvOnlyRaw = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_DRIVER_ONLY))).intValue();
-                    int drRaw = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_TEMP_DR_C))).intValue();
-                    int psRaw = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_TEMP_PS_C))).intValue();
-                    int outRaw = ((Integer) getInfo.invoke(svc, Integer.valueOf(DATC_FLAG_TEMP_OUTSIDE_C))).intValue();
+            boolean callbackFresh = (System.currentTimeMillis() - lastDatcCallbackMs) < 4000L;
 
-                    float vrDr = Float.NaN;
-                    float vrPs = Float.NaN;
-                    float vrOut = Float.NaN;
-                    if (getVr != null) {
-                        try {
-                            vrDr = ((Float) getVr.invoke(svc, Integer.valueOf(DATC_FLAG_TEMP_DR_C))).floatValue();
-                            vrPs = ((Float) getVr.invoke(svc, Integer.valueOf(DATC_FLAG_TEMP_PS_C))).floatValue();
-                            vrOut = ((Float) getVr.invoke(svc, Integer.valueOf(DATC_FLAG_TEMP_OUTSIDE_C))).floatValue();
-                        } catch (Throwable ignored) {
-                        }
+            if (svc != null && !callbackFresh && (getVr != null || getInfo != null)) {
+                try {
+                    int opState = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_OP_STATE));
+                    int blowerRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_BLOWER_LEVEL));
+                    int modeRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_BLOWER_MODE));
+                    int autoRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_AUTO));
+                    int acRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_AC));
+                    int defogRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_FRONT_DEFOG));
+                    int intakeRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_INTAKE));
+                    int syncRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_SYNC));
+                    int adsRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_ADS_ON_OFF));
+                    int drvOnlyRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_DRIVER_ONLY));
+
+                    // In DATCService.getVRClimateStatus, flag 2 (DATCFlag.TEMP) is Driver Temp and flag 29 (DATCFlag.TEMP_PS_C) is Passenger Temp
+                    float vrDr = queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_TEMP_DR_C);
+                    if (vrDr <= 0.0f) {
+                        vrDr = queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_TEMP_DR_C_LEGACY);
                     }
+                    float vrPs = queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_TEMP_PS_C);
+                    float vrOut = queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_TEMP_OUTSIDE_C);
 
                     int step = normalizeDatcBlowerStep(blowerRaw);
                     if (step >= 0) {
@@ -2171,32 +2808,34 @@ public class TurzxMonitorMain {
                         liveSnapshot.hvacBlowerMode = modeRaw;
                         liveSnapshot.hasClimateData = true;
                     }
-                    liveSnapshot.hvacOn = (opState == 1) || (step > 0);
-                    liveSnapshot.hvacAuto = (autoRaw == 1);
-                    liveSnapshot.hvacAc = (acRaw == 1);
-                    liveSnapshot.hvacFrontDefog = (defogRaw == 1);
-                    liveSnapshot.hvacRecirc = (intakeRaw == 1);
-                    liveSnapshot.hvacSync = (syncRaw == 1);
-                    liveSnapshot.hvacAds = (adsRaw == 1);
-                    liveSnapshot.hvacDriverOnly = (drvOnlyRaw == 1);
+                    if (opState == 0 || opState == 1) {
+                        liveSnapshot.hvacOn = (opState == 1) || (step > 0);
+                    }
+                    if (autoRaw == 0 || autoRaw == 1) liveSnapshot.hvacAuto = (autoRaw == 1);
+                    if (acRaw == 0 || acRaw == 1) liveSnapshot.hvacAc = (acRaw == 1);
+                    if (defogRaw == 0 || defogRaw == 1) liveSnapshot.hvacFrontDefog = (defogRaw == 1);
+                    if (intakeRaw == 0 || intakeRaw == 1) liveSnapshot.hvacRecirc = (intakeRaw == 1);
+                    if (syncRaw == 0 || syncRaw == 1) liveSnapshot.hvacSync = (syncRaw == 1);
+                    if (adsRaw == 0 || adsRaw == 1) liveSnapshot.hvacAds = (adsRaw == 1);
+                    if (drvOnlyRaw == 0 || drvOnlyRaw == 1) liveSnapshot.hvacDriverOnly = (drvOnlyRaw == 1);
 
-                    double drC = convertDatcRawTempToCelsius(drRaw, vrDr);
+                    double drC = convertDatcRawTempToCelsius(Math.round(vrDr), vrDr);
                     if (drC > 0.0) {
                         liveSnapshot.hvacDrTempC = drC;
                         liveSnapshot.hasClimateData = true;
                     }
-                    double psC = convertDatcRawTempToCelsius(psRaw, vrPs);
+                    double psC = convertDatcRawTempToCelsius(Math.round(vrPs), vrPs);
                     if (psC > 0.0) {
                         liveSnapshot.hvacPsTempC = psC;
+                    } else if (liveSnapshot.hvacSync && liveSnapshot.hvacDrTempC > 0.0) {
+                        liveSnapshot.hvacPsTempC = liveSnapshot.hvacDrTempC;
                     }
-                    if (!Float.isNaN(vrOut) && vrOut >= -45.0f && vrOut <= 65.0f && Math.abs(vrOut - 85.0f) > 0.5f) {
+                    if (!Float.isNaN(vrOut) && vrOut >= -45.0f && vrOut <= 65.0f && Math.abs(vrOut - 85.0f) > 0.5f && vrOut != -1.0f) {
                         liveSnapshot.outdoorTempC = Math.round(vrOut * 2.0) / 2.0;
-                    } else if (outRaw > 0 && outRaw < 250) {
-                        double outC = parseCanTempByteToCelsius(outRaw);
-                        if (outC > -50.0) liveSnapshot.outdoorTempC = outC;
                     }
                 } catch (Throwable t) {
                     datcService = null;
+                    datcListenerRegistered = false;
                 }
             }
 
@@ -2258,6 +2897,30 @@ public class TurzxMonitorMain {
                     if (parts.length >= 4 && !parts[3].trim().isEmpty()) liveSnapshot.mediaAlbum = parts[3].trim();
                 }
             }
+
+            // Query ClusterService.getLastPlaytime(mode) if available
+            if (clusterService != null && clusterGetLastPlaytimeMethod != null && lastClusterMediaMode >= 0) {
+                try {
+                    int playSec = ((Integer) clusterGetLastPlaytimeMethod.invoke(clusterService, Integer.valueOf(lastClusterMediaMode))).intValue();
+                    if (playSec >= 0 && playSec < 36000) {
+                        liveSnapshot.mediaPositionSec = playSec;
+                        lastMediaPosUpdateMs = System.currentTimeMillis();
+                    }
+                } catch (Throwable ignored) {
+                }
+            } else if (liveSnapshot.mediaPlaying && lastMediaPosUpdateMs > 0L) {
+                long now = System.currentTimeMillis();
+                if (now - lastMediaPosUpdateMs >= 1000L) {
+                    int deltaSec = (int) ((now - lastMediaPosUpdateMs) / 1000L);
+                    lastMediaPosUpdateMs += deltaSec * 1000L;
+                    int nextPos = liveSnapshot.mediaPositionSec + deltaSec;
+                    if (liveSnapshot.mediaDurationSec > 0) {
+                        liveSnapshot.mediaPositionSec = Math.min(liveSnapshot.mediaDurationSec, nextPos);
+                    } else {
+                        liveSnapshot.mediaPositionSec = nextPos;
+                    }
+                }
+            }
         }
 
         private static void startBackgroundThreadsIfNeeded() {
@@ -2316,12 +2979,20 @@ public class TurzxMonitorMain {
                 BufferedReader br = null;
                 try {
                     proc = Runtime.getRuntime().exec(new String[]{
-                            "/system/bin/logcat", "-b", "main", "-b", "system", "-v", "raw", "-s", "TM_HSCANPacketRunner:I"
+                            "/system/bin/logcat", "-b", "main", "-b", "system", "-v", "brief",
+                            "TM_HSCANPacketRunner:I", "ClusterService:I", "*:S"
                     });
                     br = new BufferedReader(new InputStreamReader(proc.getInputStream(), UTF8), 4096);
                     String line;
                     while ((line = br.readLine()) != null) {
-                        if (System.currentTimeMillis() - lastNativeBinderHscanRxMs > 2500L) {
+                        if (line.contains("ClusterService")) {
+                            synchronized (liveSnapshot) {
+                                int mode = parseClusterMediaLogLine(line, liveSnapshot);
+                                if (mode >= 0) {
+                                    lastClusterMediaMode = mode;
+                                }
+                            }
+                        } else if (System.currentTimeMillis() - lastNativeBinderHscanRxMs > 2500L) {
                             parseTmHscanLogLine(line, null);
                         }
                     }
@@ -2578,6 +3249,7 @@ public class TurzxMonitorMain {
             c.hvacOn = liveSnapshot.hvacOn;
             c.hvacAuto = liveSnapshot.hvacAuto;
             c.hvacAc = liveSnapshot.hvacAc;
+            c.hvacHeat = liveSnapshot.hvacHeat;
             c.hvacSync = liveSnapshot.hvacSync;
             c.hvacDriverOnly = liveSnapshot.hvacDriverOnly;
             c.hvacFrontDefog = liveSnapshot.hvacFrontDefog;
@@ -2616,6 +3288,7 @@ public class TurzxMonitorMain {
             c.mediaPlaying = liveSnapshot.mediaPlaying;
             c.mediaPositionSec = liveSnapshot.mediaPositionSec;
             c.mediaDurationSec = liveSnapshot.mediaDurationSec;
+            c.albumArtBitmap = liveSnapshot.albumArtBitmap;
             return c;
         }
     }
@@ -4215,6 +4888,7 @@ public class TurzxMonitorMain {
         sb.append(",\"on\":").append(ev.hvacOn);
         sb.append(",\"auto\":").append(ev.hvacAuto);
         sb.append(",\"ac\":").append(ev.hvacAc);
+        sb.append(",\"heat\":").append(ev.hvacHeat);
         sb.append(",\"sync\":").append(ev.hvacSync);
         sb.append(",\"driverOnly\":").append(ev.hvacDriverOnly);
         sb.append(",\"frontDefog\":").append(ev.hvacFrontDefog);
@@ -4269,7 +4943,215 @@ public class TurzxMonitorMain {
         return dte > 0 && dte < 1500
                 && dte != 254 && dte != 255
                 && dte != 510 && dte != 511
-                && dte != 1022 && dte != 1023;
+                && dte != 1022 && dte != 1023
+                && dte != 65534 && dte != 65535;
+    }
+
+    public static int extractDteFromRealSchedInfo(int[] sched) {
+        if (sched == null || sched.length < 7) return -1;
+        if (isValidDteValue(sched[6])) return sched[6];
+        if (sched.length >= 8 && isValidDteValue(sched[7])) return sched[7];
+        return -1;
+    }
+
+    public static double resolveDatcTempWithState(float tempC, int stateC) {
+        // DatcStatus temperature state: 1 = TEMP_LOW ("LO"), 2 = TEMP_HIGH ("HI"), 3 = TEMP_NORMAL
+        if (stateC == 1) return 14.0;
+        if (stateC == 2) return 32.0;
+        if (!Float.isNaN(tempC) && tempC >= 13.5f && tempC <= 32.5f) {
+            return Math.round(tempC * 2.0) / 2.0;
+        }
+        return -99.0;
+    }
+
+    public static boolean applyDatcStatusObject(Object statusObj, TelemetrySnapshot target) {
+        if (statusObj == null || target == null) return false;
+        try {
+            Class<?> sc = statusObj.getClass();
+            int op = ((Integer) sc.getMethod("getOperationStatus").invoke(statusObj)).intValue();
+            int rawLevel = ((Integer) sc.getMethod("getMainBlowerLevel").invoke(statusObj)).intValue();
+            int autoStep = 0;
+            try { autoStep = ((Integer) sc.getMethod("getAutoStep").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
+            int mode = ((Integer) sc.getMethod("getModeDrive").invoke(statusObj)).intValue();
+            int auto = ((Integer) sc.getMethod("getAuto").invoke(statusObj)).intValue();
+            int ac = ((Integer) sc.getMethod("getAirconOnOff").invoke(statusObj)).intValue();
+            int heat = 0;
+            try { heat = ((Integer) sc.getMethod("getHeatOnOff").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
+            int defog = ((Integer) sc.getMethod("getFrontDefog").invoke(statusObj)).intValue();
+            int intake = ((Integer) sc.getMethod("getIntake").invoke(statusObj)).intValue();
+            int sync = ((Integer) sc.getMethod("getSyncDisp").invoke(statusObj)).intValue();
+            int dual = 0;
+            try { dual = ((Integer) sc.getMethod("getDual").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
+            int drvOnly = 0;
+            try { drvOnly = ((Integer) sc.getMethod("getDriverOnly").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
+            int ads = 0;
+            try { ads = ((Integer) sc.getMethod("getADSOnOffStatus").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
+
+            float drC = ((Float) sc.getMethod("getDrTempC").invoke(statusObj)).floatValue();
+            int drStateC = 3;
+            try { drStateC = ((Integer) sc.getMethod("getDrTempStateC").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
+            float psC = ((Float) sc.getMethod("getPsTempC").invoke(statusObj)).floatValue();
+            int psStateC = 3;
+            try { psStateC = ((Integer) sc.getMethod("getPsTempStateC").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
+            float ambC = Float.NaN;
+            int ambStateC = 0;
+            try {
+                ambC = ((Float) sc.getMethod("getAmbientTempC").invoke(statusObj)).floatValue();
+                ambStateC = ((Integer) sc.getMethod("getAmbientTempStateC").invoke(statusObj)).intValue();
+            } catch (Throwable ignored) {
+            }
+
+            int step = normalizeDatcBlowerStep(rawLevel);
+            if (step < 0 && autoStep >= 1 && autoStep <= 3) {
+                step = autoStep * 2;
+            }
+            if (step >= 0) {
+                target.hvacBlowerStep = step;
+            }
+            if (mode >= 0 && mode <= 10) {
+                target.hvacBlowerMode = mode;
+            }
+            target.hvacOn = (op == 1) || (step > 0);
+            target.hvacAuto = (auto == 1);
+            target.hvacAc = (ac == 1);
+            target.hvacHeat = (heat == 1);
+            target.hvacFrontDefog = (defog == 1);
+            target.hvacRecirc = (intake == 1);
+            target.hvacSync = (sync == 1) || (dual == 1);
+            target.hvacDriverOnly = (drvOnly == 1);
+            target.hvacAds = (ads == 1);
+
+            double drResolved = resolveDatcTempWithState(drC, drStateC);
+            if (drResolved > 0.0) {
+                target.hvacDrTempC = drResolved;
+            }
+            double psResolved = resolveDatcTempWithState(psC, psStateC);
+            if (psResolved > 0.0) {
+                target.hvacPsTempC = psResolved;
+            } else if (target.hvacSync && target.hvacDrTempC > 0.0) {
+                target.hvacPsTempC = target.hvacDrTempC;
+            }
+            if (ambStateC != 0 && !Float.isNaN(ambC) && ambC >= -45.0f && ambC <= 65.0f && Math.abs(ambC - 85.0f) > 0.5f) {
+                target.outdoorTempC = Math.round(ambC * 2.0) / 2.0;
+            }
+            target.hasClimateData = true;
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static int parseClusterMediaLogLine(String line, TelemetrySnapshot target) {
+        if (line == null || target == null || !line.contains("ClusterService")) return -1;
+        try {
+            if (line.contains("updateClusterWithArtistInfo") || line.contains("updateClusterInfoWithArtistForMusicStreaming")) {
+                int mode = extractClusterKeyInt(line, "mode =", -1);
+                String title = extractClusterKeyBetween(line, "title =", ", artist =");
+                String artist = extractClusterKeyTail(line, "artist =");
+                if (title != null && !title.isEmpty()) {
+                    target.mediaTitle = title;
+                    target.mediaPlaying = true;
+                }
+                if (artist != null && !artist.isEmpty()) {
+                    target.mediaArtist = artist;
+                }
+                if (mode >= 0) {
+                    target.mediaSource = mapClusterModeToSourceName(mode);
+                }
+                return mode;
+            } else if (line.contains("updateClusterWithFolderInfo")) {
+                int mode = extractClusterKeyInt(line, "mode =", -1);
+                String folder = extractClusterKeyBetween(line, "folder =", ", file =");
+                String file = extractClusterKeyTail(line, "file =");
+                if (file != null && !file.isEmpty()) {
+                    target.mediaTitle = file;
+                    target.mediaPlaying = true;
+                }
+                if (folder != null && !folder.isEmpty()) {
+                    target.mediaArtist = folder;
+                }
+                if (mode >= 0) {
+                    target.mediaSource = mapClusterModeToSourceName(mode);
+                }
+                return mode;
+            } else if (line.contains("updateClusterInfo") && line.contains("info1 =")) {
+                int mode = extractClusterKeyInt(line, "mode =", -1);
+                String info1 = extractClusterKeyBetween(line, "info1 =", ", info2 =");
+                String info2 = extractClusterKeyTail(line, "info2 =");
+                if (info1 != null && !info1.isEmpty()) {
+                    target.mediaTitle = info1;
+                    target.mediaPlaying = true;
+                }
+                if (info2 != null && !info2.isEmpty()) {
+                    target.mediaArtist = info2;
+                }
+                if (mode >= 0) {
+                    target.mediaSource = mapClusterModeToSourceName(mode);
+                }
+                return mode;
+            } else if (line.contains("updateClusterRadioInfo") && line.contains("freq =")) {
+                int mode = extractClusterKeyInt(line, "mode =", -1);
+                String freq = extractClusterKeyTail(line, "freq =");
+                int comma = (freq != null) ? freq.indexOf(',') : -1;
+                if (comma > 0) freq = freq.substring(0, comma).trim();
+                if (freq != null && !freq.isEmpty()) {
+                    String srcName = mapClusterModeToSourceName(mode);
+                    target.mediaSource = srcName;
+                    target.mediaTitle = srcName + " " + freq;
+                    target.mediaArtist = "라디오 방송 수신 중";
+                    target.mediaAlbum = "";
+                    target.mediaPlaying = true;
+                }
+                return mode;
+            }
+        } catch (Throwable ignored) {
+        }
+        return -1;
+    }
+
+    private static int extractClusterKeyInt(String line, String key, int def) {
+        int idx = line.indexOf(key);
+        if (idx < 0) return def;
+        int p = idx + key.length();
+        while (p < line.length() && Character.isWhitespace(line.charAt(p))) p++;
+        int start = p;
+        if (p < line.length() && line.charAt(p) == '-') p++;
+        while (p < line.length() && Character.isDigit(line.charAt(p))) p++;
+        if (p <= start) return def;
+        return parseIntSafe(line.substring(start, p), def);
+    }
+
+    private static String extractClusterKeyBetween(String line, String startKey, String endKey) {
+        int i1 = line.indexOf(startKey);
+        if (i1 < 0) return "";
+        int vStart = i1 + startKey.length();
+        int i2 = line.indexOf(endKey, vStart);
+        if (i2 < 0) return line.substring(vStart).trim();
+        return line.substring(vStart, i2).trim();
+    }
+
+    private static String extractClusterKeyTail(String line, String startKey) {
+        int i1 = line.indexOf(startKey);
+        if (i1 < 0) return "";
+        return line.substring(i1 + startKey.length()).trim();
+    }
+
+    private static String mapClusterModeToSourceName(int mode) {
+        switch (mode) {
+            case 1: return "FM";
+            case 2: return "AM";
+            case 3: return "DRM";
+            case 6: return "USB Music";
+            case 7: return "USB Video";
+            case 9: return "Bluetooth Audio";
+            case 12: return "DMB";
+            case 13: return "iPod";
+            case 14: return "AUX";
+            case 23: return "DAB";
+            case 33: return "Apple CarPlay";
+            case 35: return "Android Auto";
+            default: return "AVN Media";
+        }
     }
 
     public static int parseAddedDistDatcOff(int raw) {
@@ -4312,6 +5194,7 @@ public class TurzxMonitorMain {
         if (rawLevel == 0) return 0;
         if (rawLevel == 1) return 1;
         if (rawLevel >= 2 && rawLevel <= 9) return rawLevel - 1;
+        if (rawLevel >= 11 && rawLevel <= 13) return (rawLevel - 10) * 2; // BLOWER_AUTO_STEP1..3 -> 2, 4, 6
         return -1;
     }
 
@@ -4808,10 +5691,41 @@ public class TurzxMonitorMain {
                     && diagReport.contains("SELF-TEST")
                     && diagReport.contains("hdr=C7,C0,2D"),
                     "Expected complete DebugManager diagnostic report");
+
+            // 7. Verify DE22EV getRealSchedInfo() DTE extraction, DatcStatus decoding, and ClusterService media log parsing
+            int[] de22Sched = new int[]{7, 31, 63, 7, 31, 63, 198, 0, 1};
+            assertTrue(extractDteFromRealSchedInfo(de22Sched) == 198,
+                    "Expected DTE=198 km from DE22EV getRealSchedInfo()");
+            assertTrue(!isValidDteValue(65535) && !isValidDteValue(65534),
+                    "Expected 65535/65534 to be rejected by isValidDteValue");
+
+            com.hkmc.datc.DatcStatus ds = new com.hkmc.datc.DatcStatus();
+            ds.mOperationStatus = 1;
+            ds.mMainBlowerLevel = 5; // step 4
+            ds.mModeDrive = 2;       // B/L
+            ds.mAuto = 1;
+            ds.mAirconOnOff = 0;
+            ds.mHeatOnOff = 1;
+            ds.mIntake = 1;
+            ds.mSyncDisp = 1;
+            ds.mDrTempC = 23.5f;
+            ds.mDrTempStateC = 3;
+            ds.mPsTempC = 24.0f;
+            ds.mPsTempStateC = 3;
+            assertTrue(applyDatcStatusObject(ds, snap), "Expected DatcStatus decode success");
+            assertTrue(snap.hvacOn && snap.hvacBlowerStep == 4 && snap.hvacHeat && !snap.hvacAc
+                    && Math.abs(snap.hvacDrTempC - 23.5) < 0.01 && Math.abs(snap.hvacPsTempC - 24.0) < 0.01,
+                    "Expected DatcStatus fields applied accurately");
+
+            String clusterBtLine = "I/ClusterService( 1120): updateClusterWithArtistInfo : mode = 9, title = Supernova, artist = aespa";
+            int parsedMode = parseClusterMediaLogLine(clusterBtLine, snap);
+            assertTrue(parsedMode == 9 && "Supernova".equals(snap.mediaTitle) && "aespa".equals(snap.mediaArtist)
+                    && "Bluetooth Audio".equals(snap.mediaSource) && snap.mediaPlaying,
+                    "Expected ClusterService BT Audio log line parsed");
         } catch (Exception e) {
             throw new RuntimeException("MonitorConfig / OTA self-test failed", e);
         }
 
-        System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + 4-Domain Telemetry + CVS1 + DATC + GitHub OTA + DebugManager self-tests passed.");
+        System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");
     }
 }
