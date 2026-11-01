@@ -72,7 +72,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.3.0";
+    public static final String MONITOR_VERSION = "1.3.1";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -302,7 +302,7 @@ public class TurzxMonitorMain {
         }
 
         public double getEffectiveDriveMotorKw() {
-            if (charging) return 0.0;
+            if (charging || "P".equals(gearPos) || "N".equals(gearPos)) return 0.0;
             double auxKw = Math.max(0.0, climatePowerKw)
                     + Math.max(0.0, electronicsPowerKw)
                     + Math.max(0.0, batteryCarePowerKw);
@@ -318,7 +318,7 @@ public class TurzxMonitorMain {
                 }
                 return drivePowerKw;
             }
-            if (hasPackCurrent && packPowerKw > 0.1) {
+            if (!hasSubPower && hasPackCurrent && packPowerKw > 0.5) {
                 return Math.max(0.0, packPowerKw - auxKw);
             }
             return 0.0;
@@ -2452,6 +2452,7 @@ public class TurzxMonitorMain {
         private static volatile long lastNativeBinderHscanRxMs = 0L;
         private static volatile long lastUds0101Ms = 0L;
         private static volatile long lastUds0105Ms = 0L;
+        private static volatile long lastFatcUdsMs = 0L;
         private static volatile long lastUdsReqSentMs = 0L;
         private static volatile int udsReqToggle = 0;
 
@@ -2852,6 +2853,7 @@ public class TurzxMonitorMain {
                 if ((b1 & 0xFF) == 0xC7 && data != null) {
                     long now = System.currentTimeMillis();
                     boolean isBmsAddr = ((b3 & 0x7F) == 0x2D) || (b3 == 0);
+                    boolean isFatcAddr = ((b3 & 0x7F) == 0x2B);
                     if ((b3 & 0x80) == 0 && data.length >= 8) {
                         synchronized (liveSnapshot) {
                             parseHscanBypassCanFrame(b3 & 0x7F, data, liveSnapshot, now, lastUds0101Ms, lastUds0105Ms);
@@ -2861,6 +2863,12 @@ public class TurzxMonitorMain {
                             if (parseBmsUdsPayload(data, liveSnapshot)) {
                                 lastUds0101Ms = now;
                                 lastUds0105Ms = now;
+                            }
+                        }
+                    } else if (isFatcAddr && data.length >= 12) {
+                        synchronized (liveSnapshot) {
+                            if (parseFatcUdsPayload(data, liveSnapshot)) {
+                                lastFatcUdsMs = now;
                             }
                         }
                     }
@@ -3163,9 +3171,30 @@ public class TurzxMonitorMain {
             if (svc == null || sendM == null) return;
             long now = System.currentTimeMillis();
             if (now - lastUdsReqSentMs < 1800L) return;
-            if ((now - lastUds0101Ms) < 3500L && (now - lastUds0105Ms) < 3500L) return;
-            int pid = ((udsReqToggle++ & 1) == 0) ? 0x01 : 0x05;
+            boolean bmsFresh = (now - lastUds0101Ms) < 3500L && (now - lastUds0105Ms) < 3500L;
+            boolean fatcFresh = (now - lastFatcUdsMs) < 10000L;
+            if (bmsFresh && fatcFresh) return;
+
             lastUdsReqSentMs = now;
+            int step = udsReqToggle++;
+            // Periodically request TP_DEVICE_FATC (0xAB) UDS 22 01 00 -> 62 01 00 for inCarTempC & outdoorTempC
+            if (!fatcFresh && (bmsFresh || (step % 3) == 2)) {
+                try {
+                    sendM.invoke(
+                            svc,
+                            Byte.valueOf((byte) 0xC7),
+                            Byte.valueOf((byte) 0x40),
+                            Byte.valueOf((byte) 0x80),
+                            Byte.valueOf((byte) 0x40),
+                            Byte.valueOf((byte) 0xAB),
+                            new byte[]{(byte) 0x22, (byte) 0x01, (byte) 0x00}
+                    );
+                } catch (Throwable ignored) {
+                }
+                return;
+            }
+
+            int pid = ((step & 1) == 0) ? 0x01 : 0x05;
             try {
                 sendM.invoke(
                         svc,
@@ -3195,10 +3224,13 @@ public class TurzxMonitorMain {
         private static void pollHevServiceLocked() {
             if (hevService == null) return;
             try {
-                if (canDbGeneration > 0 && reqFreqChangedSigMethod != null && (pollTick % 4 == 0)) {
-                    try { reqFreqChangedSigMethod.invoke(hevService); } catch (Throwable ignored) {}
-                } else if (reqHevStatusDataMethod != null && (pollTick % 4 == 0)) {
-                    try { reqHevStatusDataMethod.invoke(hevService, Integer.valueOf(HEV_FLAG_MOTER_PWR_AVN)); } catch (Throwable ignored) {}
+                if (pollTick % 4 == 0) {
+                    if (reqFreqChangedSigMethod != null) {
+                        try { reqFreqChangedSigMethod.invoke(hevService); } catch (Throwable ignored) {}
+                    }
+                    if (reqHevStatusDataMethod != null) {
+                        try { reqHevStatusDataMethod.invoke(hevService, Integer.valueOf(HEV_FLAG_MOTER_PWR_AVN)); } catch (Throwable ignored) {}
+                    }
                 }
 
                 int energyWh = queryHevFlag(HEV_FLAG_ENERGYMAP_1000MS);
@@ -3419,12 +3451,20 @@ public class TurzxMonitorMain {
 
         private static void pollDatcServiceLocked() {
             Object svc = datcService;
-            boolean callbackFresh = (System.currentTimeMillis() - lastDatcCallbackMs) < 4000L;
-
-            if (svc != null && !callbackFresh) {
-                if (!applyDatcStatusObject(svc, liveSnapshot)) {
-                    datcService = null;
-                    datcListenerRegistered = false;
+            if (svc != null) {
+                if (lastRawDatcStatusObj == null) {
+                    if (!applyDatcStatusObject(svc, liveSnapshot)) {
+                        datcService = null;
+                        datcListenerRegistered = false;
+                    }
+                } else if (pollTick % 12 == 0) {
+                    try {
+                        svc.getClass().getMethod("getTemperatureUnit").invoke(svc);
+                    } catch (Throwable t) {
+                        datcService = null;
+                        datcListenerRegistered = false;
+                        lastRawDatcStatusObj = null;
+                    }
                 }
             }
 
@@ -3459,7 +3499,7 @@ public class TurzxMonitorMain {
                 try { sysGearP = ((Integer) sysGetGearPMethod.invoke(systemService)).intValue(); } catch (Throwable ignored) {}
             }
             boolean rearCam = "1".equals(getSystemProperty("persist.sys.rearcam.open", "0"));
-            String resolved = resolveGearPosition(tmGearRaw, pgsGearP, pgsGearN, sysGearP, rearCam, liveSnapshot.getEffectiveDriveMotorKw());
+            String resolved = resolveGearPosition(tmGearRaw, pgsGearP, pgsGearN, sysGearP, rearCam, liveSnapshot.drivePowerKw);
             if (!resolved.isEmpty()) {
                 liveSnapshot.gearPos = resolved;
             }
@@ -3487,13 +3527,19 @@ public class TurzxMonitorMain {
                 }
             }
 
-            // Query ClusterService.getLastPlaytime(mode) if available
+            // Query ClusterService.getLastPlaytime(mode) if available (returns long in automotive.odex)
             if (clusterService != null && clusterGetLastPlaytimeMethod != null && lastClusterMediaMode >= 0) {
                 try {
-                    int playSec = ((Integer) clusterGetLastPlaytimeMethod.invoke(clusterService, Integer.valueOf(lastClusterMediaMode))).intValue();
-                    if (playSec >= 0 && playSec < 36000) {
-                        liveSnapshot.mediaPositionSec = playSec;
-                        lastMediaPosUpdateMs = System.currentTimeMillis();
+                    Object rawPlay = clusterGetLastPlaytimeMethod.invoke(clusterService, Integer.valueOf(lastClusterMediaMode));
+                    if (rawPlay instanceof Number) {
+                        long playVal = ((Number) rawPlay).longValue();
+                        if (playVal >= 0L && playVal < 36000000L) {
+                            int playSec = (int) (playVal > 36000L ? (playVal / 1000L) : playVal);
+                            if (playSec >= 0 && playSec < 36000) {
+                                liveSnapshot.mediaPositionSec = playSec;
+                                lastMediaPosUpdateMs = System.currentTimeMillis();
+                            }
+                        }
                     }
                 } catch (Throwable ignored) {
                 }
@@ -5470,6 +5516,38 @@ public class TurzxMonitorMain {
         return false;
     }
 
+    /**
+     * Decodes TP_DEVICE_FATC (43 -> b3 = 0xAB) UDS 22 01 00 -> 62 01 00 response.
+     * Verified on DE22EV live HSCAN dump:
+     * hdr=C7,C0,AB len=38 [62 01 00 7E 50 27 C8 FF 82 78 80 03 EF 8D ...]
+     * - payload[udsIdx + 8] = 0x82 (130 -> 130 * 0.5 - 40.0 = 25.0°C in-car sensor temperature)
+     * - payload[udsIdx + 9] = 0x78 (120 -> 120 * 0.5 - 40.0 = 20.0°C ambient/outdoor sensor temperature)
+     */
+    public static boolean parseFatcUdsPayload(byte[] payload, TelemetrySnapshot target) {
+        if (payload == null || target == null || payload.length < 10) return false;
+        int udsIdx = -1;
+        int maxScan = Math.min(8, payload.length - 10);
+        for (int i = 0; i <= maxScan; i++) {
+            if ((payload[i] & 0xFF) == 0x62 && (payload[i + 1] & 0xFF) == 0x01 && (payload[i + 2] & 0xFF) == 0x00) {
+                udsIdx = i;
+                break;
+            }
+        }
+        if (udsIdx < 0) return false;
+        boolean updated = false;
+        double inC = parseCanTempByteToCelsius(payload[udsIdx + 8] & 0xFF);
+        if (inC >= -35.0 && inC <= 65.0) {
+            target.inCarTempC = inC;
+            updated = true;
+        }
+        double outC = parseCanTempByteToCelsius(payload[udsIdx + 9] & 0xFF);
+        if (outC >= -45.0 && outC <= 65.0) {
+            target.outdoorTempC = outC;
+            updated = true;
+        }
+        return updated;
+    }
+
     public static boolean parseHscanBypassCanFrame(
             int fnCode,
             byte[] d,
@@ -5615,29 +5693,14 @@ public class TurzxMonitorMain {
 
         if (targetIfDirect != null) {
             boolean isBmsAddr = ((b3 & 0x7F) == 0x2D) || (b3 == 0);
+            boolean isFatcAddr = ((b3 & 0x7F) == 0x2B);
             if (isBmsAddr && data.length >= 35) return parseBmsUdsPayload(data, targetIfDirect);
+            if (isFatcAddr && data.length >= 10) return parseFatcUdsPayload(data, targetIfDirect);
             if ((b3 & 0x80) == 0 && data.length >= 8) {
                 return parseHscanBypassCanFrame(b3 & 0x7F, data, targetIfDirect, 10000L, 0L, 0L);
             }
-            if ((b3 & 0xFF) == 0xB2 && data.length >= 12
-                    && (data[2] & 0xFF) == 0x61 && (data[3] & 0xFF) == 0x01) {
-                double inC = parseCanTempByteToCelsius(data[11] & 0xFF);
-                if (inC > -40.0 && inC < 60.0) {
-                    targetIfDirect.inCarTempC = inC;
-                    return true;
-                }
-            }
             return false;
         } else {
-            if ((b3 & 0xFF) == 0xB2 && data.length >= 12
-                    && (data[2] & 0xFF) == 0x61 && (data[3] & 0xFF) == 0x01) {
-                double inC = parseCanTempByteToCelsius(data[11] & 0xFF);
-                if (inC > -40.0 && inC < 60.0) {
-                    synchronized (TelemetryCollector.liveSnapshot) {
-                        TelemetryCollector.liveSnapshot.inCarTempC = inC;
-                    }
-                }
-            }
             TelemetryCollector.onHscanPacket(b1, b2, b3, data);
             return true;
         }
@@ -5810,10 +5873,11 @@ public class TurzxMonitorMain {
     }
 
     public static double resolveDatcTempWithState(float tempC, int stateC) {
-        // Genuine com.hkmc.datc.DATCConstants:
-        // STATE_NOT_DISPLAY = 1, STATE_LOW = 2 ("LO"), STATE_HIGH = 3 ("HI"), STATE_NORMAL = 4, STATE_NONE = 255
-        if (stateC == 2) return 14.0;
-        if (stateC == 3) return 32.0;
+        // Genuine com.hkmc.datc.DATCConstants$TemperatureDisplayState:
+        // OFF = 0, NOT_USED = 1, SENSOR_ERROR = 254, INVALID = 255, NORMAL = 65535 (0xFFFF)
+        if (stateC == 0 || stateC == 1 || stateC == 254 || stateC == 255) {
+            return -99.0;
+        }
         if (!Float.isNaN(tempC) && tempC >= 13.5f && tempC <= 32.5f) {
             return Math.round(tempC * 2.0) / 2.0;
         }
@@ -5828,7 +5892,7 @@ public class TurzxMonitorMain {
             try {
                 Object v = sc.getMethod(n).invoke(obj);
                 if (v instanceof Number) return ((Number) v).intValue();
-                if (v instanceof Boolean) return ((Boolean) v).booleanValue() ? 2 : 1;
+                if (v instanceof Boolean) return ((Boolean) v).booleanValue() ? 1 : 0;
             } catch (Throwable ignored) {
             }
             try {
@@ -5836,7 +5900,7 @@ public class TurzxMonitorMain {
                 f.setAccessible(true);
                 Object v = f.get(obj);
                 if (v instanceof Number) return ((Number) v).intValue();
-                if (v instanceof Boolean) return ((Boolean) v).booleanValue() ? 2 : 1;
+                if (v instanceof Boolean) return ((Boolean) v).booleanValue() ? 1 : 0;
             } catch (Throwable ignored) {
             }
         }
@@ -5864,62 +5928,94 @@ public class TurzxMonitorMain {
         return defVal;
     }
 
+    private static float readVrClimateFloat(Object svc, int flag, float defVal) {
+        if (svc == null) return defVal;
+        try {
+            Object v = svc.getClass().getMethod("getVRClimateStatus", int.class).invoke(svc, Integer.valueOf(flag));
+            if (v instanceof Number) return ((Number) v).floatValue();
+        } catch (Throwable ignored) {
+        }
+        return defVal;
+    }
+
     public static boolean applyDatcStatusObject(Object statusObj, TelemetrySnapshot target) {
         if (statusObj == null || target == null) return false;
         try {
-            // Supports both DatcStatus parcelable and IDATCService Binder proxy getters
+            // Supports both DatcStatus parcelable and IDATCService Binder proxy
             int op = readObjIntAny(statusObj, -1,
-                    "getOperationStatus", "getOpStatus", "mOperationStatus", "operationStatus");
+                    "getOperationStatus", "getOpStatus", "mOpStatus", "mOperationStatus", "operationStatus");
             int rawLevel = readObjIntAny(statusObj, -1,
-                    "getBlowerLevel", "getMainBlowerLevel", "mMainBlowerLevel", "mainBlowerLevel");
-            int autoStep = readObjIntAny(statusObj, 0,
+                    "getMainBlowerLevel", "getBlowerLevel", "mMainBlowerLevel", "mainBlowerLevel");
+            int autoStep = readObjIntAny(statusObj, -1,
                     "getAutoStep", "mAutoStep", "autoStep");
             int mode = readObjIntAny(statusObj, -1,
-                    "getDriverMode", "getModeDrive", "getBlowerMode", "mModeDrive", "modeDrive");
+                    "getModeDrive", "getDriverMode", "getBlowerMode", "mDrMode", "mModeDrive", "modeDrive");
             int auto = readObjIntAny(statusObj, -1,
-                    "getAutoStatus", "getAuto", "mAuto", "auto");
+                    "getAuto", "getAutoStatus", "mAuto", "auto");
             int ac = readObjIntAny(statusObj, -1,
-                    "getACStatus", "getAirconOnOff", "getAcOnOff", "getAC", "mAirconOnOff");
+                    "getAirconOnOff", "getACStatus", "getAcOnOff", "getAC", "mAcOnOff", "mAirconOnOff");
             int heat = readObjIntAny(statusObj, -1,
-                    "getHeatStatus", "getHeatOnOff", "getHeaterOnOff", "mHeatOnOff");
+                    "getHeatOnOff", "getHeatStatus", "getHeaterOnOff", "mHeatOnOff");
             int defog = readObjIntAny(statusObj, -1,
                     "getFrontDefrostStatus", "getFrontDefog", "mFrontDefog", "frontDefog");
             int intake = readObjIntAny(statusObj, -1,
-                    "getAirIntakeStatus", "getIntake", "getIntakeMode", "mIntake", "intake");
+                    "getIntake", "getAirIntakeStatus", "getIntakeMode", "mIntake", "intake");
             int sync = readObjIntAny(statusObj, -1,
-                    "getSyncStatus", "getSyncDisp", "getSync", "mSyncDisp", "sync");
+                    "getSyncDisp", "getSyncStatus", "getSync", "mSyncDisp", "sync");
             int dual = readObjIntAny(statusObj, -1,
-                    "getDualStatus", "getDual", "mDual", "dual");
+                    "getDual", "getDualStatus", "mDual", "dual");
             int drvOnly = readObjIntAny(statusObj, -1,
-                    "getDriverOnlyStatus", "getDriverOnly", "mDriverOnly", "driverOnly");
+                    "getDriverOnly", "getDriverOnlyValue", "getDriverOnlyStatus", "mDriverOnly", "driverOnly");
             int ads = readObjIntAny(statusObj, -1,
-                    "getADSStatus", "getADSOnOffStatus", "getAdsStatus", "mADSOnOffStatus");
-            int datcType = readObjIntAny(statusObj, -1,
-                    "getDATCType", "mDatcType", "datcType");
+                    "getADSOnOffStatus", "getADSDisp", "getADSStatus", "mADSOnOffStatus", "mADSDisp");
+            int ventMode = readObjIntAny(statusObj, -1,
+                    "getVentMode", "mVentMode", "ventMode");
+            int zoneType = readObjIntAny(statusObj, -1,
+                    "getZoneType", "mZoneType", "zoneType");
 
             float drC = readObjFloatAny(statusObj, Float.NaN,
-                    "getDriverTempC", "getDrTempC", "mDrTempC", "drTempC");
-            int drStateC = readObjIntAny(statusObj, 4,
-                    "getDriverTempStateC", "getDrTempStateC", "mDrTempStateC");
+                    "getDrTempC", "getDriverTempC", "mDrTempC", "drTempC");
+            int drStateC = readObjIntAny(statusObj, 65535,
+                    "getDrTempStateC", "getDriverTempStateC", "mDrTempStateC");
             float psC = readObjFloatAny(statusObj, Float.NaN,
-                    "getPassengerTempC", "getPsTempC", "mPsTempC", "psTempC");
-            int psStateC = readObjIntAny(statusObj, 4,
-                    "getPassengerTempStateC", "getPsTempStateC", "mPsTempStateC");
+                    "getPsTempC", "getPassengerTempC", "mPsTempC", "psTempC");
+            int psStateC = readObjIntAny(statusObj, 65535,
+                    "getPsTempStateC", "getPassengerTempStateC", "mPsTempStateC");
             float ambC = readObjFloatAny(statusObj, Float.NaN,
                     "getAmbientTempC", "getOutdoorTempC", "mAmbientTempC");
-            int ambStateC = readObjIntAny(statusObj, 4,
+            int ambStateC = readObjIntAny(statusObj, 65535,
                     "getAmbientTempStateC", "mAmbientTempStateC");
 
+            // If statusObj is IDATCService proxy (no DatcStatus getters), query getVRClimateStatus(DATCFlag.*)
             if (op == -1 && rawLevel == -1 && mode == -1 && Float.isNaN(drC)) {
-                return false;
+                float vrOp = readVrClimateFloat(statusObj, 12, -1.0f);     // DATCFlag.OP_STATE (12)
+                float vrLvl = readVrClimateFloat(statusObj, 5, -1.0f);     // DATCFlag.BLOWER_LEVEL (5)
+                float vrMode = readVrClimateFloat(statusObj, 6, -1.0f);    // DATCFlag.BLOWER_MODE (6)
+                float vrTemp = readVrClimateFloat(statusObj, 2, Float.NaN);// DATCFlag.TEMP (2)
+                if (vrOp < 0.0f && vrLvl < 0.0f && vrMode < 0.0f && Float.isNaN(vrTemp)) {
+                    return false;
+                }
+                if (vrOp >= 0.0f) op = Math.round(vrOp);
+                if (vrLvl >= 0.0f) rawLevel = Math.round(vrLvl);
+                if (vrMode >= 0.0f) mode = Math.round(vrMode);
+                if (!Float.isNaN(vrTemp) && vrTemp > 0.0f) drC = vrTemp;
+                float vrAuto = readVrClimateFloat(statusObj, 8, -1.0f);    // DATCFlag.AUTO (8)
+                float vrAc = readVrClimateFloat(statusObj, 9, -1.0f);      // DATCFlag.AC (9)
+                float vrDefog = readVrClimateFloat(statusObj, 10, -1.0f);  // DATCFlag.FRONT_DEFOG (10)
+                float vrIntake = readVrClimateFloat(statusObj, 11, -1.0f); // DATCFlag.INTAKE (11)
+                if (vrAuto >= 0.0f) auto = Math.round(vrAuto);
+                if (vrAc >= 0.0f) ac = Math.round(vrAc);
+                if (vrDefog >= 0.0f) defog = Math.round(vrDefog);
+                if (vrIntake >= 0.0f) intake = Math.round(vrIntake);
+                if (ventMode == -1) ventMode = 0; // DE22EV Single-Zone default when polling VR
             }
 
-            // Genuine com.hkmc.datc.DATCConstants:
-            // OPERATION_OFF = 1, OPERATION_ON = 2, OPERATION_DEF = 3, OPERATION_LOGICOOL = 4
-            // STATUS_OFF = 1, STATUS_ON = 2
-            // LEVEL_OFF = 1, LEVEL_1..8 = 2..9, LEVEL_AUTO = 10
-            // MODE_OFF = 1, MODE_VENT = 2, MODE_BILEVEL = 3, MODE_FLOOR = 4, MODE_MIX = 5, MODE_DEFROST = 6, MODE_AUTO = 7
-            // AIR_OFF = 0, AIR_FRESH = 1, AIR_RECIRCULATION = 2
+            // Genuine com.hkmc.datc.DATCConstants (verified against automotive.odex & DE22EV live dump):
+            // DatcOperationState: OFF = 0, NORMAL = 1 (ON), SYSTEM_OFF = 2 (OFF), SELF_DIAG = 3, AQS = 4, INVALID = 7
+            // BaseDisp (Auto/AC/Heat/DrvOnly/Dual/Intake/ADS): OFF = 0, ON = 1, NO_USED = 2, INVALID = 3
+            // DatcBlowerLevel: OFF = 0, LEVEL_0 = 1 (0단), LEVEL_1..8 = 2..9 (1..8단), LEVEL_AUTO = 10, INVALID = 15
+            // DatcModeDisp: OFF = 0, VENT = 1, BL = 2, FLOOR = 3, MIX = 4, DEF = 5, AUTODEFLOG = 6, DEF_VENT = 7, MODE_AUTO = 8, INVALID = 15
+            // TemperatureDisplayState: OFF = 0, NOT_USED = 1, SENSOR_ERROR = 254, INVALID = 255, NORMAL = 65535 (0xFFFF)
             int step = normalizeDatcBlowerStep(rawLevel);
             if ((rawLevel == 10 || step < 0) && autoStep >= 1 && autoStep <= 3) {
                 step = autoStep * 2;
@@ -5931,42 +6027,46 @@ public class TurzxMonitorMain {
             if (normMode >= 0) {
                 target.hvacBlowerMode = normMode;
             }
-            if (op == 1) {
+            if (op == 0 || op == 2) {
                 target.hvacOn = false;
                 target.hvacBlowerStep = 0;
-            } else if (op >= 2 && op <= 4) {
+            } else if (op == 1 || op == 4) {
                 target.hvacOn = true;
             } else if (step >= 0) {
                 target.hvacOn = (step > 0);
             }
 
-            if (auto >= 1) target.hvacAuto = (auto == 2) || (rawLevel == 10) || (mode == 7);
-            if (ac >= 1) target.hvacAc = (ac == 2);
-            if (heat >= 1) target.hvacHeat = (heat == 2);
-            if (defog >= 1) target.hvacFrontDefog = (defog == 2) || (op == 3) || (mode == 6);
-            if (intake >= 0) target.hvacRecirc = (intake == 2);
-            if (drvOnly >= 1) target.hvacDriverOnly = (drvOnly == 2);
-            if (ads >= 1) target.hvacAds = (ads == 2);
+            if (auto == 0 || auto == 1) target.hvacAuto = (auto == 1) || (rawLevel == 10) || (mode == 8);
+            if (ac == 0 || ac == 1) target.hvacAc = (ac == 1);
+            if (heat == 0 || heat == 1) target.hvacHeat = (heat == 1);
+            if (defog == 0 || defog == 1) {
+                target.hvacFrontDefog = (defog == 1) || (mode == 5) || (mode == 6);
+            } else if (mode >= 0 && mode != 15) {
+                target.hvacFrontDefog = (mode == 5) || (mode == 6);
+            }
+            if (intake == 0 || intake == 1) target.hvacRecirc = (intake == 1);
+            if (drvOnly == 0 || drvOnly == 1) target.hvacDriverOnly = (drvOnly == 1);
+            if (ads == 0 || ads == 1) target.hvacAds = (ads == 1);
 
             double drResolved = resolveDatcTempWithState(drC, drStateC);
             if (drResolved > 0.0) {
                 target.hvacDrTempC = drResolved;
             }
             double psResolved = resolveDatcTempWithState(psC, psStateC);
-            if (datcType == 1 || psStateC == 1 || psResolved < 0.0) {
-                // Single-Zone FATC (TYPE_SINGLE = 1 on DE22EV) or passenger display hidden: mirror driver temp
+            if (ventMode == 0 || zoneType == 0 || psStateC == 1 || psStateC == 255 || psResolved < 0.0) {
+                // Single-Zone (VentMode.SINGLE = 0, ZoneType.ZONE_1 = 0, or psStateC = 255 INVALID on DE22EV): mirror driver temp
                 target.hvacSync = true;
                 if (target.hvacDrTempC > 0.0) {
                     target.hvacPsTempC = target.hvacDrTempC;
                 }
             } else {
                 target.hvacPsTempC = psResolved;
-                if (sync >= 1 || dual >= 1) {
-                    target.hvacSync = (sync == 2) || (dual == 1 && Math.abs(target.hvacDrTempC - target.hvacPsTempC) < 0.1);
+                if (sync == 0 || sync == 1 || dual == 0 || dual == 1) {
+                    target.hvacSync = (sync == 1) || (dual == 0 && Math.abs(target.hvacDrTempC - target.hvacPsTempC) < 0.1);
                 }
             }
 
-            if (ambStateC != 1 && ambStateC != 255 && !Float.isNaN(ambC)
+            if (ambStateC != 0 && ambStateC != 1 && ambStateC != 254 && ambStateC != 255 && !Float.isNaN(ambC)
                     && ambC >= -45.0f && ambC <= 65.0f && Math.abs(ambC - 85.0f) > 0.5f) {
                 target.outdoorTempC = Math.round(ambC * 2.0) / 2.0;
             }
@@ -6161,19 +6261,22 @@ public class TurzxMonitorMain {
     }
 
     public static int normalizeDatcBlowerMode(int rawMode) {
-        // Genuine com.hkmc.datc.DATCConstants:
-        // MODE_OFF = 1, MODE_VENT = 2, MODE_BILEVEL = 3, MODE_FLOOR = 4, MODE_MIX = 5, MODE_DEFROST = 6, MODE_AUTO = 7
+        // Genuine com.hkmc.datc.DATCConstants$DatcModeDisp (verified against automotive.odex & DE22EV live dump):
+        // OFF = 0, VENT = 1, BL = 2, FLOOR = 3, MIX = 4, DEF = 5, AUTODEFLOG = 6, DEF_VENT = 7, MODE_AUTO = 8, DEF_VENT_FLOOR = 9, DEF_7MODE = 10, INVALID = 15
         switch (rawMode) {
-            case 0:
-            case 1: return 0; // OFF
-            case 2: return 1; // VENT
-            case 3: return 2; // B/L
-            case 4: return 3; // FLOOR
-            case 5: return 4; // MIX
-            case 6: return 5; // DEF
-            case 7: return 2; // AUTO (B/L arrows)
+            case 0: return 0; // OFF
+            case 1: return 1; // VENT (상체)
+            case 2: return 2; // BL (상·하체)
+            case 3: return 3; // FLOOR (하체)
+            case 4: return 4; // MIX (유리·하체)
+            case 5: return 5; // DEF (전면유리)
+            case 6: return 5; // AUTODEFLOG
+            case 7: return 1; // DEF_VENT
+            case 8: return 2; // MODE_AUTO
+            case 9: return 2; // DEF_VENT_FLOOR
+            case 10: return 5; // DEF_7MODE
             default:
-                return (rawMode >= 8 && rawMode <= 10) ? rawMode : -1;
+                return -1;
         }
     }
 
@@ -6679,45 +6782,46 @@ public class TurzxMonitorMain {
             assertTrue(!isValidDteValue(65535) && !isValidDteValue(65534),
                     "Expected 65535/65534 to be rejected by isValidDteValue");
 
-            // Verify DE22EV Single-Zone FATC OFF state (1 = OFF, psStateC = 1 STATE_NOT_DISPLAY)
+            // Verify DE22EV Single-Zone FATC OFF state (mOpStatus = 0 OFF / 2 SYSTEM_OFF, BaseDisp 0 = OFF)
             com.hkmc.datc.DatcStatus dsOff = new com.hkmc.datc.DatcStatus();
-            dsOff.mOperationStatus = 1; // OPERATION_OFF = 1
-            dsOff.mMainBlowerLevel = 1; // LEVEL_OFF = 1
-            dsOff.mModeDrive = 1;       // MODE_OFF = 1
-            dsOff.mAuto = 1;            // STATUS_OFF = 1
-            dsOff.mAirconOnOff = 1;     // STATUS_OFF = 1
-            dsOff.mHeatOnOff = 1;       // STATUS_OFF = 1
-            dsOff.mIntake = 1;          // AIR_FRESH = 1
-            dsOff.mDatcType = 1;        // TYPE_SINGLE = 1
+            dsOff.mOpStatus = 0;        // DatcOperationState.OFF = 0
+            dsOff.mMainBlowerLevel = 1; // DatcBlowerLevel.LEVEL_0 = 1 (0단)
+            dsOff.mDrMode = 0;          // DatcModeDisp.OFF = 0
+            dsOff.mAuto = 0;            // BaseDisp.OFF = 0
+            dsOff.mAcOnOff = 0;         // BaseDisp.OFF = 0
+            dsOff.mHeatOnOff = 0;       // BaseDisp.OFF = 0
+            dsOff.mIntake = 0;          // BaseDisp.OFF = 0 (Fresh)
+            dsOff.mVentMode = 0;        // VentMode.SINGLE = 0
+            dsOff.mZoneType = 0;        // ZoneType.ZONE_1 = 0
             dsOff.mDrTempC = 22.0f;
-            dsOff.mDrTempStateC = 4;    // STATE_NORMAL = 4
-            dsOff.mPsTempC = -18.0f;
-            dsOff.mPsTempStateC = 1;    // STATE_NOT_DISPLAY = 1
+            dsOff.mDrTempStateC = 65535;// TemperatureDisplayState.NORMAL = 65535 (0xFFFF)
+            dsOff.mPsTempC = 141.5f;
+            dsOff.mPsTempStateC = 255;  // TemperatureDisplayState.INVALID = 255 (Single-Zone)
             assertTrue(applyDatcStatusObject(dsOff, snap), "Expected DatcStatus OFF decode success");
             assertTrue(!snap.hvacOn && snap.hvacBlowerStep == 0 && !snap.hvacAuto && !snap.hvacAc
                     && !snap.hvacHeat && !snap.hvacRecirc && snap.hvacSync
                     && Math.abs(snap.hvacDrTempC - 22.0) < 0.01 && Math.abs(snap.hvacPsTempC - 22.0) < 0.01,
-                    "Expected genuine DE22EV DATC OFF state (1=OFF) and Single-Zone passenger temp mirror");
+                    "Expected genuine DE22EV DATC OFF state and Single-Zone passenger temp mirror");
 
-            // Verify DATC ON state (2 = ON)
+            // Verify exact DE22EV live dump ON state (mOpStatus=1 NORMAL, mMainBlowerLevel=4 [3단], mDrMode=3 [FLOOR], mAuto=1, mHeatOnOff=1, mAcOnOff=0, dr=25.5, ps=141.5[st=255])
             com.hkmc.datc.DatcStatus dsOn = new com.hkmc.datc.DatcStatus();
-            dsOn.mOperationStatus = 2; // OPERATION_ON = 2
-            dsOn.mMainBlowerLevel = 5; // LEVEL_4 = 5 -> step 4
-            dsOn.mModeDrive = 3;       // MODE_BILEVEL = 3 -> mode 2 (B/L)
-            dsOn.mAuto = 2;            // STATUS_ON = 2
-            dsOn.mAirconOnOff = 1;     // STATUS_OFF = 1
-            dsOn.mHeatOnOff = 2;       // STATUS_ON = 2
-            dsOn.mIntake = 2;          // AIR_RECIRCULATION = 2
-            dsOn.mDatcType = 2;        // TYPE_DUAL = 2
-            dsOn.mDrTempC = 23.5f;
-            dsOn.mDrTempStateC = 4;
-            dsOn.mPsTempC = 24.0f;
-            dsOn.mPsTempStateC = 4;
+            dsOn.mOpStatus = 1;         // DatcOperationState.NORMAL = 1 (ON)
+            dsOn.mMainBlowerLevel = 4;  // DatcBlowerLevel.LEVEL_3 = 4 -> step 3
+            dsOn.mDrMode = 3;           // DatcModeDisp.FLOOR = 3 -> mode 3 (하체)
+            dsOn.mAuto = 1;             // BaseDisp.ON = 1
+            dsOn.mAcOnOff = 0;          // BaseDisp.OFF = 0
+            dsOn.mHeatOnOff = 1;        // BaseDisp.ON = 1
+            dsOn.mIntake = 1;           // BaseDisp.ON = 1 (Recirc)
+            dsOn.mVentMode = 0;         // VentMode.SINGLE = 0
+            dsOn.mDrTempC = 25.5f;
+            dsOn.mDrTempStateC = 65535; // NORMAL = 65535
+            dsOn.mPsTempC = 141.5f;
+            dsOn.mPsTempStateC = 255;   // INVALID = 255 (Single-Zone mirrors driver 25.5°C)
             assertTrue(applyDatcStatusObject(dsOn, snap), "Expected DatcStatus ON decode success");
-            assertTrue(snap.hvacOn && snap.hvacBlowerStep == 4 && snap.hvacBlowerMode == 2
-                    && snap.hvacAuto && snap.hvacHeat && !snap.hvacAc && snap.hvacRecirc
-                    && Math.abs(snap.hvacDrTempC - 23.5) < 0.01 && Math.abs(snap.hvacPsTempC - 24.0) < 0.01,
-                    "Expected genuine DATC ON state (2=ON) applied accurately");
+            assertTrue(snap.hvacOn && snap.hvacBlowerStep == 3 && snap.hvacBlowerMode == 3
+                    && snap.hvacAuto && snap.hvacHeat && !snap.hvacAc && snap.hvacRecirc && snap.hvacSync
+                    && Math.abs(snap.hvacDrTempC - 25.5) < 0.01 && Math.abs(snap.hvacPsTempC - 25.5) < 0.01,
+                    "Expected genuine DE22EV live DATC ON state applied accurately");
 
             // Verify AvWidgetMainView media broadcast receiver (com.hkmc.audio.btaudio.widgetupdate + timeupdate)
             android.content.Intent btIntent = new android.content.Intent("com.hkmc.audio.btaudio.widgetupdate");
@@ -6739,6 +6843,28 @@ public class TurzxMonitorMain {
             assertTrue(parsedMode == 9 && "Supernova".equals(snap.mediaTitle) && "aespa".equals(snap.mediaArtist)
                     && "Bluetooth Audio".equals(snap.mediaSource) && snap.mediaPlaying,
                     "Expected ClusterService BT Audio log line parsed");
+
+            // Verify TP_DEVICE_FATC (0xAB) UDS 62 01 00 indoor (25.0°C) & outdoor (20.0°C) sensor decoding
+            String sampleLogFatc = "I/TM_HSCANPacketRunner(  524): onEventFromMicom(Bypass CAN) : length _41[c7, c0, ab, c8, 2b, "
+                    + "62, 01, 00, 7e, 50, 27, c8, ff, 82, 78, 80, 03, ef, 8d, ff, ff, 8d, ff, 8e, ff, ff, ff, ff, ff]";
+            assertTrue(parseTmHscanLogLine(sampleLogFatc, snap), "Expected FATC 62 01 00 parse");
+            assertTrue(Math.abs(snap.inCarTempC - 25.0) < 0.01 && Math.abs(snap.outdoorTempC - 20.0) < 0.01,
+                    "Expected FATC 62 01 00 inCarTempC=25.0°C and outdoorTempC=20.0°C, got " + snap.inCarTempC + "/" + snap.outdoorTempC);
+
+            // Verify getEffectiveDriveMotorKw() returns 0.0 kW when parked in P gear or stopped with live subPower
+            snap.gearPos = "P";
+            snap.hasPackCurrent = true;
+            snap.packPowerKw = 1.28;
+            snap.hasSubPower = true;
+            snap.drivePowerKw = 0.0;
+            snap.climatePowerKw = 0.60;
+            snap.electronicsPowerKw = 0.46;
+            snap.batteryCarePowerKw = 0.0;
+            assertTrue(Math.abs(snap.getEffectiveDriveMotorKw()) < 0.001,
+                    "Expected 0.0 kW drive motor power in P gear, got " + snap.getEffectiveDriveMotorKw());
+            snap.gearPos = "D";
+            assertTrue(Math.abs(snap.getEffectiveDriveMotorKw()) < 0.001,
+                    "Expected 0.0 kW drive motor power when stopped in D with MOTER_PWR_AVN=0, got " + snap.getEffectiveDriveMotorKw());
 
             // 8. Verify Chromium 1:1 pre-rendered HUD PNG layers + Public Sans TTF fonts are bundled and readable
             String[] requiredAssets = new String[]{
