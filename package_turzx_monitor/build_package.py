@@ -7,20 +7,30 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
+import time
+import urllib.request
 import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parent
 BUILD_DIR = BASE_DIR / "build"
 CLASSES_DIR = BUILD_DIR / "classes"
+ASSETS_DIR = BUILD_DIR / "assets"
 DEX_DIR = BUILD_DIR / "dex"
 PKG_STAGE_DIR = BUILD_DIR / "pkg_stage"
 USB_ROOT_DIR = BUILD_DIR / "usb_root"
 
 OUTER_ZIP_PATH = REPO_ROOT / "HKG_5W_TurzxMonitor_USB.zip"
-MONITOR_VERSION = "1.1.0"
+MONITOR_VERSION = "1.2.0"
+
+PUBLIC_SANS_FONTS = {
+    "PublicSans-Bold.ttf": "https://fonts.gstatic.com/s/publicsans/v21/ijwGs572Xtc6ZYQws9YVwllKVG8qX1oyOymu8Z65ww.ttf",
+    "PublicSans-Medium.ttf": "https://fonts.gstatic.com/s/publicsans/v21/ijwGs572Xtc6ZYQws9YVwllKVG8qX1oyOymuJJm5ww.ttf",
+}
 
 
 def find_javac() -> str:
@@ -79,10 +89,329 @@ def normalize_lf(path: Path) -> bytes:
     return raw
 
 
+def find_browser() -> str:
+    for name in ("msedge", "chrome", "chromium", "google-chrome"):
+        found = shutil.which(name)
+        if found:
+            return found
+    candidates = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    raise RuntimeError("No Chromium browser (Edge/Chrome) found for 1:1 HUD layer pre-rendering")
+
+
+def _get_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class _CdpClient:
+    def __init__(self, ws_url: str):
+        u = urlparse(ws_url)
+        self.sock = socket.create_connection((u.hostname, u.port), timeout=10)
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        req = (
+            f"GET {u.path} HTTP/1.1\r\n"
+            f"Host: {u.hostname}:{u.port}\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        self.sock.sendall(req.encode("ascii"))
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            buf += self.sock.recv(4096)
+        self.rx_buf = buf.split(b"\r\n\r\n", 1)[1]
+        self.msg_id = 0
+
+    def _recv_exact(self, n: int) -> bytes:
+        while len(self.rx_buf) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise EOFError("WebSocket closed")
+            self.rx_buf += chunk
+        out = self.rx_buf[:n]
+        self.rx_buf = self.rx_buf[n:]
+        return out
+
+    def _recv_frame(self) -> str:
+        while True:
+            hdr = self._recv_exact(2)
+            opcode = hdr[0] & 0x0F
+            length = hdr[1] & 0x7F
+            if length == 126:
+                length = int.from_bytes(self._recv_exact(2), "big")
+            elif length == 127:
+                length = int.from_bytes(self._recv_exact(8), "big")
+            payload = self._recv_exact(length)
+            if opcode == 0x01:
+                return payload.decode("utf-8")
+
+    def call(self, method: str, params: dict | None = None) -> dict:
+        self.msg_id += 1
+        mid = self.msg_id
+        msg = json.dumps({"id": mid, "method": method, "params": params or {}}).encode("utf-8")
+        frame = bytearray([0x81])
+        mask = os.urandom(4)
+        L = len(msg)
+        if L < 126:
+            frame.append(0x80 | L)
+        elif L < 65536:
+            frame.append(0x80 | 126)
+            frame.extend(L.to_bytes(2, "big"))
+        else:
+            frame.append(0x80 | 127)
+            frame.extend(L.to_bytes(8, "big"))
+        frame.extend(mask)
+        frame.extend(bytes(b ^ mask[i & 3] for i, b in enumerate(msg)))
+        self.sock.sendall(frame)
+        while True:
+            resp = json.loads(self._recv_frame())
+            if resp.get("id") == mid:
+                if "error" in resp:
+                    raise RuntimeError(f"CDP error: {resp['error']}")
+                return resp.get("result", {})
+
+
+def _capture_png(cdp: _CdpClient, clip: dict, omit_bg: bool = False) -> bytes:
+    if omit_bg:
+        cdp.call("Emulation.setDefaultBackgroundColorOverride", {"color": {"r": 0, "g": 0, "b": 0, "a": 0}})
+    else:
+        cdp.call("Emulation.setDefaultBackgroundColorOverride", {})
+    shot = cdp.call(
+        "Page.captureScreenshot",
+        {"format": "png", "fromSurface": True, "clip": clip},
+    )
+    return base64.b64decode(shot["data"])
+
+
+def generate_hud_assets(assets_dir: Path) -> None:
+    """Render 1:1 Chromium PNG layers from turzx_92_mockup.html and fetch Public Sans .ttf fonts."""
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    for fname, url in PUBLIC_SANS_FONTS.items():
+        req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            (assets_dir / fname).write_bytes(r.read())
+
+    browser = find_browser()
+    port = _get_free_port()
+    user_data = BUILD_DIR / "chrome_profile"
+    html_src = REPO_ROOT / "turzx_92_mockup.html"
+    proc = subprocess.Popen(
+        [
+            browser,
+            "--headless=new",
+            "--disable-gpu",
+            "--no-first-run",
+            "--no-default-browser-check",
+            f"--user-data-dir={user_data}",
+            f"--remote-debugging-port={port}",
+            "--window-size=1920,1080",
+            html_src.as_uri(),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        ws_url = None
+        for _ in range(40):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=1) as r:
+                    targets = json.loads(r.read().decode("utf-8"))
+                    for t in targets:
+                        if t.get("type") == "page" and "webSocketDebuggerUrl" in t:
+                            ws_url = t["webSocketDebuggerUrl"]
+                            break
+                if ws_url:
+                    break
+            except Exception:
+                time.sleep(0.2)
+        if not ws_url:
+            raise RuntimeError("Failed to connect to Headless Chromium CDP")
+
+        cdp = _CdpClient(ws_url)
+        cdp.call("Page.enable")
+        cdp.call(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": 1400, "height": 500, "deviceScaleFactor": 2, "mobile": False},
+        )
+        time.sleep(1.5)
+
+        cdp.call(
+            "Runtime.evaluate",
+            {
+                "expression": """
+                (() => {
+                    for (let i = 1; i < 9999; i++) window.clearInterval(i);
+                    window.updateViewportScale = () => {};
+                    const lcd = document.getElementById('turzxLcd');
+                    document.body.appendChild(lcd);
+                    Array.from(document.body.children).forEach(ch => {
+                        if (ch !== lcd) ch.remove();
+                    });
+                    document.documentElement.style.margin = '0';
+                    document.documentElement.style.padding = '0';
+                    document.documentElement.style.background = 'transparent';
+                    document.body.style.margin = '0';
+                    document.body.style.padding = '0';
+                    document.body.style.overflow = 'hidden';
+                    window.removeEventListener('resize', updateViewportScale);
+                    lcd.style.setProperty('position', 'fixed', 'important');
+                    lcd.style.setProperty('left', '0px', 'important');
+                    lcd.style.setProperty('top', '0px', 'important');
+                    lcd.style.setProperty('width', '960px', 'important');
+                    lcd.style.setProperty('height', '231px', 'important');
+                    lcd.style.setProperty('transform', 'none', 'important');
+                    lcd.style.setProperty('z-index', '999999', 'important');
+                    const lc = document.getElementById('laneConfText');
+                    if (lc) lc.innerHTML = '차선 <strong id="laneConfVal" style="color:var(--secondary);font-weight:600;">98%</strong>';
+                })()
+                """
+            },
+        )
+        time.sleep(0.2)
+
+        # 1. BASE SHELL (1920x462): static labels/rules/vinyl/chassis/seated figure, inactive HVAC & normal TPMS
+        cdp.call(
+            "Runtime.evaluate",
+            {
+                "expression": """
+                (() => {
+                    const hideSels = [
+                        '.ev-figure-row', '#socBar', '#effSubText', '#pwrBar', '#cumEnergyText', '#batMinMaxText',
+                        '#tpmsFlVal', '#tpmsFrVal', '#tpmsRlVal', '#tpmsRrVal',
+                        '#commaRoadCanvas', '.comma-fused-top', '.comma-corner-foot',
+                        '#mediaTitleText', '#mediaArtistText', '#mediaProgressBar', '#mediaCurTime', '#mediaDurTime',
+                        '#inTempText', '#outTempText'
+                    ];
+                    hideSels.forEach(s => document.querySelectorAll(s).forEach(el => el.style.visibility = 'hidden'));
+                    const fsl = document.getElementById('fanStepLabel');
+                    if (fsl) fsl.innerHTML = '<span style="visibility:hidden">3</span>단';
+                    ['#tpmsTempSummary', '#drvTempText', '#pasTempText'].forEach(s => {
+                        const el = document.querySelector(s);
+                        if (el) {
+                            el.style.color = 'transparent';
+                            el.querySelectorAll('*').forEach(c => c.style.color = 'transparent');
+                        }
+                    });
+                    ['airArrowUp', 'airArrowMid', 'airArrowDown'].forEach(id => {
+                        const g = document.getElementById(id);
+                        if (g) g.className.baseVal = 'air-arrow off';
+                    });
+                    document.querySelectorAll('#fanBarsRail .fan-bar-seg').forEach(b => b.classList.remove('active'));
+                    document.querySelectorAll('.hvac-icon-dock .hvac-dock-btn').forEach(b => b.classList.remove('on'));
+                })()
+                """
+            },
+        )
+        time.sleep(0.15)
+        (assets_dir / "base_shell.png").write_bytes(
+            _capture_png(cdp, {"x": 0, "y": 0, "width": 960, "height": 231, "scale": 1}, omit_bg=False)
+        )
+
+        # 2. ACTIVE SHELL (1920x462): active airflow arrows, 7 fan bars, 5 HVAC dock buttons, amber TPMS warning
+        cdp.call(
+            "Runtime.evaluate",
+            {
+                "expression": """
+                (() => {
+                    ['airArrowUp', 'airArrowMid', 'airArrowDown'].forEach(id => {
+                        const g = document.getElementById(id);
+                        if (g) g.className.baseVal = 'air-arrow';
+                    });
+                    document.querySelectorAll('#fanBarsRail .fan-bar-seg').forEach(b => b.classList.add('active'));
+                    document.querySelectorAll('.hvac-icon-dock .hvac-dock-btn').forEach(b => b.classList.add('on'));
+                    ['svgTireFl', 'svgTireFr', 'svgTireRl', 'svgTireRr'].forEach(id => {
+                        const t = document.getElementById(id);
+                        if (t) t.setAttribute('stroke', '#d9a441');
+                    });
+                    const ts = document.getElementById('tpmsStatusTag');
+                    if (ts) {
+                        ts.textContent = '저압';
+                        ts.className = 'tpms-status-dot warn';
+                    }
+                    const fsl = document.getElementById('fanStepLabel');
+                    if (fsl) fsl.style.visibility = 'hidden';
+                })()
+                """
+            },
+        )
+        time.sleep(0.15)
+        (assets_dir / "active_shell.png").write_bytes(
+            _capture_png(cdp, {"x": 0, "y": 0, "width": 960, "height": 231, "scale": 1}, omit_bg=False)
+        )
+
+        # 3. COLUMN 2 TRANSPARENT HUD OVERLAYS (582x438 at x=304..595, y=6..225 dp)
+        cdp.call(
+            "Runtime.evaluate",
+            {
+                "expression": """
+                (() => {
+                    document.body.style.background = 'transparent';
+                    const lcd = document.getElementById('turzxLcd');
+                    lcd.style.background = 'transparent';
+                    document.querySelector('.panel-ev').style.visibility = 'hidden';
+                    document.querySelector('.right-stack-col').style.visibility = 'hidden';
+                    const pn = document.querySelector('.panel-navi');
+                    pn.style.background = 'transparent';
+                    document.getElementById('commaRoadCanvas').style.visibility = 'hidden';
+
+                    document.querySelector('.comma-fused-top').style.visibility = 'visible';
+                    document.querySelector('.comma-corner-foot').style.visibility = 'visible';
+
+                    const hideHudDynamic = [
+                        '#hudGearChar', '#egoSpeedText', '#cruiseTargetText',
+                        '#camLimitNum', '#camDistFigure', '#camAvgSpeed',
+                        '#tbtDistFigure', '#tbtRoadName', '#tbtNextText',
+                        '#laneConfVal', '#leadDistText', '#steerAngleText'
+                    ];
+                    hideHudDynamic.forEach(s => {
+                        const el = document.querySelector(s);
+                        if (el) el.style.color = 'transparent';
+                    });
+                    const rChipSpans = document.querySelectorAll('.comma-corner-foot .corner-chip:nth-child(2) > span');
+                    if (rChipSpans.length >= 2) rChipSpans[1].style.color = 'transparent';
+                })()
+                """
+            },
+        )
+        for mode in ("section", "traffic", "none"):
+            cdp.call(
+                "Runtime.evaluate",
+                {
+                    "expression": f"""
+                    (() => {{
+                        setSdiEnforcementState('{mode}', 80, '2.3 km', 80, null);
+                        ['#camLimitNum', '#camDistFigure', '#camAvgSpeed'].forEach(s => {{
+                            const el = document.querySelector(s);
+                            if (el) el.style.color = 'transparent';
+                        }});
+                    }})()
+                    """
+                },
+            )
+            time.sleep(0.1)
+            (assets_dir / f"col2_hud_{mode}.png").write_bytes(
+                _capture_png(cdp, {"x": 304, "y": 6, "width": 291, "height": 219, "scale": 1}, omit_bg=True)
+            )
+    finally:
+        proc.kill()
+        shutil.rmtree(user_data, ignore_errors=True)
+
+
 def build() -> None:
     if BUILD_DIR.exists():
         shutil.rmtree(BUILD_DIR)
     CLASSES_DIR.mkdir(parents=True, exist_ok=True)
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     DEX_DIR.mkdir(parents=True, exist_ok=True)
     PKG_STAGE_DIR.mkdir(parents=True, exist_ok=True)
     USB_ROOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -98,6 +427,14 @@ def build() -> None:
     ]
     for rel in source_files:
         normalize_lf(BASE_DIR / rel)
+
+    # 1b. Render 1:1 Chromium HUD layer PNGs + fetch Public Sans .ttf fonts
+    generate_hud_assets(ASSETS_DIR)
+    classes_assets_dir = CLASSES_DIR / "assets"
+    classes_assets_dir.mkdir(parents=True, exist_ok=True)
+    for asset_file in sorted(ASSETS_DIR.iterdir()):
+        if asset_file.is_file():
+            shutil.copy2(asset_file, classes_assets_dir / asset_file.name)
 
     # 2. Compile TurzxMonitorMain.java + compile-time stubs (Java 8 target -> Android API 19 DEX)
     javac = find_javac()
@@ -135,6 +472,11 @@ def build() -> None:
         zinfo = zipfile.ZipInfo("classes.dex", date_time=(2026, 1, 1, 0, 0, 0))
         zinfo.compress_type = zipfile.ZIP_DEFLATED
         zf.writestr(zinfo, dex_bytes)
+        for asset_file in sorted(ASSETS_DIR.iterdir()):
+            if asset_file.is_file():
+                ainfo = zipfile.ZipInfo(f"assets/{asset_file.name}", date_time=(2026, 1, 1, 0, 0, 0))
+                ainfo.compress_type = zipfile.ZIP_DEFLATED
+                zf.writestr(ainfo, asset_file.read_bytes())
 
     jar_bytes = jar_path.read_bytes()
     jar_sha = sha256_bytes(jar_bytes)

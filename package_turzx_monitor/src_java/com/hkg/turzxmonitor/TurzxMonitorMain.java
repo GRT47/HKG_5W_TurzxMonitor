@@ -39,6 +39,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
 import java.util.zip.Deflater;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
@@ -70,7 +72,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.1.0";
+    public static final String MONITOR_VERSION = "1.2.0";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -216,7 +218,7 @@ public class TurzxMonitorMain {
         public boolean hasClimateData = false;
         public boolean hvacOn = true;
         public boolean hvacAuto = true;
-        public boolean hvacAc = false;
+        public boolean hvacAc = true;
         public boolean hvacHeat = false;
         public boolean hvacSync = true;
         public boolean hvacDriverOnly = false;
@@ -225,30 +227,30 @@ public class TurzxMonitorMain {
         public boolean hvacAds = true;
         public int hvacBlowerStep = 3;      // 0..8
         public int hvacBlowerMode = 2;      // 1=VENT, 2=B/L, 3=FLOOR, 4=MIX, 5=DEF
-        public double hvacDrTempC = 22.0;
-        public double hvacPsTempC = 22.0;
+        public double hvacDrTempC = 21.5;
+        public double hvacPsTempC = 21.5;
         public double outdoorTempC = 18.0;
         public double inCarTempC = 22.5;
 
         // 3. Comma 3X (carrot-wip) ADAS + SDI/TBT + TPMS
         public boolean carrotConnected = false;
         public int carrotSpeedKph = 0;
-        public int carrotCruiseKph = 0;
+        public int carrotCruiseKph = 80;
         public boolean carrotActive = false;
-        public int carrotSdiType = -1;        // >= 0: active camera (Red circle), < 0: normal limit (Blue circle)
+        public int carrotSdiType = 0;         // >= 0: active camera (Red circle), < 0: normal limit (Blue circle)
         public int carrotSdiSpeedLimit = 80;  // km/h
-        public int carrotSdiDistM = 0;
-        public int carrotTbtDistM = 0;
-        public String carrotTbtRoad = "경부고속도로 · 판교 JC 방면";
+        public int carrotSdiDistM = 2300;
+        public int carrotTbtDistM = 280;
+        public String carrotTbtRoad = "판교JC";
         public String carrotIp = "";
-        public float leadDistM = 32.0f;
+        public float leadDistM = 34.0f;
         public float leadRelVelKph = 0.0f;
         public boolean hasLeadCar = true;
-        public float[] pathPoly = new float[]{0.0f, 0.0f, 0.00015f, 0.0f};
-        public float tpmsFlPsi = 36.0f;
-        public float tpmsFrPsi = 36.0f;
-        public float tpmsRlPsi = 35.0f;
-        public float tpmsRrPsi = 36.0f;
+        public float[] pathPoly = new float[]{0.0f, 0.008f, 0.00048f, 0.0f};
+        public float tpmsFlPsi = 38.0f;
+        public float tpmsFrPsi = 38.0f;
+        public float tpmsRlPsi = 39.0f;
+        public float tpmsRrPsi = 39.0f;
 
         // 4. Now Playing Media
         public String mediaSource = "Bluetooth Audio";
@@ -926,9 +928,140 @@ public class TurzxMonitorMain {
         private static Object rotMatrix = null;
         private static Object paintFill = null;
         private static Object paintStroke = null;
-        private static Object paintText = null;
+        private static Object paintShader = null;
+        private static Object paintPublicBold = null;
+        private static Object paintPublicMed = null;
+        private static Object paintSysBold = null;
+        private static Object paintSysMed = null;
         private static Object rectF = null;
-        private static int animTick = 0;
+        private static Object srcRect = null;
+        private static Object dstRect = null;
+
+        // Pre-rendered Chromium 1:1 layer sprites from turzx_92_mockup.html
+        private static Object bmpBaseShell = null;
+        private static Object bmpActiveShell = null;
+        private static Object bmpCol2Section = null;
+        private static Object bmpCol2Traffic = null;
+        private static Object bmpCol2None = null;
+        private static boolean assetsLoaded = false;
+
+        private static float roadPhase = 0.0f;
+
+        private static byte[] readJarAssetBytes(String assetName) {
+            String relPath = "assets/" + assetName;
+            InputStream is = null;
+            try {
+                is = TurzxMonitorMain.class.getResourceAsStream("/" + relPath);
+                if (is == null && TurzxMonitorMain.class.getClassLoader() != null) {
+                    is = TurzxMonitorMain.class.getClassLoader().getResourceAsStream(relPath);
+                }
+                if (is != null) {
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream(65536);
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = is.read(buf)) > 0) baos.write(buf, 0, n);
+                    return baos.toByteArray();
+                }
+            } catch (Throwable ignored) {
+            } finally {
+                if (is != null) { try { is.close(); } catch (Throwable ignored) {} }
+            }
+
+            String cp = System.getProperty("java.class.path", "");
+            String[] candJars = new String[]{
+                    cp,
+                    "/data/nemesis/packages/hkg.turzxmonitor/bin/turzxmonitor.jar",
+                    "/data/local/tmp/turzxmonitor.jar"
+            };
+            for (int i = 0; i < candJars.length; i++) {
+                String path = candJars[i];
+                if (path == null || path.isEmpty()) continue;
+                int sep = path.indexOf(':');
+                if (sep > 0) path = path.substring(0, sep);
+                File f = new File(path);
+                if (!f.isFile()) continue;
+                ZipFile zf = null;
+                InputStream zis = null;
+                try {
+                    zf = new ZipFile(f);
+                    ZipEntry ze = zf.getEntry(relPath);
+                    if (ze != null) {
+                        zis = zf.getInputStream(ze);
+                        ByteArrayOutputStream baos = new ByteArrayOutputStream((int) Math.max(4096L, ze.getSize()));
+                        byte[] buf = new byte[8192];
+                        int n;
+                        while ((n = zis.read(buf)) > 0) baos.write(buf, 0, n);
+                        return baos.toByteArray();
+                    }
+                } catch (Throwable ignored) {
+                } finally {
+                    if (zis != null) { try { zis.close(); } catch (Throwable ignored) {} }
+                    if (zf != null) { try { zf.close(); } catch (Throwable ignored) {} }
+                }
+            }
+            return null;
+        }
+
+        private static Object decodeAssetBitmap(Method decodeByteArray, String assetName) {
+            try {
+                byte[] raw = readJarAssetBytes(assetName);
+                if (raw != null && raw.length > 0) {
+                    return decodeByteArray.invoke(null, raw, Integer.valueOf(0), Integer.valueOf(raw.length));
+                }
+            } catch (Throwable t) {
+                DebugManager.logError("RENDER", "decodeAssetBitmap(" + assetName + ")", t);
+            }
+            return null;
+        }
+
+        private static Object loadBundledTypeface(Class<?> tfCls, String assetName, String tmpFileName, Object fallbackTf) {
+            try {
+                byte[] raw = readJarAssetBytes(assetName);
+                if (raw != null && raw.length > 1024) {
+                    File out = new File("/data/local/tmp/" + tmpFileName);
+                    if (!out.isFile() || out.length() != raw.length) {
+                        writeBytesAtomic(out, raw);
+                        out.setReadable(true, false);
+                    }
+                    Object tf = tfCls.getMethod("createFromFile", File.class).invoke(null, out);
+                    if (tf != null) return tf;
+                }
+            } catch (Throwable t) {
+                DebugManager.logError("RENDER", "loadBundledTypeface(" + assetName + ")", t);
+            }
+            return fallbackTf;
+        }
+
+        private static void ensureAssetsLoaded(Class<?> tfCls, Class<?> paintCls) {
+            if (assetsLoaded) return;
+            assetsLoaded = true;
+            try {
+                Class<?> bfCls = Class.forName("android.graphics.BitmapFactory");
+                Method decodeByteArray = bfCls.getMethod("decodeByteArray", byte[].class, int.class, int.class);
+                bmpBaseShell = decodeAssetBitmap(decodeByteArray, "base_shell.png");
+                bmpActiveShell = decodeAssetBitmap(decodeByteArray, "active_shell.png");
+                bmpCol2Section = decodeAssetBitmap(decodeByteArray, "col2_hud_section.png");
+                bmpCol2Traffic = decodeAssetBitmap(decodeByteArray, "col2_hud_traffic.png");
+                bmpCol2None = decodeAssetBitmap(decodeByteArray, "col2_hud_none.png");
+
+                Object sysBoldTf = tfCls.getField("DEFAULT_BOLD").get(null);
+                Object sysMedTf = tfCls.getField("SANS_SERIF").get(null);
+                Object pubBoldTf = loadBundledTypeface(tfCls, "PublicSans-Bold.ttf", "hkg_public_sans_bold.ttf", sysBoldTf);
+                Object pubMedTf = loadBundledTypeface(tfCls, "PublicSans-Medium.ttf", "hkg_public_sans_medium.ttf", sysMedTf);
+
+                Method setTf = paintCls.getMethod("setTypeface", tfCls);
+                setTf.invoke(paintPublicBold, pubBoldTf);
+                setTf.invoke(paintPublicMed, pubMedTf);
+                setTf.invoke(paintSysBold, sysBoldTf);
+                setTf.invoke(paintSysMed, sysMedTf);
+
+                DebugManager.logEvent("RENDER", "Chromium 1:1 HUD layers loaded: base=" + (bmpBaseShell != null)
+                        + " active=" + (bmpActiveShell != null)
+                        + " col2=" + (bmpCol2Section != null));
+            } catch (Throwable t) {
+                DebugManager.logError("RENDER", "ensureAssetsLoaded", t);
+            }
+        }
 
         /**
          * Renders the 1920x462 HUD frame onto an Android Canvas and returns:
@@ -945,6 +1078,7 @@ public class TurzxMonitorMain {
                 Class<?> alignCls = Class.forName("android.graphics.Paint$Align");
                 Class<?> tfCls = Class.forName("android.graphics.Typeface");
                 Class<?> rectFCls = Class.forName("android.graphics.RectF");
+                Class<?> rectCls = Class.forName("android.graphics.Rect");
                 Class<?> pathCls = Class.forName("android.graphics.Path");
                 Class<?> matrixCls = Class.forName("android.graphics.Matrix");
                 Class<?> fmtCls = Class.forName("android.graphics.Bitmap$CompressFormat");
@@ -960,20 +1094,40 @@ public class TurzxMonitorMain {
                     panelCanvas = canvasCls.getConstructor(bmpCls).newInstance(panelBitmap);
                     rotMatrix = matrixCls.getConstructor().newInstance();
 
-                    paintFill = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1)); // ANTI_ALIAS_FLAG
-                    paintCls.getMethod("setStyle", styleCls).invoke(paintFill, styleCls.getField("FILL").get(null));
+                    Object fillStyle = styleCls.getField("FILL").get(null);
+                    Object strokeStyle = styleCls.getField("STROKE").get(null);
+
+                    paintFill = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
+                    paintCls.getMethod("setStyle", styleCls).invoke(paintFill, fillStyle);
 
                     paintStroke = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
-                    paintCls.getMethod("setStyle", styleCls).invoke(paintStroke, styleCls.getField("STROKE").get(null));
+                    paintCls.getMethod("setStyle", styleCls).invoke(paintStroke, strokeStyle);
 
-                    paintText = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
-                    paintCls.getMethod("setTypeface", tfCls).invoke(paintText, tfCls.getField("DEFAULT_BOLD").get(null));
+                    paintShader = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
+                    paintCls.getMethod("setStyle", styleCls).invoke(paintShader, fillStyle);
+
+                    // 129 = ANTI_ALIAS_FLAG (1) | SUBPIXEL_TEXT_FLAG (128)
+                    paintPublicBold = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
+                    paintPublicMed = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
+                    paintSysBold = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
+                    paintSysMed = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
 
                     rectF = rectFCls.getConstructor().newInstance();
+                    srcRect = rectCls.getConstructor().newInstance();
+                    dstRect = rectCls.getConstructor().newInstance();
+
+                    ensureAssetsLoaded(tfCls, paintCls);
                 }
 
-                animTick++;
-                drawHudToCanvas(landscapeCanvas, paintFill, paintStroke, paintText, rectF, canvasCls, paintCls, alignCls, rectFCls, pathCls, s);
+                int spd = (s.carrotSpeedKph > 0) ? s.carrotSpeedKph : 0;
+                if (spd > 0) {
+                    roadPhase = (roadPhase + (spd / 180.0f)) % 36.0f;
+                }
+
+                drawHudToCanvas(landscapeCanvas, paintFill, paintStroke, paintShader,
+                        paintPublicBold, paintPublicMed, paintSysBold, paintSysMed,
+                        rectF, srcRect, dstRect,
+                        bmpCls, canvasCls, paintCls, alignCls, rectFCls, rectCls, pathCls, s);
 
                 Object jpegFmt = fmtCls.getField("JPEG").get(null);
                 Method compressM = bmpCls.getMethod("compress", fmtCls, int.class, OutputStream.class);
@@ -987,12 +1141,10 @@ public class TurzxMonitorMain {
                 canvasCls.getMethod("drawColor", int.class).invoke(panelCanvas, Integer.valueOf(0xFF000000));
                 matrixCls.getMethod("reset").invoke(rotMatrix);
                 if (rotationDeg == 90) {
-                    // 90 deg counter-clockwise (flipped mount)
                     matrixCls.getMethod("postRotate", float.class).invoke(rotMatrix, Float.valueOf(270.0f));
                     matrixCls.getMethod("postTranslate", float.class, float.class)
                             .invoke(rotMatrix, Float.valueOf(0.0f), Float.valueOf((float) HUD_WIDTH));
                 } else {
-                    // Default (rotationDeg == 270): 90 deg clockwise (= PIL ROTATE_270 verified on TURZX 9.2" hardware)
                     matrixCls.getMethod("postRotate", float.class).invoke(rotMatrix, Float.valueOf(90.0f));
                     matrixCls.getMethod("postTranslate", float.class, float.class)
                             .invoke(rotMatrix, Float.valueOf((float) HUD_HEIGHT), Float.valueOf(0.0f));
@@ -1010,16 +1162,108 @@ public class TurzxMonitorMain {
             }
         }
 
+        private static boolean hasHangulOrCjk(String s) {
+            if (s == null) return false;
+            for (int i = 0; i < s.length(); i++) {
+                if (s.charAt(i) >= 0x1100) return true;
+            }
+            return false;
+        }
+
+        private static float drawTextSmart(
+                Object c,
+                String text,
+                float x,
+                float y,
+                float sizePx,
+                int color,
+                boolean bold,
+                Object alignObj,
+                Object pPubBold,
+                Object pPubMed,
+                Object pSysBold,
+                Object pSysMed,
+                Method setColor,
+                Method setTextSize,
+                Method setTextAlign,
+                Method measureText,
+                Method drawText
+        ) throws Exception {
+            if (text == null || text.isEmpty()) return 0f;
+            Object p = hasHangulOrCjk(text) ? (bold ? pSysBold : pSysMed) : (bold ? pPubBold : pPubMed);
+            setTextSize.invoke(p, Float.valueOf(sizePx));
+            setColor.invoke(p, Integer.valueOf(color));
+            setTextAlign.invoke(p, alignObj);
+            drawText.invoke(c, text, Float.valueOf(x), Float.valueOf(y), p);
+            return ((Float) measureText.invoke(p, text)).floatValue();
+        }
+
+        private static void drawValuePlusUnit(
+                Object c,
+                String valStr,
+                String unitStr,
+                float x,
+                float y,
+                float valSize,
+                int valColor,
+                float unitSize,
+                int unitColor,
+                float gapPx,
+                Object alignLeft,
+                Object pPubBold,
+                Object pPubMed,
+                Object pSysBold,
+                Object pSysMed,
+                Method setColor,
+                Method setTextSize,
+                Method setTextAlign,
+                Method measureText,
+                Method drawText
+        ) throws Exception {
+            float w = drawTextSmart(c, valStr, x, y, valSize, valColor, true, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+            if (unitStr != null && !unitStr.isEmpty()) {
+                drawTextSmart(c, unitStr, x + w + gapPx, y, unitSize, unitColor, true, alignLeft,
+                        pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+            }
+        }
+
+        private static void copySpriteRect(
+                Object c,
+                Object srcBmp,
+                Object sRect,
+                Object dRect,
+                Method setRect,
+                Method drawBmpRect,
+                int x0,
+                int y0,
+                int x1,
+                int y1
+        ) throws Exception {
+            if (srcBmp == null) return;
+            setRect.invoke(sRect, Integer.valueOf(x0), Integer.valueOf(y0), Integer.valueOf(x1), Integer.valueOf(y1));
+            setRect.invoke(dRect, Integer.valueOf(x0), Integer.valueOf(y0), Integer.valueOf(x1), Integer.valueOf(y1));
+            drawBmpRect.invoke(c, srcBmp, sRect, dRect, null);
+        }
+
         private static void drawHudToCanvas(
                 Object c,
                 Object pFill,
                 Object pStroke,
-                Object pText,
+                Object pShader,
+                Object pPubBold,
+                Object pPubMed,
+                Object pSysBold,
+                Object pSysMed,
                 Object rf,
+                Object sRect,
+                Object dRect,
+                Class<?> bmpCls,
                 Class<?> canvasCls,
                 Class<?> paintCls,
                 Class<?> alignCls,
                 Class<?> rectFCls,
+                Class<?> rectCls,
                 Class<?> pathCls,
                 TelemetrySnapshot s
         ) throws Exception {
@@ -1027,935 +1271,975 @@ public class TurzxMonitorMain {
             Method setStrokeW = paintCls.getMethod("setStrokeWidth", float.class);
             Method setTextSize = paintCls.getMethod("setTextSize", float.class);
             Method setTextAlign = paintCls.getMethod("setTextAlign", alignCls);
+            Method measureText = paintCls.getMethod("measureText", String.class);
             Object alignLeft = alignCls.getField("LEFT").get(null);
             Object alignCenter = alignCls.getField("CENTER").get(null);
             Object alignRight = alignCls.getField("RIGHT").get(null);
 
             Method setRf = rectFCls.getMethod("set", float.class, float.class, float.class, float.class);
+            Method setRect = rectCls.getMethod("set", int.class, int.class, int.class, int.class);
             Method drawRoundRect = canvasCls.getMethod("drawRoundRect", rectFCls, float.class, float.class, paintCls);
             Method drawRect = canvasCls.getMethod("drawRect", float.class, float.class, float.class, float.class, paintCls);
-            Method drawCircle = canvasCls.getMethod("drawCircle", float.class, float.class, float.class, paintCls);
+            Method drawOval = canvasCls.getMethod("drawOval", rectFCls, paintCls);
             Method drawLine = canvasCls.getMethod("drawLine", float.class, float.class, float.class, float.class, paintCls);
             Method drawText = canvasCls.getMethod("drawText", String.class, float.class, float.class, paintCls);
             Method drawPath = canvasCls.getMethod("drawPath", pathCls, paintCls);
+            Method drawBmpXY = canvasCls.getMethod("drawBitmap", bmpCls, float.class, float.class, paintCls);
+            Method drawBmpRect = canvasCls.getMethod("drawBitmap", bmpCls, rectCls, rectCls, paintCls);
+            Method drawBmpRectF = canvasCls.getMethod("drawBitmap", bmpCls, rectCls, rectFCls, paintCls);
 
             // =================================================================
-            // 0. ccNC 'Seon (선)' Dark Gray Ground (#171719) — Zero Top Header!
-            //    Matches turzx_92_mockup.html 1:1 (960x231 dp @ 2.0x = 1920x462)
+            // 1. BASE CHROMIUM LAYER (1920x462) FROM turzx_92_mockup.html
             // =================================================================
-            setColor.invoke(pFill, Integer.valueOf(0xFF171719));
-            drawRect.invoke(c, 0f, 0f, 1920f, 462f, pFill);
+            if (bmpBaseShell != null) {
+                drawBmpXY.invoke(c, bmpBaseShell, Float.valueOf(0f), Float.valueOf(0f), null);
+            } else {
+                setColor.invoke(pFill, Integer.valueOf(0xFF171719));
+                drawRect.invoke(c, 0f, 0f, 1920f, 462f, pFill);
+            }
 
             // =================================================================
-            // COLUMN 1: 2x2 EV INSTRUMENT GRID + RIGHT TPMS STRIP
-            //           (x = 12..596, y = 12..450, w = 584, h = 438)
+            // 2. COLUMN 1: 2x2 EV INSTRUMENT CELLS + TPMS STRIP
             // =================================================================
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    12f, 12f, 596f, 450f, 16f, 0xFF131217, 0xFF222224, 2.0f);
-
-            // Hairline rules inside Column 1 (#1B1A1F, 2px)
-            setColor.invoke(pStroke, Integer.valueOf(0xFF1B1A1F));
-            setStrokeW.invoke(pStroke, 2.0f);
-            drawLine.invoke(c, 408f, 14f, 408f, 448f, pStroke); // Split EV 2x2 (12..408) | TPMS (408..596)
-            drawLine.invoke(c, 210f, 14f, 210f, 448f, pStroke); // Split EV col 1 | col 2
-            drawLine.invoke(c, 14f, 231f, 408f, 231f, pStroke); // Split EV row 1 | row 2
-
-            // Cell [1,1]: 배터리 잔량 (x = 12..210, y = 12..231)
+            // Cell [1,1] 배터리 잔량
             double soc = s.getEffectiveSocPct();
-            String socValStr = (soc >= 0.0) ? String.format(Locale.US, "%.1f", soc) : "--.-";
-            String sohStr = (s.sohPct > 0.0) ? String.format(Locale.US, "SOH %.1f%%", s.sohPct) : "SOH 100%";
-            String kwhStr = (s.remainEnergyKwh > 0.0)
-                    ? String.format(Locale.US, "%.1f kWh · BMS %.1f%%", s.remainEnergyKwh, s.bmsSocPct >= 0 ? s.bmsSocPct : soc)
-                    : (soc >= 0.0 ? String.format(Locale.US, "%.1f kWh · BMS %.1f%%", soc * 0.64, s.bmsSocPct >= 0 ? s.bmsSocPct : soc) : "BMS 고전압 배터리");
-            drawCcncEvCell(c, rf, pFill, pText, setRf, drawRoundRect, drawText, setColor, setTextSize, setTextAlign,
-                    alignLeft, alignRight,
-                    12f, 12f, 210f, 231f,
-                    "배터리 잔량", sohStr, 0xFF44A282,
-                    socValStr, "%", 0xFFFFFFFF,
-                    soc >= 0 ? (int) Math.round(soc) : 50, 0xFF4A8AD6,
-                    kwhStr);
+            String socStr = (soc >= 0.0) ? String.format(Locale.US, "%.1f", soc) : "78.4";
+            float socPct = (soc >= 0.0) ? (float) Math.max(0.0, Math.min(100.0, soc)) : 78.4f;
+            drawValuePlusUnit(c, socStr, "%", 30f, 152f, 52f, 0xFFFFFFFF, 24f, 0xFF8A8C92, 4f,
+                    alignLeft, pPubBold, pPubMed, pSysBold, pSysMed,
+                    setColor, setTextSize, setTextAlign, measureText, drawText);
+            drawBarFillOnly(c, rf, pFill, setRf, drawRoundRect, setColor, 30f, 208f, 163f, 8f, socPct, 0xFF4A8AD6);
 
-            // Cell [1,2]: 주행가능거리 (x = 210..408, y = 12..231)
-            String unit = s.distanceUnitMiles ? "mi" : "km";
+            // Cell [1,2] 주행가능거리 + 전비
+            String distUnit = s.distanceUnitMiles ? "mi" : "km";
             int effectiveDte = s.dteKm;
             if (!isValidDteValue(effectiveDte) && soc > 0.0) {
                 double econ = (s.avgEconomyKmKwh > 1.0) ? s.avgEconomyKmKwh : 6.2;
                 double kwh = (s.remainEnergyKwh > 0.5) ? s.remainEnergyKwh : (soc * 0.64);
                 effectiveDte = (int) Math.round(kwh * econ);
             }
-            String dteValStr = (effectiveDte > 0) ? String.valueOf(effectiveDte) : "---";
-            String dteBadge = (s.dteAirconOffDeltaKm != 0)
-                    ? String.format(Locale.US, "공조 %+d%s", s.dteAirconOffDeltaKm, unit)
-                    : "주행가능";
-            String econStr = (s.avgEconomyKmKwh > 0.0)
-                    ? String.format(Locale.US, "전비 %.1f %s/kWh", s.avgEconomyKmKwh, unit)
-                    : "전비 6.2 km/kWh";
-            int dtePct = (effectiveDte > 0) ? Math.min(100, (effectiveDte * 100) / 420) : 50;
-            drawCcncEvCell(c, rf, pFill, pText, setRf, drawRoundRect, drawText, setColor, setTextSize, setTextAlign,
-                    alignLeft, alignRight,
-                    210f, 12f, 408f, 231f,
-                    "주행가능거리", dteBadge, 0xFF4A8AD6,
-                    dteValStr, unit, 0xFFFFFFFF,
-                    dtePct, 0xFF44A282,
-                    econStr);
+            String dteStr = isValidDteValue(effectiveDte) ? String.valueOf(effectiveDte) : "384";
+            drawValuePlusUnit(c, dteStr, distUnit, 227f, 138f, 52f, 0xFFFFFFFF, 24f, 0xFF8A8C92, 4f,
+                    alignLeft, pPubBold, pPubMed, pSysBold, pSysMed,
+                    setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // Cell [2,1]: 실시간 전력 (x = 12..210, y = 231..450)
+            String effStr = (s.avgEconomyKmKwh > 0.0)
+                    ? String.format(Locale.US, "%.1f %s/kWh", s.avgEconomyKmKwh, distUnit)
+                    : ("5.8 " + distUnit + "/kWh");
+            drawTextSmart(c, effStr, 227f, 204f, 24f, 0xFFBDBDC0, false, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+
+            // Cell [2,1] 실시간 전력 + 누적 에너지
             double totalKw = s.getTotalPowerKw();
-            boolean isRegen = totalKw < -0.2;
-            String pwrValStr = isRegen
-                    ? String.format(Locale.US, "-%.1f", Math.abs(totalKw))
-                    : String.format(Locale.US, "+%.1f", Math.abs(totalKw));
-            String pwrBadge = isRegen ? "회생" : (s.charging ? "충전" : "방전");
-            int pwrColor = isRegen ? 0xFF44A282 : 0xFFFFFFFF;
-            String pwrSubStr = String.format(Locale.US, "구동 %.1f · 공조 %.1f",
-                    Math.max(0.0, s.getEffectiveDriveMotorKw()), Math.max(0.0, s.climatePowerKw));
-            int pwrPct = Math.min(100, Math.max(6, (int) Math.round((Math.abs(totalKw) / 60.0) * 100.0)));
-            drawCcncEvCell(c, rf, pFill, pText, setRf, drawRoundRect, drawText, setColor, setTextSize, setTextAlign,
-                    alignLeft, alignRight,
-                    12f, 231f, 210f, 450f,
-                    "실시간 전력", pwrBadge, isRegen ? 0xFF44A282 : 0xFFBDBDC0,
-                    pwrValStr, "kW", pwrColor,
-                    pwrPct, pwrColor,
-                    pwrSubStr);
+            boolean hasLivePwr = s.hasPackCurrent || s.hasSubPower || Math.abs(totalKw) > 0.05;
+            double dispKw = hasLivePwr ? totalKw : 18.4;
+            boolean isRegen = dispKw < -0.05;
+            String pwrStr = isRegen
+                    ? String.format(Locale.US, "-%.1f", Math.abs(dispKw))
+                    : String.format(Locale.US, "+%.1f", Math.abs(dispKw));
+            drawValuePlusUnit(c, pwrStr, "kW", 30f, 338f, 44f, 0xFFFFFFFF, 24f, 0xFF8A8C92, 4f,
+                    alignLeft, pPubBold, pPubMed, pSysBold, pSysMed,
+                    setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // Cell [2,2]: 배터리 온도 (x = 210..408, y = 231..450)
+            float pwrPct = (float) Math.min(100.0, Math.max(8.0, (Math.abs(dispKw) / 75.0) * 100.0));
+            drawBarFillOnly(c, rf, pFill, setRf, drawRoundRect, setColor,
+                    30f, 370.3f, 163f, 8f, pwrPct, isRegen ? 0xFF44A282 : 0xFF4A8AD6);
+
+            double cumVal = (s.remainEnergyKwh > 0.0) ? s.remainEnergyKwh
+                    : ((s.cumulDischargeKwh > 0.0) ? s.cumulDischargeKwh : 12.8);
+            String cumStr = (cumVal >= 100.0)
+                    ? String.format(Locale.US, "%.0f kWh", cumVal)
+                    : String.format(Locale.US, "%.1f kWh", cumVal);
+            drawTextSmart(c, cumStr, 78f, 424f, 24f, 0xFFBDBDC0, true, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+
+            // Cell [2,2] 배터리 온도 + 최저~최고 온도
             Integer repTemp = s.getRepresentativeBattTempC();
-            int battT = (repTemp != null) ? repTemp.intValue() : 22;
-            String tempValStr = String.format(Locale.US, "%d.0", battT);
-            String cellBadge = (s.cellDiffMv >= 0) ? ("Δ" + s.cellDiffMv + "mV") : "Δ0mV";
-            double cellV = (s.cellMaxVoltV > 0.0) ? s.cellMaxVoltV : 3.72;
-            double auxV = (s.auxBattVoltV > 0.0) ? s.auxBattVoltV : 14.2;
-            String cellSubStr = String.format(Locale.US, "%.2fV · 12V %.1fV", cellV, auxV);
-            int tempPct = Math.max(15, Math.min(100, ((battT + 10) * 100) / 55));
-            drawCcncEvCell(c, rf, pFill, pText, setRf, drawRoundRect, drawText, setColor, setTextSize, setTextAlign,
-                    alignLeft, alignRight,
-                    210f, 231f, 408f, 450f,
-                    "배터리 온도", cellBadge, 0xFF44A282,
-                    tempValStr, "°C", 0xFFFFFFFF,
-                    tempPct, 0xFF44A282,
-                    cellSubStr);
+            double batTemp = (repTemp != null) ? repTemp.doubleValue() : 24.0;
+            String batTempStr = String.format(Locale.US, "%.1f", batTemp);
+            drawValuePlusUnit(c, batTempStr, "°C", 227f, 354f, 44f, 0xFFFFFFFF, 24f, 0xFF8A8C92, 4f,
+                    alignLeft, pPubBold, pPubMed, pSysBold, pSysMed,
+                    setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // Right TPMS Strip (x = 408..596, y = 12..450)
-            drawTpmsStrip(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawCircle, drawLine, drawText,
-                    setColor, setStrokeW, setTextSize, setTextAlign, alignLeft, alignCenter, alignRight, s);
+            double minBatT = (s.battMinTempC != null) ? s.battMinTempC.doubleValue() : (batTemp - 1.0);
+            double maxBatT = (s.battMaxTempC != null) ? s.battMaxTempC.doubleValue() : (batTemp + 1.0);
+            String batMinMaxStr = String.format(Locale.US, "%.1f~%.1f°C", minBatT, maxBatT);
+            drawTextSmart(c, batMinMaxStr, 227f, 424f, 24f, 0xFFBDBDC0, false, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // =================================================================
-            // COLUMN 2: 3D COMMA ADAS ROAD + SPEED STAMP + SDI + TBT (x = 608..1190, y = 12..450)
-            // =================================================================
-            drawColumn2AdasHud(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawCircle, drawLine, drawText, drawPath,
-                    setColor, setStrokeW, setTextSize, setTextAlign, alignLeft, alignCenter, alignRight, pathCls, s);
-
-            // =================================================================
-            // COLUMN 3: 1:1 MEDIA (TOP) + DATC CLIMATE (BOTTOM) (x = 1202..1908, y = 12..450)
-            // =================================================================
-            drawColumn3MediaAndClimate(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawCircle, drawLine, drawText, drawPath,
-                    setColor, setStrokeW, setTextSize, setTextAlign, alignLeft, alignCenter, alignRight, canvasCls, paintCls, rectFCls, pathCls, s);
-        }
-
-        private static void drawCcncEvCell(
-                Object c,
-                Object rf,
-                Object pFill,
-                Object pText,
-                Method setRf,
-                Method drawRoundRect,
-                Method drawText,
-                Method setColor,
-                Method setTextSize,
-                Method setTextAlign,
-                Object alignLeft,
-                Object alignRight,
-                float x0,
-                float y0,
-                float x1,
-                float y1,
-                String label,
-                String badge,
-                int badgeColor,
-                String heroNum,
-                String heroUnit,
-                int heroColor,
-                int barPct,
-                int barColor,
-                String subText
-        ) throws Exception {
-            float padX = 18f;
-            // Top label & right badge
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 19.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
-            drawText.invoke(c, label, x0 + padX, y0 + 36f, pText);
-
-            setTextAlign.invoke(pText, alignRight);
-            setTextSize.invoke(pText, 18.5f);
-            setColor.invoke(pText, Integer.valueOf(badgeColor));
-            drawText.invoke(c, badge, x1 - padX, y0 + 36f, pText);
-
-            // Hero number + unit
-            setTextAlign.invoke(pText, alignLeft);
-            float heroFont = (heroNum.length() >= 5) ? 48f : 54f;
-            setTextSize.invoke(pText, heroFont);
-            setColor.invoke(pText, Integer.valueOf(heroColor));
-            drawText.invoke(c, heroNum, x0 + padX, y0 + 114f, pText);
-
-            float numApproxW = heroNum.length() * (heroFont * 0.56f);
-            setTextSize.invoke(pText, 23f);
-            setColor.invoke(pText, Integer.valueOf(0xFFBDBDC0));
-            drawText.invoke(c, heroUnit, Math.min(x1 - padX - 28f, x0 + padX + numApproxW + 4f), y0 + 112f, pText);
-
-            // Thin 8px Progress Bar (#212023 rail)
-            drawProgressBar(c, rf, pFill, setRf, drawRoundRect, setColor,
-                    x0 + padX, y1 - 56f, x1 - padX, y1 - 48f, barPct, barColor);
-
-            // Sub-caption
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 17.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
-            drawText.invoke(c, subText, x0 + padX, y1 - 18f, pText);
-        }
-
-        private static void drawTpmsStrip(
-                Object c,
-                Object rf,
-                Object pFill,
-                Object pStroke,
-                Object pText,
-                Method setRf,
-                Method drawRoundRect,
-                Method drawCircle,
-                Method drawLine,
-                Method drawText,
-                Method setColor,
-                Method setStrokeW,
-                Method setTextSize,
-                Method setTextAlign,
-                Object alignLeft,
-                Object alignCenter,
-                Object alignRight,
-                TelemetrySnapshot s
-        ) throws Exception {
-            float x0 = 408f;
-            float x1 = 596f;
-            float cx = 502f;
-
-            // Header: 타이어 공기압 psi
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 19.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
-            drawText.invoke(c, "타이어 공기압", x0 + 18f, 48f, pText);
-
-            setTextAlign.invoke(pText, alignRight);
-            setTextSize.invoke(pText, 18.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFF4A8AD6));
-            drawText.invoke(c, "psi", x1 - 18f, 48f, pText);
-
-            // 4 tire blocks around top-down car silhouette
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    cx - 33f, 152f, cx - 23f, 182f, 4f, 0xFF2A2B32, 0xFF44A282, 2.0f);
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    cx + 23f, 152f, cx + 33f, 182f, 4f, 0xFF2A2B32, 0xFF44A282, 2.0f);
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    cx - 33f, 256f, cx - 23f, 286f, 4f, 0xFF2A2B32, 0xFF44A282, 2.0f);
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    cx + 23f, 256f, cx + 33f, 286f, 4f, 0xFF2A2B32, 0xFF44A282, 2.0f);
-
-            // Top-down sculpted vehicle chassis (cx = 502, y = 132..312)
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    cx - 26f, 132f, cx + 26f, 312f, 20f, 0xFF1E1F24, 0xFF464852, 2.2f);
-            // Glasshouse / panoramic roof
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    cx - 19f, 168f, cx + 19f, 278f, 10f, 0xFF121317, 0xFF32343C, 1.5f);
-            // Front DRL & Rear LED lightbar accents
-            setColor.invoke(pStroke, Integer.valueOf(0xFF78BCFF));
-            setStrokeW.invoke(pStroke, 2.5f);
-            drawLine.invoke(c, cx - 16f, 137f, cx + 16f, 137f, pStroke);
-            setColor.invoke(pStroke, Integer.valueOf(0xFFE5566F));
-            drawLine.invoke(c, cx - 16f, 307f, cx + 16f, 307f, pStroke);
-
-            // 4 Wheel PSI readouts
-            setTextAlign.invoke(pText, alignRight);
-            setTextSize.invoke(pText, 16f);
-            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
-            drawText.invoke(c, "FL", cx - 40f, 158f, pText);
-            drawText.invoke(c, "RL", cx - 40f, 260f, pText);
-
-            setTextSize.invoke(pText, 32f);
-            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
-            drawText.invoke(c, String.format(Locale.US, "%.0f", s.tpmsFlPsi), cx - 40f, 190f, pText);
-            drawText.invoke(c, String.format(Locale.US, "%.0f", s.tpmsRlPsi), cx - 40f, 292f, pText);
-
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 16f);
-            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
-            drawText.invoke(c, "FR", cx + 40f, 158f, pText);
-            drawText.invoke(c, "RR", cx + 40f, 260f, pText);
-
-            setTextSize.invoke(pText, 32f);
-            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
-            drawText.invoke(c, String.format(Locale.US, "%.0f", s.tpmsFrPsi), cx + 40f, 190f, pText);
-            drawText.invoke(c, String.format(Locale.US, "%.0f", s.tpmsRrPsi), cx + 40f, 292f, pText);
-
-            // Bottom TPMS summary divider & status
-            setColor.invoke(pStroke, Integer.valueOf(0xFF1B1A1F));
-            setStrokeW.invoke(pStroke, 2.0f);
-            drawLine.invoke(c, x0 + 16f, 392f, x1 - 16f, 392f, pStroke);
-
-            float maxPsi = Math.max(Math.max(s.tpmsFlPsi, s.tpmsFrPsi), Math.max(s.tpmsRlPsi, s.tpmsRrPsi));
-            float minPsi = Math.min(Math.min(s.tpmsFlPsi, s.tpmsFrPsi), Math.min(s.tpmsRlPsi, s.tpmsRrPsi));
-            float diffPsi = Math.max(0f, maxPsi - minPsi);
-
-            setColor.invoke(pFill, Integer.valueOf(0xFF44A282));
-            drawCircle.invoke(c, x0 + 34f, 420f, 5.5f, pFill);
-
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 18.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFFBDBDC0));
-            drawText.invoke(c, String.format(Locale.US, "정상 · 편차 %.1f", diffPsi), x0 + 48f, 426f, pText);
-        }
-
-        private static void drawColumn2AdasHud(
-                Object c,
-                Object rf,
-                Object pFill,
-                Object pStroke,
-                Object pText,
-                Method setRf,
-                Method drawRoundRect,
-                Method drawRect,
-                Method drawCircle,
-                Method drawLine,
-                Method drawText,
-                Method drawPath,
-                Method setColor,
-                Method setStrokeW,
-                Method setTextSize,
-                Method setTextAlign,
-                Object alignLeft,
-                Object alignCenter,
-                Object alignRight,
-                Class<?> pathCls,
-                TelemetrySnapshot s
-        ) throws Exception {
-            float x0 = 608f;
-            float y0 = 12f;
-            float x1 = 1190f;
-            float y1 = 450f;
-            float cx = (x0 + x1) * 0.5f; // 899f
-            float horizonY = y0 + 130f;  // 142f
-
-            // 1. Sky (#0D0D10) & Ground (#12141B)
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0, y0, x1, y1, 16f, 0xFF0D0D10, 0xFF222224, 0f);
-            setRf.invoke(rf, x0, horizonY, x1, y1);
-            setColor.invoke(pFill, Integer.valueOf(0xFF12141B));
-            drawRoundRect.invoke(c, rf, 16f, 16f, pFill);
-
-            // Horizon glow line
-            setColor.invoke(pStroke, Integer.valueOf(0xFF232736));
-            setStrokeW.invoke(pStroke, 2.0f);
-            drawLine.invoke(c, x0 + 4f, horizonY, x1 - 4f, horizonY, pStroke);
-
-            float curveShift = (s.pathPoly != null && s.pathPoly.length > 2)
-                    ? Math.max(-44f, Math.min(44f, s.pathPoly[2] * 95000f))
-                    : 10f;
-
-            Method moveTo = pathCls.getMethod("moveTo", float.class, float.class);
-            Method lineTo = pathCls.getMethod("lineTo", float.class, float.class);
-            Method closeP = pathCls.getMethod("close");
-
-            // 2. 3-Lane Asphalt Surface (#161922)
-            Object roadPath = pathCls.getConstructor().newInstance();
-            moveTo.invoke(roadPath, cx - 110f + curveShift, horizonY + 2f);
-            lineTo.invoke(roadPath, cx + 110f + curveShift, horizonY + 2f);
-            lineTo.invoke(roadPath, x1 - 8f, y1 - 4f);
-            lineTo.invoke(roadPath, x0 + 8f, y1 - 4f);
-            closeP.invoke(roadPath);
-            setColor.invoke(pFill, Integer.valueOf(0xFF161922));
-            drawPath.invoke(c, roadPath, pFill);
-
-            // 3. Ego Lane Surface (#1B202C)
-            Object egoPath = pathCls.getConstructor().newInstance();
-            moveTo.invoke(egoPath, cx - 34f + curveShift, horizonY + 2f);
-            lineTo.invoke(egoPath, cx + 34f + curveShift, horizonY + 2f);
-            lineTo.invoke(egoPath, cx + 168f, y1 - 4f);
-            lineTo.invoke(egoPath, cx - 168f, y1 - 4f);
-            closeP.invoke(egoPath);
-            setColor.invoke(pFill, Integer.valueOf(0xFF1B202C));
-            drawPath.invoke(c, egoPath, pFill);
-
-            // 4. Comma 3X Path Carpet (#44A282 translucent) + Chevrons
-            Object carpetPath = pathCls.getConstructor().newInstance();
-            moveTo.invoke(carpetPath, cx - 22f + curveShift, horizonY + 8f);
-            lineTo.invoke(carpetPath, cx + 22f + curveShift, horizonY + 8f);
-            lineTo.invoke(carpetPath, cx + 128f, y1 - 4f);
-            lineTo.invoke(carpetPath, cx - 128f, y1 - 4f);
-            closeP.invoke(carpetPath);
-            setColor.invoke(pFill, Integer.valueOf(0x4044A282));
-            drawPath.invoke(c, carpetPath, pFill);
-
-            // Distance rungs & chevrons inside path carpet
-            setColor.invoke(pStroke, Integer.valueOf(0x8844A282));
-            setStrokeW.invoke(pStroke, 2.2f);
-            float[] tSteps = new float[]{0.22f, 0.44f, 0.68f, 0.90f};
-            for (int i = 0; i < tSteps.length; i++) {
-                float t = tSteps[i];
-                float ry = horizonY + 12f + t * (y1 - horizonY - 20f);
-                float rCx = cx + (1.0f - t) * curveShift;
-                float halfW = 16f + t * 88f;
-                drawLine.invoke(c, rCx - halfW, ry, rCx, ry - (6f + t * 8f), pStroke);
-                drawLine.invoke(c, rCx, ry - (6f + t * 8f), rCx + halfW, ry, pStroke);
+            // Right TPMS Strip (x = 408..596)
+            boolean warnFl = s.tpmsFlPsi > 0f && s.tpmsFlPsi < 31.0f;
+            boolean warnFr = s.tpmsFrPsi > 0f && s.tpmsFrPsi < 31.0f;
+            boolean warnRl = s.tpmsRlPsi > 0f && s.tpmsRlPsi < 31.0f;
+            boolean warnRr = s.tpmsRrPsi > 0f && s.tpmsRrPsi < 31.0f;
+            boolean anyTpmsWarn = warnFl || warnFr || warnRl || warnRr;
+            if (anyTpmsWarn && bmpActiveShell != null) {
+                copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 520, 24, 586, 62);
+                if (warnFl) copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 480, 166, 491, 197);
+                if (warnFr) copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 513, 166, 524, 197);
+                if (warnRl) copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 480, 255, 491, 286);
+                if (warnRr) copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 513, 255, 524, 286);
             }
 
-            // 5. Outer Adjacent Lane Lines (#558A8C92) & Ego Recognized Lane Lines (#78BCFF)
-            setColor.invoke(pStroke, Integer.valueOf(0x558A8C92));
-            setStrokeW.invoke(pStroke, 2.2f);
-            drawLine.invoke(c, cx - 96f + curveShift, horizonY + 4f, x0 + 18f, y1 - 6f, pStroke);
-            drawLine.invoke(c, cx + 96f + curveShift, horizonY + 4f, x1 - 18f, y1 - 6f, pStroke);
+            drawTextSmart(c, String.format(Locale.US, "%.0f", s.tpmsFlPsi), 424f, 170f, 36f,
+                    warnFl ? 0xFFD9A441 : 0xFFFFFFFF, true, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+            drawTextSmart(c, String.format(Locale.US, "%.0f", s.tpmsFrPsi), 580f, 170f, 36f,
+                    warnFr ? 0xFFD9A441 : 0xFFFFFFFF, true, alignRight,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+            drawTextSmart(c, String.format(Locale.US, "%.0f", s.tpmsRlPsi), 424f, 330f, 36f,
+                    warnRl ? 0xFFD9A441 : 0xFFFFFFFF, true, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+            drawTextSmart(c, String.format(Locale.US, "%.0f", s.tpmsRrPsi), 580f, 330f, 36f,
+                    warnRr ? 0xFFD9A441 : 0xFFFFFFFF, true, alignRight,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            setColor.invoke(pStroke, Integer.valueOf(0xEE78BCFF));
-            setStrokeW.invoke(pStroke, 4.0f);
-            drawLine.invoke(c, cx - 34f + curveShift, horizonY + 4f, cx - 168f, y1 - 6f, pStroke);
-            drawLine.invoke(c, cx + 34f + curveShift, horizonY + 4f, cx + 168f, y1 - 6f, pStroke);
+            String tpmsFootStr;
+            if (anyTpmsWarn) {
+                String lowPos = warnRr ? "RR" : (warnRl ? "RL" : (warnFr ? "FR" : "FL"));
+                tpmsFootStr = lowPos + " 저압주의";
+            } else {
+                int tBase = (int) Math.round(s.outdoorTempC > -40.0 ? s.outdoorTempC + 8.0 : 26.0);
+                tpmsFootStr = tBase + "~" + (tBase + 1) + "°C";
+            }
+            drawTextSmart(c, tpmsFootStr, 502f, 423f, 24f, 0xFF8A8C92, false, alignCenter,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // 6. Surround Traffic: Ghost Car in Right Adjacent Lane
-            float gcx = cx + 112f + curveShift * 0.4f;
-            float gby = horizonY + 132f;
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    gcx - 30f, gby - 38f, gcx + 30f, gby, 8f, 0x99222732, 0x668A94A6, 1.5f);
-            setColor.invoke(pFill, Integer.valueOf(0x88E5566F));
-            drawRect.invoke(c, gcx - 25f, gby - 20f, gcx - 10f, gby - 15f, pFill);
-            drawRect.invoke(c, gcx + 10f, gby - 20f, gcx + 25f, gby - 15f, pFill);
+            // =================================================================
+            // 3. COLUMN 2: 1:1 3D PERSPECTIVE ADAS ROAD + CHROMIUM HUD OVERLAY
+            // =================================================================
+            drawCommaAdasRoad3D(c, rf, pFill, pStroke, pShader, pPubBold, pPubMed, pSysBold, pSysMed,
+                    setRf, drawRoundRect, drawRect, drawOval, drawLine, drawPath, drawText,
+                    setColor, setStrokeW, setTextSize, setTextAlign, measureText, alignCenter,
+                    canvasCls, paintCls, pathCls, s);
 
-            // 7. 3D Sculpted Lead Vehicle + LED Tail Lightbar + Radar Target Brackets
-            if (s.hasLeadCar && s.leadDistM > 0f) {
-                float lcx = cx + curveShift * 0.55f;
-                float lby = horizonY + 124f;
-                float carW = 104f;
-                float carH = 70f;
-                float bodyTopY = lby - carH * 0.62f;
-                float roofTopY = lby - carH * 0.96f;
-
-                // Rear tires
-                drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                        lcx - 48f, lby - 18f, lcx - 32f, lby, 4f, 0xFF090A0F, 0xFF2F3340, 1.5f);
-                drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                        lcx + 32f, lby - 18f, lcx + 48f, lby, 4f, 0xFF090A0F, 0xFF2F3340, 1.5f);
-
-                // Sculpted vehicle body polygon
-                Object bodyP = pathCls.getConstructor().newInstance();
-                moveTo.invoke(bodyP, lcx - 50f, lby - 6f);
-                lineTo.invoke(bodyP, lcx - 51f, bodyTopY);
-                lineTo.invoke(bodyP, lcx - 35f, roofTopY);
-                lineTo.invoke(bodyP, lcx + 35f, roofTopY);
-                lineTo.invoke(bodyP, lcx + 51f, bodyTopY);
-                lineTo.invoke(bodyP, lcx + 50f, lby - 6f);
-                closeP.invoke(bodyP);
-                setColor.invoke(pFill, Integer.valueOf(0xFF1F232E));
-                drawPath.invoke(c, bodyP, pFill);
-                setColor.invoke(pStroke, Integer.valueOf(0xFF525868));
-                setStrokeW.invoke(pStroke, 2.0f);
-                drawPath.invoke(c, bodyP, pStroke);
-
-                // Rear windshield glass
-                Object glassP = pathCls.getConstructor().newInstance();
-                moveTo.invoke(glassP, lcx - 38f, bodyTopY - 2f);
-                lineTo.invoke(glassP, lcx - 29f, roofTopY + 5f);
-                lineTo.invoke(glassP, lcx + 29f, roofTopY + 5f);
-                lineTo.invoke(glassP, lcx + 38f, bodyTopY - 2f);
-                closeP.invoke(glassP);
-                setColor.invoke(pFill, Integer.valueOf(0xFF141822));
-                drawPath.invoke(c, glassP, pFill);
-
-                // Full-width parametric LED tail lightbar (#E5566F)
-                float lampY = bodyTopY + 3f;
-                setColor.invoke(pFill, Integer.valueOf(0xFFE5566F));
-                setRf.invoke(rf, lcx - 46f, lampY, lcx + 46f, lampY + 7f);
-                drawRoundRect.invoke(c, rf, 3f, 3f, pFill);
-                setColor.invoke(pFill, Integer.valueOf(0xFFFFB3C0));
-                drawRect.invoke(c, lcx - 43f, lampY + 1.5f, lcx - 22f, lampY + 5.5f, pFill);
-                drawRect.invoke(c, lcx + 22f, lampY + 1.5f, lcx + 43f, lampY + 5.5f, pFill);
-
-                // Corner Target Lock Brackets around Lead Vehicle
-                int radarColor = (s.leadDistM <= 20f) ? 0xFFE5566F : 0xFFD9A441;
-                float bx0 = lcx - 57f;
-                float bx1 = lcx + 57f;
-                float by0 = roofTopY - 6f;
-                float by1 = lby + 4f;
-                float brk = 12f;
-                setColor.invoke(pStroke, Integer.valueOf(radarColor));
-                setStrokeW.invoke(pStroke, 2.5f);
-                drawLine.invoke(c, bx0, by0 + brk, bx0, by0, pStroke);
-                drawLine.invoke(c, bx0, by0, bx0 + brk, by0, pStroke);
-                drawLine.invoke(c, bx1 - brk, by0, bx1, by0, pStroke);
-                drawLine.invoke(c, bx1, by0, bx1, by0 + brk, pStroke);
-                drawLine.invoke(c, bx0, by1 - brk, bx0, by1, pStroke);
-                drawLine.invoke(c, bx0, by1, bx0 + brk, by1, pStroke);
-                drawLine.invoke(c, bx1 - brk, by1, bx1, by1, pStroke);
-                drawLine.invoke(c, bx1, by1, bx1, by1 - brk, pStroke);
-
-                // Crisp Distance Tag Right Above Top Bracket
-                drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                        lcx - 36f, by0 - 32f, lcx + 36f, by0 - 6f, 6f, 0xEB131217, radarColor, 2.0f);
-                setTextAlign.invoke(pText, alignCenter);
-                setTextSize.invoke(pText, 18f);
-                setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
-                drawText.invoke(c, String.format(Locale.US, "%.0fm", s.leadDistM), lcx, by0 - 13f, pText);
+            // Determine SDI mode: "section" (구간단속), "traffic" (신호·과속), or "none" (일반 제한속도)
+            String sdiMode;
+            if (s.carrotSdiType < 0 && s.carrotSdiDistM <= 0) {
+                sdiMode = "none";
+            } else if (s.carrotSdiType == 2 || s.carrotSdiType == 3 || s.carrotSdiType == 4 || s.carrotSdiDistM >= 800) {
+                sdiMode = "section";
+            } else if (s.carrotSdiType >= 0) {
+                sdiMode = (s.carrotSdiType == 0) ? "section" : "traffic";
+            } else {
+                sdiMode = "section";
             }
 
-            // Outer border of Column 2
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0, y0, x1, y1, 16f, 0x00000000, 0xFF222224, 2.0f);
+            Object col2Overlay = "section".equals(sdiMode) ? bmpCol2Section
+                    : ("traffic".equals(sdiMode) ? bmpCol2Traffic : bmpCol2None);
+            if (col2Overlay != null) {
+                drawBmpXY.invoke(c, col2Overlay, Float.valueOf(608f), Float.valueOf(12f), null);
+            }
 
-            // =================================================================
-            // FLOATING TOP-LEFT HUD STACK: speed-stamp + sdi-compact-widget
-            // =================================================================
-            float sx0 = x0 + 16f; // 624
-            float sy0 = y0 + 14f; // 26
-            float sx1 = sx0 + 266f; // 890
-            float sy1 = sy0 + 70f;  // 96
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    sx0, sy0, sx1, sy1, 12f, 0xEB131217, 0xFF222224, 2.0f);
-            // Top 4px positive accent bar (#44A282)
-            setColor.invoke(pFill, Integer.valueOf(0xFF44A282));
-            drawRect.invoke(c, sx0 + 8f, sy0, sx1 - 8f, sy0 + 4f, pFill);
-
-            // Gear + Green dot
+            // Speed-stamp numbers
             String gear = (s.gearPos != null && !s.gearPos.isEmpty()) ? s.gearPos : "D";
-            setTextAlign.invoke(pText, alignCenter);
-            setTextSize.invoke(pText, 32f);
-            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
-            drawText.invoke(c, gear, sx0 + 28f, sy0 + 47f, pText);
-            setColor.invoke(pFill, Integer.valueOf(0xFF44A282));
-            drawCircle.invoke(c, sx0 + 50f, sy0 + 36f, 5f, pFill);
+            drawTextSmart(c, gear, 655f, 69f, 30f, 0xFF4A8AD6, true, alignCenter,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // Vertical dividers inside speed-stamp
-            setColor.invoke(pStroke, Integer.valueOf(0xFF222224));
-            setStrokeW.invoke(pStroke, 2.0f);
-            drawLine.invoke(c, sx0 + 66f, sy0 + 12f, sx0 + 66f, sy1 - 12f, pStroke);
-            drawLine.invoke(c, sx0 + 180f, sy0 + 12f, sx0 + 180f, sy1 - 12f, pStroke);
+            int egoSpd = (s.carrotSpeedKph > 0) ? s.carrotSpeedKph : (s.carrotConnected ? s.carrotSpeedKph : 78);
+            drawTextSmart(c, String.valueOf(Math.max(0, egoSpd)), 732f, 88f, 60f, 0xFFFFFFFF, true, alignCenter,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // Speed number
-            int displaySpd = (s.carrotSpeedKph >= 0) ? s.carrotSpeedKph : 0;
-            setTextAlign.invoke(pText, alignCenter);
-            setTextSize.invoke(pText, 48f);
-            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
-            drawText.invoke(c, String.valueOf(displaySpd), sx0 + 123f, sy0 + 53f, pText);
-
-            // MAX Cruise speed
             int cruiseSpd = (s.carrotCruiseKph > 0) ? s.carrotCruiseKph : 80;
-            setTextSize.invoke(pText, 15f);
-            setColor.invoke(pText, Integer.valueOf(0xFF44A282));
-            drawText.invoke(c, "MAX", sx0 + 223f, sy0 + 28f, pText);
-            setTextSize.invoke(pText, 28f);
-            drawText.invoke(c, String.valueOf(cruiseSpd), sx0 + 223f, sy0 + 56f, pText);
+            drawTextSmart(c, String.valueOf(cruiseSpd), 800f, 90f, 32f, 0xFF44A282, true, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // SDI Compact Widget underneath speed-stamp (y = 108..234)
-            boolean isCameraActive = (s.carrotSdiType >= 0) && (s.carrotSdiDistM > 0 || s.carrotSdiSpeedLimit > 0);
+            // SDI speed sign numbers (calibrated per mode to match Chromium circle center)
             int signLimit = (s.carrotSdiSpeedLimit > 0) ? s.carrotSdiSpeedLimit : 80;
-            float signCx = sx0 + 44f; // 668
-            float signCy = sy1 + 76f; // 172
-            float signR = 40f;
+            float limitNumY = "section".equals(sdiMode) ? 195f : ("traffic".equals(sdiMode) ? 183f : 158f);
+            drawTextSmart(c, String.valueOf(signLimit), 680.8f, limitNumY, 36f, 0xFF131217, true, alignCenter,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // Top cap badge ("구간" / "단속" or "제한")
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    signCx - 30f, sy1 + 12f, signCx + 30f, sy1 + 38f, 8f, 0xFF131217, 0xFF2E2E34, 1.8f);
-            setTextAlign.invoke(pText, alignCenter);
-            setTextSize.invoke(pText, 16f);
-            setColor.invoke(pText, Integer.valueOf(isCameraActive ? 0xFFFFFFFF : 0xFFBDBDC0));
-            drawText.invoke(c, isCameraActive ? "구간" : "제한", signCx, sy1 + 31f, pText);
-
-            if (isCameraActive) {
-                // RED Circular Speed Camera Sign (#FFFFFF fill, #E5566F ring, #111113 text)
-                setColor.invoke(pFill, Integer.valueOf(0xFFFFFFFF));
-                drawCircle.invoke(c, signCx, signCy, signR, pFill);
-                setColor.invoke(pStroke, Integer.valueOf(0xFFE5566F));
-                setStrokeW.invoke(pStroke, 8.5f);
-                drawCircle.invoke(c, signCx, signCy, signR - 4f, pStroke);
-                setTextSize.invoke(pText, 34f);
-                setColor.invoke(pText, Integer.valueOf(0xFF111113));
-                drawText.invoke(c, String.valueOf(signLimit), signCx, signCy + 12f, pText);
-            } else {
-                // BLUE Circular Normal Speed Limit Sign (#172554 fill, #4A8AD6 ring, #FFFFFF text)
-                setColor.invoke(pFill, Integer.valueOf(0xFF172554));
-                drawCircle.invoke(c, signCx, signCy, signR, pFill);
-                setColor.invoke(pStroke, Integer.valueOf(0xFF4A8AD6));
-                setStrokeW.invoke(pStroke, 7.5f);
-                drawCircle.invoke(c, signCx, signCy, signR - 4f, pStroke);
-                setTextSize.invoke(pText, 34f);
-                setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
-                drawText.invoke(c, String.valueOf(signLimit), signCx, signCy + 12f, pText);
+            if (!"none".equals(sdiMode)) {
+                int sdiDist = (s.carrotSdiDistM > 0) ? s.carrotSdiDistM : 2300;
+                String sdiDistStr = (sdiDist >= 1000)
+                        ? String.format(Locale.US, "%.1f km", sdiDist / 1000.0)
+                        : (sdiDist + " m");
+                float distY = "section".equals(sdiMode) ? 245f : 233f;
+                drawTextSmart(c, sdiDistStr, 680.8f, distY, 24f, 0xFFFFFFFF, true, alignCenter,
+                        pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+            }
+            if ("section".equals(sdiMode)) {
+                int avgSpd = (egoSpd > 10) ? egoSpd : signLimit;
+                drawTextSmart(c, String.valueOf(avgSpd), 785f, 204f, 40f, 0xFF44A282, true, alignCenter,
+                        pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
             }
 
-            // Bottom SDI distance pill overlapping bottom of circle
-            String sdiDistStr;
-            if (isCameraActive && s.carrotSdiDistM >= 1000) {
-                sdiDistStr = String.format(Locale.US, "%.1f km", s.carrotSdiDistM / 1000.0);
-            } else if (isCameraActive && s.carrotSdiDistM > 0) {
-                sdiDistStr = s.carrotSdiDistM + " m";
-            } else {
-                sdiDistStr = "단속 없음";
+            // TBT compact stamp on top-right
+            int tbtDist = (s.carrotTbtDistM > 0) ? s.carrotTbtDistM : 280;
+            String tbtDistStr = (tbtDist >= 1000)
+                    ? String.format(Locale.US, "%.1fkm", tbtDist / 1000.0)
+                    : (tbtDist + "m");
+            drawTextSmart(c, tbtDistStr, 1034.2f, 72f, 40f, 0xFFFFFFFF, true, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+
+            String roadName = (s.carrotTbtRoad != null && !s.carrotTbtRoad.isEmpty()) ? s.carrotTbtRoad : "판교JC";
+            if (roadName.contains("·")) {
+                String[] parts = roadName.split("·");
+                roadName = parts[parts.length - 1].trim();
             }
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    signCx - 42f, signCy + 30f, signCx + 42f, signCy + 58f, 14f, 0xF2131217, 0xFF2E2E34, 1.8f);
-            setTextSize.invoke(pText, 17f);
-            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
-            drawText.invoke(c, sdiDistStr, signCx, signCy + 50f, pText);
+            drawTextSmart(c, truncateText(roadName, 6), 984.2f, 115f, 24f, 0xFFBDBDC0, true, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // Right wing badge next to circle ("평균속도 80")
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    signCx + 48f, signCy - 28f, signCx + 144f, signCy + 28f, 12f, 0xEB131217, 0xFF222224, 1.8f);
-            setTextSize.invoke(pText, 14.5f);
-            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
-            drawText.invoke(c, "평균속도", signCx + 96f, signCy - 6f, pText);
-            setTextSize.invoke(pText, 26f);
-            setColor.invoke(pText, Integer.valueOf(0xFF44A282));
-            drawText.invoke(c, String.valueOf(signLimit), signCx + 96f, signCy + 21f, pText);
+            drawTextSmart(c, "+450m", 1154f, 114f, 24f, 0xFF4A8AD6, true, alignRight,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // =================================================================
-            // FLOATING TOP-RIGHT: tbt-compact-stamp
-            // =================================================================
-            float tx0 = x1 - 196f; // 994
-            float ty0 = y0 + 14f;  // 26
-            float tx1 = x1 - 16f;  // 1174
-            float ty1 = ty0 + 78f; // 104
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    tx0, ty0, tx1, ty1, 12f, 0xEB131217, 0xFF222224, 2.0f);
-            // Top 4px Steel-Blue accent bar (#4A8AD6)
-            setColor.invoke(pFill, Integer.valueOf(0xFF4A8AD6));
-            drawRect.invoke(c, tx0 + 8f, ty0, tx1 - 8f, ty0 + 4f, pFill);
+            // Bottom corner chips: "차선 98%" & "앞차 42m · +2.4°"
+            drawTextSmart(c, s.carrotActive ? "99%" : "98%", 706f, 423f, 24f, 0xFFBDBDC0, false, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // Turn arrow + distance
-            String tbtDistStr = (s.carrotTbtDistM > 0) ? (s.carrotTbtDistM + "m") : "280m";
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 30f);
-            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
-            drawText.invoke(c, "↱ " + tbtDistStr, tx0 + 16f, ty0 + 42f, pText);
-
-            setTextSize.invoke(pText, 18f);
-            setColor.invoke(pText, Integer.valueOf(0xFFBDBDC0));
-            String roadShort = truncateText(s.carrotTbtRoad != null ? s.carrotTbtRoad : "판교JC", 10);
-            drawText.invoke(c, roadShort, tx0 + 16f, ty0 + 68f, pText);
+            float leadM = (s.hasLeadCar && s.leadDistM > 0f) ? s.leadDistM : 42f;
+            float steerDeg = (s.pathPoly != null && s.pathPoly.length > 2) ? (s.pathPoly[2] * 5000f) : 2.4f;
+            String leadText = String.format(Locale.US, "%.0fm", leadM);
+            String steerText = String.format(Locale.US, " · %+.1f°", steerDeg);
+            float wLead = drawTextSmart(c, leadText, 1017.2f, 421f, 24f, 0xFFFFFFFF, true, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+            drawTextSmart(c, steerText, 1017.2f + wLead, 421f, 24f, 0xFFBDBDC0, false, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             // =================================================================
-            // FLOATING BOTTOM CORNER CHIPS (차선 98% | 앞차 34m · +2.4°)
+            // 4. COLUMN 3 TOP: NOW PLAYING MEDIA (x = 1202..1908, y = 12..225)
             // =================================================================
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0 + 16f, y1 - 46f, x0 + 146f, y1 - 12f, 8f, 0xD9131217, 0xFF222224, 1.5f);
-            setTextAlign.invoke(pText, alignCenter);
-            setTextSize.invoke(pText, 18f);
-            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
-            drawText.invoke(c, "차선 98%", x0 + 81f, y1 - 23f, pText);
-
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x1 - 186f, y1 - 46f, x1 - 16f, y1 - 12f, 8f, 0xD9131217, 0xFF222224, 1.5f);
-            String leadChip = String.format(Locale.US, "앞차 %.0fm · %+.1f°",
-                    s.leadDistM > 0 ? s.leadDistM : 32f, curveShift * 0.12f);
-            drawText.invoke(c, leadChip, x1 - 101f, y1 - 23f, pText);
-        }
-
-        private static void drawColumn3MediaAndClimate(
-                Object c,
-                Object rf,
-                Object pFill,
-                Object pStroke,
-                Object pText,
-                Method setRf,
-                Method drawRoundRect,
-                Method drawRect,
-                Method drawCircle,
-                Method drawLine,
-                Method drawText,
-                Method drawPath,
-                Method setColor,
-                Method setStrokeW,
-                Method setTextSize,
-                Method setTextAlign,
-                Object alignLeft,
-                Object alignCenter,
-                Object alignRight,
-                Class<?> canvasCls,
-                Class<?> paintCls,
-                Class<?> rectFCls,
-                Class<?> pathCls,
-                TelemetrySnapshot s
-        ) throws Exception {
-            float x0 = 1202f;
-            float x1 = 1908f;
-
-            // =================================================================
-            // TOP 50% OF COLUMN 3 (1:1 Ratio): NOW PLAYING MEDIA (y = 12..225)
-            // =================================================================
-            float my0 = 12f;
-            float my1 = 225f;
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0, my0, x1, my1, 16f, 0xFF131217, 0xFF222224, 2.0f);
-
-            // Large 176x176 Album Art Box on Left (x = 1222..1398, y = 30..206)
-            float artX0 = x0 + 20f;
-            float artY0 = my0 + 18f;
-            float artX1 = artX0 + 176f;
-            float artY1 = artY0 + 176f;
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    artX0, artY0, artX1, artY1, 16f, 0xFF212023, 0xFF3A3A3E, 2.0f);
-
-            boolean drewBitmapArt = false;
-            if (s.albumArtBitmap != null) {
+            if (s.albumArtBitmap != null && bmpCls.isInstance(s.albumArtBitmap)) {
                 try {
-                    Class<?> bmpCls = Class.forName("android.graphics.Bitmap");
-                    Class<?> rectCls = Class.forName("android.graphics.Rect");
-                    if (bmpCls.isInstance(s.albumArtBitmap)) {
-                        int bw = ((Integer) bmpCls.getMethod("getWidth").invoke(s.albumArtBitmap)).intValue();
-                        int bh = ((Integer) bmpCls.getMethod("getHeight").invoke(s.albumArtBitmap)).intValue();
-                        if (bw > 0 && bh > 0) {
-                            setRf.invoke(rf, artX0 + 4f, artY0 + 4f, artX1 - 4f, artY1 - 4f);
-                            Method drawBmpRectF = canvasCls.getMethod("drawBitmap", bmpCls, rectCls, rectFCls, paintCls);
-                            drawBmpRectF.invoke(c, s.albumArtBitmap, null, rf, null);
-                            drewBitmapArt = true;
-                        }
+                    int bw = ((Integer) bmpCls.getMethod("getWidth").invoke(s.albumArtBitmap)).intValue();
+                    int bh = ((Integer) bmpCls.getMethod("getHeight").invoke(s.albumArtBitmap)).intValue();
+                    if (bw > 0 && bh > 0) {
+                        setRf.invoke(rf, 1234f, 32f, 1406f, 204f);
+                        drawBmpRectF.invoke(c, s.albumArtBitmap, null, rf, null);
                     }
                 } catch (Throwable ignored) {
                 }
             }
 
-            if (!drewBitmapArt) {
-                // Exact 3-ring ccNC Vinyl Record + Steel-Blue center label from turzx_92_mockup.html
-                float vcx = (artX0 + artX1) * 0.5f;
-                float vcy = (artY0 + artY1) * 0.5f;
-                setColor.invoke(pStroke, Integer.valueOf(0xFF2E2E32));
-                setStrokeW.invoke(pStroke, 2.5f);
-                drawCircle.invoke(c, vcx, vcy, 64f, pStroke);
-                setColor.invoke(pStroke, Integer.valueOf(0xFF252529));
-                setStrokeW.invoke(pStroke, 2.0f);
-                drawCircle.invoke(c, vcx, vcy, 48f, pStroke);
-                setColor.invoke(pStroke, Integer.valueOf(0xFF2E2E32));
-                setStrokeW.invoke(pStroke, 2.0f);
-                drawCircle.invoke(c, vcx, vcy, 34f, pStroke);
-
-                setColor.invoke(pFill, Integer.valueOf(0xFF212023));
-                drawCircle.invoke(c, vcx, vcy, 16f, pFill);
-                setColor.invoke(pStroke, Integer.valueOf(0xFF4A8AD6));
-                setStrokeW.invoke(pStroke, 3.0f);
-                drawCircle.invoke(c, vcx, vcy, 16f, pStroke);
-                setColor.invoke(pFill, Integer.valueOf(0xFFFFFFFF));
-                drawCircle.invoke(c, vcx, vcy, 3.5f, pFill);
+            boolean hasRealMedia = s.mediaTitle != null
+                    && !s.mediaTitle.isEmpty()
+                    && !"미디어 재생 대기 중".equals(s.mediaTitle);
+            String mTitle = hasRealMedia ? s.mediaTitle : "Supernova";
+            String mSub;
+            if (hasRealMedia) {
+                mSub = (s.mediaArtist != null && !s.mediaArtist.isEmpty()) ? s.mediaArtist : "";
+                if (s.mediaAlbum != null && !s.mediaAlbum.isEmpty() && !s.mediaAlbum.equals(s.mediaArtist)) {
+                    mSub = mSub.isEmpty() ? s.mediaAlbum : (mSub + " · " + s.mediaAlbum);
+                }
+                if (mSub.isEmpty()) mSub = "Bluetooth Audio";
+            } else {
+                mSub = "aespa · Armageddon";
             }
 
-            // Track Title & Artist · Album on Right (no media source badge)
-            float textX = artX1 + 28f; // 1426
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 38f);
-            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
-            drawText.invoke(c, truncateText(s.mediaTitle, 18), textX, my0 + 70f, pText);
+            drawTextSmart(c, truncateText(mTitle, 16), 1436f, 81f, 48f, 0xFFFFFFFF, true, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+            drawTextSmart(c, truncateText(mSub, 24), 1436f, 131f, 30f, 0xFFBDBDC0, false, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            String subMedia = (s.mediaArtist != null && !s.mediaArtist.isEmpty()) ? s.mediaArtist : "";
-            if (s.mediaAlbum != null && !s.mediaAlbum.isEmpty() && !s.mediaAlbum.equals(s.mediaArtist)) {
-                subMedia = subMedia.isEmpty() ? s.mediaAlbum : (subMedia + " · " + s.mediaAlbum);
+            int curSec = (s.mediaDurationSec > 0 || s.mediaPositionSec > 0) ? s.mediaPositionSec : 84;
+            int durSec = (s.mediaDurationSec > 0) ? s.mediaDurationSec : 178;
+            float mediaPct = (durSec > 0) ? Math.min(100f, (curSec * 100f) / durSec) : 47.2f;
+            drawBarFillOnly(c, rf, pFill, setRf, drawRoundRect, setColor,
+                    1436f, 154.5f, 388.9f, 10f, mediaPct, 0xFFFFFFFF);
+
+            drawTextSmart(c, formatSecMinTwoDigit(curSec), 1436f, 196f, 26f, 0xFFFFFFFF, true, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+            drawTextSmart(c, formatSecMinTwoDigit(durSec), 1824.9f, 195f, 26f, 0xFF8A8C92, false, alignRight,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+
+            // =================================================================
+            // 5. COLUMN 3 BOTTOM: DATC CLIMATE (x = 1202..1908, y = 237..450)
+            // =================================================================
+            // Driver set temperature (1228, 297) + Indoor temperature after static "실내 " (1275.5, 337)
+            String drNum = !s.hvacOn ? "OFF" : formatHvacTempNumberOnly(s.hvacDrTempC);
+            String drDeg = (!s.hvacOn || "LO".equals(drNum) || "HI".equals(drNum)) ? "" : "°";
+            int drColor = s.hvacOn ? 0xFFFFFFFF : 0xFF8A8C92;
+            drawValuePlusUnit(c, drNum, drDeg, 1228f, 297f, 48f, drColor, 26f, 0xFF8A8C92, 1f,
+                    alignLeft, pPubBold, pPubMed, pSysBold, pSysMed,
+                    setColor, setTextSize, setTextAlign, measureText, drawText);
+
+            String inStr = (s.inCarTempC > -50.0)
+                    ? String.format(Locale.US, "%.1f°", s.inCarTempC)
+                    : "22.5°";
+            drawTextSmart(c, inStr, 1275.5f, 337f, 24f, 0xFFBDBDC0, true, alignLeft,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+
+            // Passenger set temperature (right-aligned at 1882, 297) + Outdoor temperature after static "실외 "
+            String psNum = !s.hvacOn ? "OFF" : (s.hvacDriverOnly ? "DRV" : formatHvacTempNumberOnly(s.hvacPsTempC));
+            boolean psHasDeg = s.hvacOn && !s.hvacDriverOnly && !"LO".equals(psNum) && !"HI".equals(psNum);
+            int psColor = (s.hvacOn && !s.hvacDriverOnly) ? 0xFFFFFFFF : 0xFF8A8C92;
+            if (psHasDeg) {
+                float wDeg = drawTextSmart(c, "°", 1882f, 297f, 26f, 0xFF8A8C92, true, alignRight,
+                        pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+                drawTextSmart(c, psNum, 1882f - wDeg - 1f, 297f, 48f, psColor, true, alignRight,
+                        pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+            } else {
+                drawTextSmart(c, psNum, 1882f, 297f, 48f, psColor, true, alignRight,
+                        pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
             }
-            setTextSize.invoke(pText, 24f);
-            setColor.invoke(pText, Integer.valueOf(0xFFBDBDC0));
-            drawText.invoke(c, truncateText(subMedia, 26), textX, my0 + 110f, pText);
 
-            // Shortened Progress Bar on Right (390px wide: x = 1426..1816, rail #212023, fill #FFFFFF)
-            float pbX0 = textX;
-            float pbX1 = textX + 390f;
-            float pbY = my0 + 142f;
-            int mediaPct = (s.mediaDurationSec > 0)
-                    ? Math.min(100, (s.mediaPositionSec * 100) / s.mediaDurationSec)
-                    : (s.mediaPlaying ? 50 : 0);
-            drawProgressBar(c, rf, pFill, setRf, drawRoundRect, setColor,
-                    pbX0, pbY, pbX1, pbY + 8f, mediaPct, 0xFFFFFFFF);
+            String outStr = (s.outdoorTempC > -50.0)
+                    ? String.format(Locale.US, "%.1f°", s.outdoorTempC)
+                    : "18.0°";
+            drawTextSmart(c, outStr, 1882f, 337f, 24f, 0xFFBDBDC0, true, alignRight,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            setTextSize.invoke(pText, 19f);
-            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
-            setTextAlign.invoke(pText, alignLeft);
-            drawText.invoke(c, formatSecMin(s.mediaPositionSec), pbX0, pbY + 34f, pText);
-            setTextAlign.invoke(pText, alignRight);
-            drawText.invoke(c, formatSecMin(s.mediaDurationSec), pbX1, pbY + 34f, pText);
-
-            // =================================================================
-            // BOTTOM 50% OF COLUMN 3 (1:1 Ratio): DATC CLIMATE (y = 237..450)
-            // =================================================================
-            float cy0 = 237f;
-            float cy1 = 450f;
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x0, cy0, x1, cy1, 16f, 0xFF131217, 0xFF222224, 2.0f);
-
-            // Left: Driver Set Temp + Steel-Blue Underline + Indoor Cabin Temp
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 46f);
-            setColor.invoke(pText, Integer.valueOf(s.hvacOn ? 0xFFFFFFFF : 0xFF8A8C92));
-            String drStr = !s.hvacOn ? "OFF" : formatHvacTempDisplay(s.hvacDrTempC);
-            drawText.invoke(c, drStr, x0 + 20f, cy0 + 64f, pText);
-
-            setColor.invoke(pFill, Integer.valueOf(s.hvacOn ? 0xFF4A8AD6 : 0xFF3A3A3E));
-            drawRect.invoke(c, x0 + 20f, cy0 + 76f, x0 + 134f, cy0 + 80f, pFill);
-
-            setTextSize.invoke(pText, 19f);
-            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
-            String inVal = (s.inCarTempC > -50.0) ? String.format(Locale.US, "실내 %.1f°", s.inCarTempC) : "실내 22.5°";
-            drawText.invoke(c, inVal, x0 + 20f, cy0 + 106f, pText);
-
-            // Right: Passenger Set Temp + Steel-Blue Underline + Outdoor Ambient Temp
-            setTextAlign.invoke(pText, alignRight);
-            setTextSize.invoke(pText, 46f);
-            setColor.invoke(pText, Integer.valueOf((s.hvacOn && !s.hvacDriverOnly) ? 0xFFFFFFFF : 0xFF8A8C92));
-            String psStr = !s.hvacOn ? "OFF" : (s.hvacDriverOnly ? "DRV" : formatHvacTempDisplay(s.hvacPsTempC));
-            drawText.invoke(c, psStr, x1 - 20f, cy0 + 64f, pText);
-
-            setColor.invoke(pFill, Integer.valueOf((s.hvacOn && !s.hvacDriverOnly) ? 0xFF4A8AD6 : 0xFF3A3A3E));
-            drawRect.invoke(c, x1 - 134f, cy0 + 76f, x1 - 20f, cy0 + 80f, pFill);
-
-            setTextSize.invoke(pText, 19f);
-            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
-            String outVal = (s.outdoorTempC > -50.0) ? String.format(Locale.US, "실외 %.1f°", s.outdoorTempC) : "실외 18.0°";
-            drawText.invoke(c, outVal, x1 - 20f, cy0 + 106f, pText);
-
-            // Center Raised Airflow & Fan HUD Box (x = 1362..1748, y = 251..345)
-            float boxX0 = x0 + 160f; // 1362
-            float boxY0 = cy0 + 14f; // 251
-            float boxX1 = x1 - 160f; // 1748
-            float boxY1 = cy0 + 108f;// 345
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    boxX0, boxY0, boxX1, boxY1, 12f, 0xFF212023, 0xFF222224, 2.0f);
-
-            // Vertical divider inside Airflow & Fan box
-            float midBoxX = boxX0 + 166f; // 1528
-            setColor.invoke(pStroke, Integer.valueOf(0xFF1B1A1F));
-            setStrokeW.invoke(pStroke, 2.0f);
-            drawLine.invoke(c, midBoxX, boxY0 + 12f, midBoxX, boxY1 - 12f, pStroke);
-
-            // Active air directions from s.hvacBlowerMode:
-            // 1=VENT(상체), 2=B/L(상·하체), 3=FLOOR(하체), 4=MIX(유리·하체), 5=DEF(유리)
+            // Center Airflow Arrows (composite active arrows from bmpActiveShell)
             int bm = s.hvacBlowerMode;
             boolean dirUp = s.hvacOn && (bm == 5 || bm == 4 || bm == 7 || bm == 9 || bm == 10 || s.hvacFrontDefog);
             boolean dirMid = s.hvacOn && (bm == 1 || bm == 2 || bm == 7 || bm == 9 || bm < 0);
             boolean dirDown = s.hvacOn && (bm == 2 || bm == 3 || bm == 4 || bm == 8 || bm == 9 || bm < 0);
-
-            // Seated occupant silhouette on right of left sub-pane
-            float occX = boxX0 + 122f;
-            float occY = boxY0 + 24f;
-            setColor.invoke(pFill, Integer.valueOf(0xFFE2E4EC));
-            drawCircle.invoke(c, occX, occY, 8.5f, pFill); // Head
-            setColor.invoke(pStroke, Integer.valueOf(0xFFE2E4EC));
-            setStrokeW.invoke(pStroke, 7.0f);
-            drawLine.invoke(c, occX - 2f, occY + 12f, occX - 10f, occY + 38f, pStroke); // Torso
-            drawLine.invoke(c, occX - 10f, occY + 38f, occX - 30f, occY + 42f, pStroke); // Thigh
-            drawLine.invoke(c, occX - 30f, occY + 42f, occX - 38f, occY + 62f, pStroke); // Lower leg
-
-            // 3 Directional Arrows pointing at occupant
-            float arrX0 = boxX0 + 22f;
-            float arrX1 = boxX0 + 78f;
-            setStrokeW.invoke(pStroke, 4.5f);
-            // 1) Upper / Defrost arrow
-            setColor.invoke(pStroke, Integer.valueOf(dirUp ? 0xFFFFFFFF : 0xFF4A4B50));
-            drawLine.invoke(c, arrX0, boxY0 + 34f, arrX1 - 6f, boxY0 + 18f, pStroke);
-            // 2) Mid / Face arrow
-            setColor.invoke(pStroke, Integer.valueOf(dirMid ? 0xFFFFFFFF : 0xFF4A4B50));
-            drawLine.invoke(c, arrX0, boxY0 + 48f, arrX1, boxY0 + 48f, pStroke);
-            // 3) Lower / Floor arrow
-            setColor.invoke(pStroke, Integer.valueOf(dirDown ? 0xFF4A8AD6 : 0xFF4A4B50));
-            drawLine.invoke(c, arrX0, boxY0 + 62f, arrX1 - 6f, boxY0 + 78f, pStroke);
-
-            // Right half of center box: "풍량" + "3단" + 7 ascending bars
-            int fanStep = !s.hvacOn ? 0 : ((s.hvacBlowerStep >= 0) ? Math.min(7, s.hvacBlowerStep) : 3);
-            setTextAlign.invoke(pText, alignLeft);
-            setTextSize.invoke(pText, 19f);
-            setColor.invoke(pText, Integer.valueOf(0xFF8A8C92));
-            drawText.invoke(c, "풍량", midBoxX + 18f, boxY0 + 32f, pText);
-
-            setTextAlign.invoke(pText, alignRight);
-            setTextSize.invoke(pText, 21f);
-            setColor.invoke(pText, Integer.valueOf(0xFFFFFFFF));
-            drawText.invoke(c, fanStep + "단", boxX1 - 18f, boxY0 + 32f, pText);
-
-            float barBaseX = midBoxX + 18f;
-            float barBotY = boxY1 - 12f;
-            for (int b = 1; b <= 7; b++) {
-                float bx = barBaseX + (b - 1) * 27f;
-                float bh = 10f + b * 4.2f;
-                int bColor = (b <= fanStep) ? 0xFFFFFFFF : 0xFF131217;
-                setColor.invoke(pFill, Integer.valueOf(bColor));
-                setRf.invoke(rf, bx, barBotY - bh, bx + 20f, barBotY);
-                drawRoundRect.invoke(c, rf, 3f, 3f, pFill);
+            if (bmpActiveShell != null) {
+                if (dirUp) {
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1396, 262, 1425, 287);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1425, 262, 1445, 282);
+                }
+                if (dirMid) {
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1396, 288, 1425, 302);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1425, 282, 1446, 305);
+                }
+                if (dirDown) {
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1396, 305, 1445, 331);
+                }
             }
 
-            // Horizontal divider above bottom 5-button HVAC dock
-            setColor.invoke(pStroke, Integer.valueOf(0xFF1B1A1F));
-            setStrokeW.invoke(pStroke, 2.0f);
-            drawLine.invoke(c, x0 + 20f, cy0 + 124f, x1 - 20f, cy0 + 124f, pStroke);
+            // Center Fan Step & 7-Bar Rail
+            int fanStep = !s.hvacOn ? 0 : ((s.hvacBlowerStep >= 0) ? Math.min(7, s.hvacBlowerStep) : 3);
+            if (fanStep > 0) {
+                drawTextSmart(c, String.valueOf(fanStep), 1687f, 287f, 32f, 0xFFFFFFFF, true, alignRight,
+                        pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+                if (bmpActiveShell != null) {
+                    int barRightX = Math.round(1539.4f + (fanStep - 1) * 26.3f + 20f);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1538, 298, barRightX, 336);
+                }
+            } else {
+                if (bmpActiveShell != null) {
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1650, 256, 1720, 292);
+                }
+                drawTextSmart(c, "OFF", 1715f, 287f, 32f, 0xFF8A8C92, true, alignRight,
+                        pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+            }
 
-            // Bottom 5-button HVAC dock (AUTO | A/C | HEAT | 내기순환 | SYNC)
-            float dockY0 = cy0 + 136f; // 373
-            float dockH = 60f;
-            float btnW = 125.2f;
-            float btnGap = 10f;
-            float bx = x0 + 20f;
-
-            drawHvacDockButton(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawText,
-                    setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
-                    bx, dockY0, btnW, dockH, "AUTO", s.hvacOn && s.hvacAuto, 0xFF4A8AD6, 0xFFFFFFFF);
-            bx += btnW + btnGap;
-            drawHvacDockButton(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawText,
-                    setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
-                    bx, dockY0, btnW, dockH, "A/C", s.hvacOn && s.hvacAc, 0xFF4A8AD6, 0xFFFFFFFF);
-            bx += btnW + btnGap;
-            drawHvacDockButton(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawText,
-                    setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
-                    bx, dockY0, btnW, dockH, "HEAT", s.hvacOn && s.hvacHeat, 0xFFD9A441, 0xFFD9A441);
-            bx += btnW + btnGap;
-            drawHvacDockButton(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawText,
-                    setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
-                    bx, dockY0, btnW, dockH, s.hvacRecirc ? "내기순환" : "외기유입", s.hvacRecirc, 0xFF4A8AD6, 0xFFFFFFFF);
-            bx += btnW + btnGap;
-            drawHvacDockButton(c, rf, pFill, pStroke, pText, setRf, drawRoundRect, drawRect, drawText,
-                    setColor, setStrokeW, setTextSize, setTextAlign, alignCenter,
-                    bx, dockY0, btnW, dockH, "SYNC", s.hvacOn && s.hvacSync, 0xFF4A8AD6, 0xFFFFFFFF);
+            // Bottom 5 HVAC Dock Buttons (composite active buttons from bmpActiveShell)
+            if (bmpActiveShell != null) {
+                if (s.hvacOn && s.hvacAuto) {
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1226, 374, 1353, 436);
+                }
+                if (s.hvacOn && s.hvacAc) {
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1359, 374, 1486, 436);
+                }
+                if (s.hvacOn && s.hvacHeat) {
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1492, 374, 1618, 436);
+                }
+                if (s.hvacRecirc) {
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1624, 374, 1751, 436);
+                }
+                if (s.hvacOn && s.hvacSync) {
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1757, 374, 1884, 436);
+                }
+            }
         }
 
-        private static String formatHvacTempDisplay(double tempC) {
-            if (tempC <= 14.0 && tempC > 0.0) return "LO";
-            if (tempC >= 32.0) return "HI";
-            if (tempC > 14.0 && tempC < 32.0) return String.format(Locale.US, "%.1f°", tempC);
-            return "22.0°";
-        }
-
-        private static void drawHvacDockButton(
+        /**
+         * 1:1 port of renderCommaAdasCanvas() from turzx_92_mockup.html (lines 2264-2750).
+         * Renders into Column 2 at (ox=610, oy=14, W=578, H=434).
+         */
+        private static void drawCommaAdasRoad3D(
                 Object c,
                 Object rf,
                 Object pFill,
                 Object pStroke,
-                Object pText,
+                Object pShader,
+                Object pPubBold,
+                Object pPubMed,
+                Object pSysBold,
+                Object pSysMed,
                 Method setRf,
                 Method drawRoundRect,
                 Method drawRect,
+                Method drawOval,
+                Method drawLine,
+                Method drawPath,
                 Method drawText,
                 Method setColor,
                 Method setStrokeW,
                 Method setTextSize,
                 Method setTextAlign,
+                Method measureText,
                 Object alignCenter,
-                float x,
-                float y,
-                float w,
-                float h,
-                String label,
-                boolean active,
-                int accentColor,
-                int activeTextColor
+                Class<?> canvasCls,
+                Class<?> paintCls,
+                Class<?> pathCls,
+                TelemetrySnapshot s
         ) throws Exception {
-            int bg = active ? 0xFF212023 : 0xFF17171A;
-            int border = active ? 0xFF3A3A3E : 0xFF222224;
-            int fg = active ? activeTextColor : 0xFF8A8C92;
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    x, y, x + w, y + h, 10f, bg, border, 1.8f);
-            if (active) {
-                setColor.invoke(pFill, Integer.valueOf(accentColor));
-                drawRect.invoke(c, x + 8f, y, x + w - 8f, y + 4f, pFill);
+            Method saveM = canvasCls.getMethod("save");
+            Method restoreToCountM = canvasCls.getMethod("restoreToCount", int.class);
+            Method clipRectM = canvasCls.getMethod("clipRect", float.class, float.class, float.class, float.class);
+
+            Class<?> shaderCls = Class.forName("android.graphics.Shader");
+            Class<?> tileCls = Class.forName("android.graphics.Shader$TileMode");
+            Class<?> lgCls = Class.forName("android.graphics.LinearGradient");
+            Class<?> rgCls = Class.forName("android.graphics.RadialGradient");
+            Object clampMode = tileCls.getField("CLAMP").get(null);
+            Method setShaderM = paintCls.getMethod("setShader", shaderCls);
+            Constructor<?> lgTwoCtor = lgCls.getConstructor(
+                    float.class, float.class, float.class, float.class, int.class, int.class, tileCls);
+            Constructor<?> lgMultiCtor = lgCls.getConstructor(
+                    float.class, float.class, float.class, float.class, int[].class, float[].class, tileCls);
+            Constructor<?> rgMultiCtor = rgCls.getConstructor(
+                    float.class, float.class, float.class, int[].class, float[].class, tileCls);
+
+            Method resetP = pathCls.getMethod("reset");
+            Method moveTo = pathCls.getMethod("moveTo", float.class, float.class);
+            Method lineTo = pathCls.getMethod("lineTo", float.class, float.class);
+            Method quadTo = pathCls.getMethod("quadTo", float.class, float.class, float.class, float.class);
+            Method closeP = pathCls.getMethod("close");
+            Object path = pathCls.getConstructor().newInstance();
+
+            int saveCount = ((Integer) saveM.invoke(c)).intValue();
+            clipRectM.invoke(c, 609f, 13f, 1189f, 449f);
+
+            float ox = 610f;
+            float oy = 14f;
+            float W = 578f;
+            float H = 434f;
+            float horizonY = 130f;
+
+            // 1. Sky, Atmospheric Horizon Glow & Ground Plane Base
+            Object skyGrad = lgTwoCtor.newInstance(
+                    ox, oy, ox, oy + horizonY, Integer.valueOf(0xFF07080C), Integer.valueOf(0xFF0F131D), clampMode);
+            setShaderM.invoke(pShader, skyGrad);
+            drawRect.invoke(c, ox, oy, ox + W, oy + horizonY, pShader);
+
+            Object groundGrad = lgMultiCtor.newInstance(
+                    ox, oy + horizonY, ox, oy + H,
+                    new int[]{0xFF0E1118, 0xFF11131A, 0xFF0B0C10},
+                    new float[]{0f, 0.45f, 1f},
+                    clampMode);
+            setShaderM.invoke(pShader, groundGrad);
+            drawRect.invoke(c, ox, oy + horizonY, ox + W, oy + H, pShader);
+
+            // Camera intrinsics in 578x434 pixel space
+            float u0 = W * 0.565f;
+            float v0 = horizonY;
+            float fx = 395f;
+            float fy = 950f;
+            float camH = 1.35f;
+
+            float leadDistM = (s.hasLeadCar && s.leadDistM > 0f) ? s.leadDistM : 34.0f;
+            float visualLeadX = 6.2f + (float) Math.pow(Math.max(6.0, leadDistM), 0.62) * 1.05f;
+
+            float curveC2 = 0.00048f;
+            float curveC1 = 0.008f;
+            if (s.pathPoly != null && s.pathPoly.length >= 3) {
+                if (Math.abs(s.pathPoly[1]) > 0.00001f || Math.abs(s.pathPoly[2]) > 0.00001f) {
+                    curveC1 = Math.max(-0.04f, Math.min(0.04f, s.pathPoly[1]));
+                    curveC2 = Math.max(-0.0025f, Math.min(0.0025f, s.pathPoly[2]));
+                }
             }
-            setTextAlign.invoke(pText, alignCenter);
-            setTextSize.invoke(pText, 19.5f);
-            setColor.invoke(pText, Integer.valueOf(fg));
-            drawText.invoke(c, label, x + w * 0.5f, y + h * 0.5f + 7f, pText);
+
+            // Subtle radial horizon glow around vanishing point
+            float vpY75 = roadCenterLat(75f, curveC1, curveC2);
+            float vpU = projU(ox, u0, fx, 75f, vpY75);
+            Object hGlow = rgMultiCtor.newInstance(
+                    vpU, oy + horizonY + 12f, 310f,
+                    new int[]{0x294A8AD6, 0x0F44A282, 0x000B0C10},
+                    new float[]{0f, 0.5f, 1f},
+                    clampMode);
+            setShaderM.invoke(pShader, hGlow);
+            drawRect.invoke(c, ox, oy, ox + W, oy + H, pShader);
+
+            // 2. Horizon Azimuth Rule & Subtle Sensor Ticks
+            setColor.invoke(pStroke, Integer.valueOf(0xFF1F2430));
+            setStrokeW.invoke(pStroke, 1.5f);
+            drawLine.invoke(c, ox, oy + horizonY, ox + W, oy + horizonY, pStroke);
+
+            for (int lat = -12; lat <= 12; lat += 2) {
+                float px = projU(ox, u0, fx, 60f, (float) lat);
+                setColor.invoke(pStroke, Integer.valueOf(lat == 0 ? 0xFF3A4152 : 0xFF1C2029));
+                drawLine.invoke(c, px, oy + horizonY - 4f, px, oy + horizonY + 4f, pStroke);
+            }
+
+            // 3. Multi-Lane Asphalt Roadbed Surface (3 Lanes: Y = -5.4m to +5.4m, 38 steps)
+            float[] xSteps = new float[39];
+            for (int i = 0; i <= 38; i++) {
+                float t = i / 38.0f;
+                xSteps[i] = 3.85f + 82.0f * (t * t);
+            }
+
+            Object roadSurfGrad = lgMultiCtor.newInstance(
+                    ox, oy + horizonY, ox, oy + H,
+                    new int[]{0xFF12151E, 0xFF161922, 0xFF101218},
+                    new float[]{0f, 0.4f, 1f},
+                    clampMode);
+            setShaderM.invoke(pShader, roadSurfGrad);
+            resetP.invoke(path);
+            for (int i = 0; i < xSteps.length; i++) {
+                float x = xSteps[i];
+                float cy = roadCenterLat(x, curveC1, curveC2) - 5.4f;
+                float pu = projU(ox, u0, fx, x, cy);
+                float pv = projV(oy, v0, fy, camH, x, 0f);
+                if (i == 0) moveTo.invoke(path, pu, pv);
+                else lineTo.invoke(path, pu, pv);
+            }
+            for (int i = xSteps.length - 1; i >= 0; i--) {
+                float x = xSteps[i];
+                float cy = roadCenterLat(x, curveC1, curveC2) + 5.4f;
+                float pu = projU(ox, u0, fx, x, cy);
+                float pv = projV(oy, v0, fy, camH, x, 0f);
+                lineTo.invoke(path, pu, pv);
+            }
+            closeP.invoke(path);
+            drawPath.invoke(c, path, pShader);
+
+            // Ego Lane Subtle Surface Contrast (Y = -1.82m to +1.82m)
+            Object egoSurfGrad = lgMultiCtor.newInstance(
+                    ox, oy + horizonY, ox, oy + H,
+                    new int[]{0xFF161A24, 0xFF1B202C, 0xFF141821},
+                    new float[]{0f, 0.5f, 1f},
+                    clampMode);
+            setShaderM.invoke(pShader, egoSurfGrad);
+            resetP.invoke(path);
+            for (int i = 0; i < xSteps.length; i++) {
+                float x = xSteps[i];
+                float cy = roadCenterLat(x, curveC1, curveC2) - 1.82f;
+                float pu = projU(ox, u0, fx, x, cy);
+                float pv = projV(oy, v0, fy, camH, x, 0f);
+                if (i == 0) moveTo.invoke(path, pu, pv);
+                else lineTo.invoke(path, pu, pv);
+            }
+            for (int i = xSteps.length - 1; i >= 0; i--) {
+                float x = xSteps[i];
+                float cy = roadCenterLat(x, curveC1, curveC2) + 1.82f;
+                float pu = projU(ox, u0, fx, x, cy);
+                float pv = projV(oy, v0, fy, camH, x, 0f);
+                lineTo.invoke(path, pu, pv);
+            }
+            closeP.invoke(path);
+            drawPath.invoke(c, path, pShader);
+
+            // 4. Perspective Distance Grid Lines on Roadbed
+            float[] gridDists = new float[]{5.0f, 6.8f, 9.5f, 13.5f, 19.5f, 29.0f, 45.0f};
+            setStrokeW.invoke(pStroke, 1.0f);
+            for (int i = 0; i < gridDists.length; i++) {
+                float dist = gridDists[i];
+                float alpha = Math.min(0.09f, Math.max(0.025f, 0.45f / dist));
+                setColor.invoke(pStroke, Integer.valueOf(argbFromAlphaRgb(alpha, 255, 255, 255)));
+                float cLat = roadCenterLat(dist, curveC1, curveC2);
+                float uL = projU(ox, u0, fx, dist, cLat - 5.4f);
+                float uR = projU(ox, u0, fx, dist, cLat + 5.4f);
+                float vG = projV(oy, v0, fy, camH, dist, 0f);
+                drawLine.invoke(c, uL, vG, uR, vG, pStroke);
+            }
+
+            // 5. Road Shoulder Edges (-5.4m, +5.4m) & Adjacent Dashed Lane Lines (-3.6m, +3.6m)
+            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
+                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
+                    -5.4f, 0.06f, 74, 82, 98, 0.65f, false, roadPhase);
+            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
+                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
+                    5.4f, 0.06f, 74, 82, 98, 0.65f, false, roadPhase);
+            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
+                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
+                    -3.6f, 0.055f, 148, 163, 184, 0.38f, true, roadPhase);
+            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
+                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
+                    3.6f, 0.055f, 148, 163, 184, 0.38f, true, roadPhase);
+
+            // 6. Comma modelV2 Predicted Steering Trajectory Carpet (34 steps)
+            float pathMaxX = Math.max(6.8f, visualLeadX - 0.6f);
+            float pathHalfW = 0.76f;
+            int pathSteps = 34;
+            boolean isCloseLead = leadDistM <= 18f;
+            boolean isCriticalLead = leadDistM <= 12f;
+            int carpR = isCriticalLead ? 229 : (isCloseLead ? 217 : 68);
+            int carpG = isCriticalLead ? 86 : (isCloseLead ? 164 : 162);
+            int carpB = isCriticalLead ? 111 : (isCloseLead ? 65 : 130);
+
+            for (int i = 0; i < pathSteps; i++) {
+                float t0 = i / (float) pathSteps;
+                float t1 = (i + 1) / (float) pathSteps;
+                float x0 = 3.85f + (pathMaxX - 3.85f) * (t0 * t0);
+                float x1 = 3.85f + (pathMaxX - 3.85f) * (t1 * t1);
+                float w0 = pathHalfW * (1f - t0 * 0.16f);
+                float w1 = pathHalfW * (1f - t1 * 0.16f);
+                float c0 = roadCenterLat(x0, curveC1, curveC2);
+                float c1 = roadCenterLat(x1, curveC1, curveC2);
+
+                float v0y = projV(oy, v0, fy, camH, x0, 0f);
+                float v1y = projV(oy, v0, fy, camH, x1, 0f);
+                resetP.invoke(path);
+                moveTo.invoke(path, projU(ox, u0, fx, x0, c0 - w0), v0y);
+                lineTo.invoke(path, projU(ox, u0, fx, x0, c0 + w0), v0y);
+                lineTo.invoke(path, projU(ox, u0, fx, x1, c1 + w1), v1y);
+                lineTo.invoke(path, projU(ox, u0, fx, x1, c1 - w1), v1y);
+                closeP.invoke(path);
+
+                float alpha = (1f - t0 * 0.65f) * 0.38f;
+                setColor.invoke(pFill, Integer.valueOf(argbFromAlphaRgb(alpha, carpR, carpG, carpB)));
+                drawPath.invoke(c, path, pFill);
+            }
+
+            // Trajectory Left & Right 3D Edge Rails
+            int railR = isCriticalLead ? 255 : (isCloseLead ? 245 : 95);
+            int railG = isCriticalLead ? 133 : (isCloseLead ? 194 : 195);
+            int railB = isCriticalLead ? 152 : (isCloseLead ? 96 : 156);
+            int[] sides = new int[]{-1, 1};
+            for (int sIdx = 0; sIdx < sides.length; sIdx++) {
+                int side = sides[sIdx];
+                for (int i = 0; i < pathSteps; i++) {
+                    float t0 = i / (float) pathSteps;
+                    float t1 = (i + 1) / (float) pathSteps;
+                    float x0 = 3.85f + (pathMaxX - 3.85f) * (t0 * t0);
+                    float x1 = 3.85f + (pathMaxX - 3.85f) * (t1 * t1);
+                    float w0 = pathHalfW * (1f - t0 * 0.16f);
+                    float w1 = pathHalfW * (1f - t1 * 0.16f);
+                    float lat0 = roadCenterLat(x0, curveC1, curveC2) + side * w0;
+                    float lat1 = roadCenterLat(x1, curveC1, curveC2) + side * w1;
+                    float wRail = 0.045f;
+
+                    float v0y = projV(oy, v0, fy, camH, x0, 0f);
+                    float v1y = projV(oy, v0, fy, camH, x1, 0f);
+                    resetP.invoke(path);
+                    moveTo.invoke(path, projU(ox, u0, fx, x0, lat0 - wRail), v0y);
+                    lineTo.invoke(path, projU(ox, u0, fx, x0, lat0 + wRail), v0y);
+                    lineTo.invoke(path, projU(ox, u0, fx, x1, lat1 + wRail), v1y);
+                    lineTo.invoke(path, projU(ox, u0, fx, x1, lat1 - wRail), v1y);
+                    closeP.invoke(path);
+
+                    float fade = Math.max(0.22f, 1f - t0 * 0.72f);
+                    setColor.invoke(pFill, Integer.valueOf(argbFromAlphaRgb(fade, railR, railG, railB)));
+                    drawPath.invoke(c, path, pFill);
+                }
+            }
+
+            // Trajectory Internal Chevron Rungs
+            float rungSpacing = 2.4f;
+            int chevR = isCriticalLead ? 255 : (isCloseLead ? 253 : 167);
+            int chevG = isCriticalLead ? 180 : (isCloseLead ? 224 : 243);
+            int chevB = isCriticalLead ? 192 : (isCloseLead ? 142 : 208);
+            for (float d = 4.4f; d < pathMaxX - 0.8f; d += rungSpacing) {
+                float xRung = d - ((roadPhase * 0.45f) % rungSpacing);
+                if (xRung < 4.0f || xRung > pathMaxX - 0.7f) continue;
+                float t = (xRung - 3.85f) / Math.max(1.0f, pathMaxX - 3.85f);
+                float w = pathHalfW * (1f - t * 0.16f) * 0.76f;
+                float cMid = roadCenterLat(xRung, curveC1, curveC2);
+                float cTip = roadCenterLat(xRung + 0.55f, curveC1, curveC2);
+
+                float uL = projU(ox, u0, fx, xRung, cMid - w);
+                float uR = projU(ox, u0, fx, xRung, cMid + w);
+                float vLR = projV(oy, v0, fy, camH, xRung, 0f);
+                float uM = projU(ox, u0, fx, xRung + 0.55f, cTip);
+                float vM = projV(oy, v0, fy, camH, xRung + 0.55f, 0f);
+
+                float fade = Math.max(0.18f, 1f - t * 0.75f);
+                setColor.invoke(pStroke, Integer.valueOf(argbFromAlphaRgb(fade * 0.63f, chevR, chevG, chevB)));
+                setStrokeW.invoke(pStroke, Math.max(1.5f, 3.6f * fade));
+                drawLine.invoke(c, uL, vLR, uM, vM, pStroke);
+                drawLine.invoke(c, uM, vM, uR, vLR, pStroke);
+            }
+
+            // Safe Following Distance Threshold Bar & Ego Sensor Shield Arc
+            float safeBufferX = Math.min(pathMaxX - 0.3f, 6.4f);
+            float sbC = roadCenterLat(safeBufferX, curveC1, curveC2);
+            float sbV = projV(oy, v0, fy, camH, safeBufferX, 0f);
+            setColor.invoke(pStroke, Integer.valueOf(isCriticalLead ? 0xC7E5566F : 0x734A8AD6));
+            setStrokeW.invoke(pStroke, 2.0f);
+            drawLine.invoke(c, projU(ox, u0, fx, safeBufferX, sbC - 0.92f), sbV,
+                    projU(ox, u0, fx, safeBufferX, sbC + 0.92f), sbV, pStroke);
+
+            float egoArcC = roadCenterLat(4.15f, curveC1, curveC2);
+            float egoArcV = projV(oy, v0, fy, camH, 4.15f, 0f);
+            float egoArcMV = projV(oy, v0, fy, camH, 4.42f, 0f);
+            resetP.invoke(path);
+            moveTo.invoke(path, projU(ox, u0, fx, 4.15f, egoArcC - 1.28f), egoArcV);
+            quadTo.invoke(path, projU(ox, u0, fx, 4.42f, egoArcC), egoArcMV - 6f,
+                    projU(ox, u0, fx, 4.15f, egoArcC + 1.28f), egoArcV);
+            setColor.invoke(pStroke, Integer.valueOf(0x8578BCFF));
+            setStrokeW.invoke(pStroke, 2.2f);
+            drawPath.invoke(c, path, pStroke);
+
+            // 7. Ego Left & Right Recognized Lane Lines (-1.82m, +1.82m) with Outer Halo + Crisp Core
+            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
+                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
+                    -1.82f, 0.19f, 74, 138, 214, 0.25f, false, roadPhase);
+            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
+                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
+                    1.82f, 0.19f, 74, 138, 214, 0.25f, false, roadPhase);
+            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
+                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
+                    -1.82f, 0.068f, 120, 188, 255, 0.96f, false, roadPhase);
+            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
+                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
+                    1.82f, 0.068f, 120, 188, 255, 0.96f, false, roadPhase);
+
+            // 7b. Surround Traffic: 3D Ghost Vehicle in Right Adjacent Lane
+            float ghostX = 16.5f;
+            float ghostLat = roadCenterLat(ghostX, curveC1, curveC2) + 3.6f;
+            float gcx = projU(ox, u0, fx, ghostX, ghostLat);
+            float gby = projV(oy, v0, fy, camH, ghostX, 0f);
+            float gLeft = projU(ox, u0, fx, ghostX, ghostLat - 0.88f);
+            float gRight = projU(ox, u0, fx, ghostX, ghostLat + 0.88f);
+            float gW = Math.abs(gRight - gLeft);
+            float gH = gW * 0.66f;
+            if (gW > 20f) {
+                float rx = gW * 0.52f;
+                float ry = Math.max(3f, gH * 0.12f);
+                setRf.invoke(rf, gcx - rx, gby + 2f - ry, gcx + rx, gby + 2f + ry);
+                setColor.invoke(pFill, Integer.valueOf(0x73000000));
+                drawOval.invoke(c, rf, pFill);
+
+                resetP.invoke(path);
+                moveTo.invoke(path, gcx - gW * 0.48f, gby - 3f);
+                lineTo.invoke(path, gcx - gW * 0.48f, gby - gH * 0.58f);
+                lineTo.invoke(path, gcx - gW * 0.34f, gby - gH * 0.94f);
+                lineTo.invoke(path, gcx + gW * 0.34f, gby - gH * 0.94f);
+                lineTo.invoke(path, gcx + gW * 0.48f, gby - gH * 0.58f);
+                lineTo.invoke(path, gcx + gW * 0.48f, gby - 3f);
+                closeP.invoke(path);
+                setColor.invoke(pFill, Integer.valueOf(0x9E222732));
+                drawPath.invoke(c, path, pFill);
+                setColor.invoke(pStroke, Integer.valueOf(0x618A94A6));
+                setStrokeW.invoke(pStroke, 1.2f);
+                drawPath.invoke(c, path, pStroke);
+
+                setColor.invoke(pFill, Integer.valueOf(0x7AE5566F));
+                float tlY = gby - gH * 0.52f;
+                float tlH = Math.max(2f, gH * 0.08f);
+                drawRect.invoke(c, gcx - gW * 0.42f, tlY, gcx - gW * 0.20f, tlY + tlH, pFill);
+                drawRect.invoke(c, gcx + gW * 0.20f, tlY, gcx + gW * 0.42f, tlY + tlH, pFill);
+            }
+
+            // 8. 3D-Projected Lead Vehicle Model + CarrotPilot Radar Lock
+            float leadX = visualLeadX;
+            float leadLat = roadCenterLat(leadX, curveC1, curveC2);
+            float cx = projU(ox, u0, fx, leadX, leadLat);
+            float by = projV(oy, v0, fy, camH, leadX, 0f);
+            float pLeftEdge = projU(ox, u0, fx, leadX, leadLat - 0.96f);
+            float pRightEdge = projU(ox, u0, fx, leadX, leadLat + 0.96f);
+            float rawCarW = Math.abs(pRightEdge - pLeftEdge);
+            float carW = Math.max(72f, Math.min(146f, rawCarW));
+            float carH = carW * 0.68f;
+
+            // (a) Ground Occlusion Shadow
+            float sRx = carW * 0.56f;
+            float sRy = Math.max(5f, carH * 0.14f);
+            setRf.invoke(rf, cx - sRx, by + 2f - sRy, cx + sRx, by + 2f + sRy);
+            setColor.invoke(pFill, Integer.valueOf(0xB8000000));
+            drawOval.invoke(c, rf, pFill);
+
+            // (b) Left & Right Rear Tires
+            float tireW = Math.max(9f, carW * 0.17f);
+            float tireH = Math.max(11f, carH * 0.28f);
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    cx - carW * 0.46f, by - tireH, cx - carW * 0.46f + tireW, by, 2.5f, 0xFF090A0F, 0xFF2F3340, 1.2f);
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    cx + carW * 0.46f - tireW, by - tireH, cx + carW * 0.46f, by, 2.5f, 0xFF090A0F, 0xFF2F3340, 1.2f);
+
+            // (c) Main Lower Vehicle Body
+            float bodyTopY = by - carH * 0.62f;
+            float roofTopY = by - carH * 0.96f;
+            Object bodyGrad = lgMultiCtor.newInstance(
+                    cx, roofTopY, cx, by,
+                    new int[]{0xFF2D3240, 0xFF1F232E, 0xFF12141C},
+                    new float[]{0f, 0.45f, 1f},
+                    clampMode);
+            setShaderM.invoke(pShader, bodyGrad);
+            resetP.invoke(path);
+            moveTo.invoke(path, cx - carW * 0.48f, by - tireH * 0.42f);
+            lineTo.invoke(path, cx - carW * 0.49f, bodyTopY);
+            lineTo.invoke(path, cx - carW * 0.34f, roofTopY);
+            lineTo.invoke(path, cx + carW * 0.34f, roofTopY);
+            lineTo.invoke(path, cx + carW * 0.49f, bodyTopY);
+            lineTo.invoke(path, cx + carW * 0.48f, by - tireH * 0.42f);
+            closeP.invoke(path);
+            drawPath.invoke(c, path, pShader);
+            setColor.invoke(pStroke, Integer.valueOf(0xFF525868));
+            setStrokeW.invoke(pStroke, 1.6f);
+            drawPath.invoke(c, path, pStroke);
+
+            // (d) Rear Windshield Glass
+            Object glassGrad = lgTwoCtor.newInstance(
+                    cx, roofTopY, cx, bodyTopY, Integer.valueOf(0xFF1E293B), Integer.valueOf(0xFF0F1117), clampMode);
+            setShaderM.invoke(pShader, glassGrad);
+            resetP.invoke(path);
+            moveTo.invoke(path, cx - carW * 0.38f, bodyTopY - 1f);
+            lineTo.invoke(path, cx - carW * 0.29f, roofTopY + carH * 0.07f);
+            lineTo.invoke(path, cx + carW * 0.29f, roofTopY + carH * 0.07f);
+            lineTo.invoke(path, cx + carW * 0.38f, bodyTopY - 1f);
+            closeP.invoke(path);
+            drawPath.invoke(c, path, pShader);
+            setColor.invoke(pStroke, Integer.valueOf(0xFF383D4A));
+            setStrokeW.invoke(pStroke, 1.0f);
+            drawPath.invoke(c, path, pStroke);
+
+            // (e) Lower Rear Metallic Diffuser
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    cx - carW * 0.38f, by - carH * 0.28f, cx + carW * 0.38f, by - carH * 0.14f,
+                    2f, 0xFF161821, 0xFF2E323D, 1.0f);
+
+            // (f) Full-Width Parametric LED Tail Lightbar + Soft Brake Glow
+            float lampY = bodyTopY + carH * 0.04f;
+            float lampH = Math.max(4.5f, carH * 0.095f);
+            Object tailGlow = rgMultiCtor.newInstance(
+                    cx, lampY + lampH * 0.5f, carW * 0.54f,
+                    new int[]{0x73E5566F, 0x00E5566F},
+                    new float[]{0.15f, 1.0f},
+                    clampMode);
+            setShaderM.invoke(pShader, tailGlow);
+            drawRect.invoke(c, cx - carW * 0.55f, lampY - lampH * 1.5f, cx + carW * 0.55f, lampY + lampH * 2.5f, pShader);
+
+            setColor.invoke(pFill, Integer.valueOf(0xFFE5566F));
+            setRf.invoke(rf, cx - carW * 0.45f, lampY, cx + carW * 0.45f, lampY + lampH);
+            drawRoundRect.invoke(c, rf, 2f, 2f, pFill);
+
+            setColor.invoke(pFill, Integer.valueOf(0xFFFFB3C0));
+            float coreH = Math.max(2f, lampH - 2f);
+            drawRect.invoke(c, cx - carW * 0.43f, lampY + 1f, cx - carW * 0.21f, lampY + 1f + coreH, pFill);
+            drawRect.invoke(c, cx + carW * 0.21f, lampY + 1f, cx + carW * 0.43f, lampY + 1f + coreH, pFill);
+
+            // (g) Radar Lock Chevron & Target Brackets
+            int radarColor = (leadDistM <= 20f) ? 0xFFE5566F : 0xFFD9A441;
+            float bx0 = cx - carW * 0.55f;
+            float bx1 = cx + carW * 0.55f;
+            float by0 = roofTopY - 5f;
+            float by1 = by + 3f;
+            float brk = Math.max(7f, carW * 0.11f);
+
+            setColor.invoke(pStroke, Integer.valueOf(radarColor));
+            setStrokeW.invoke(pStroke, 2.0f);
+            drawLine.invoke(c, bx0, by0 + brk, bx0, by0, pStroke);
+            drawLine.invoke(c, bx0, by0, bx0 + brk, by0, pStroke);
+            drawLine.invoke(c, bx1 - brk, by0, bx1, by0, pStroke);
+            drawLine.invoke(c, bx1, by0, bx1, by0 + brk, pStroke);
+            drawLine.invoke(c, bx0, by1 - brk, bx0, by1, pStroke);
+            drawLine.invoke(c, bx0, by1, bx0 + brk, by1, pStroke);
+            drawLine.invoke(c, bx1 - brk, by1, bx1, by1, pStroke);
+            drawLine.invoke(c, bx1, by1, bx1, by1 - brk, pStroke);
+
+            float chevY = by + 8f;
+            resetP.invoke(path);
+            moveTo.invoke(path, cx, chevY);
+            lineTo.invoke(path, cx - 12f, chevY + 10f);
+            lineTo.invoke(path, cx - 5f, chevY + 10f);
+            lineTo.invoke(path, cx, chevY + 5f);
+            lineTo.invoke(path, cx + 5f, chevY + 10f);
+            lineTo.invoke(path, cx + 12f, chevY + 10f);
+            closeP.invoke(path);
+            setColor.invoke(pFill, Integer.valueOf(radarColor));
+            drawPath.invoke(c, path, pFill);
+
+            float tagW = 62f;
+            float tagH = 24f;
+            float tagX = cx - tagW * 0.5f;
+            float tagY = Math.max(oy + 8f, by0 - tagH - 5f);
+            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                    tagX, tagY, tagX + tagW, tagY + tagH, 5f, 0xEB131217, radarColor, 1.6f);
+            float dispLead = (s.hasLeadCar && s.leadDistM > 0f && s.carrotConnected) ? s.leadDistM : 42f;
+            drawTextSmart(c, String.format(Locale.US, "%.0fm", dispLead), cx, tagY + 17.5f, 16f, 0xFFFFFFFF, true, alignCenter,
+                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+
+            restoreToCountM.invoke(c, Integer.valueOf(saveCount));
+        }
+
+        private static float roadCenterLat(float x, float curveC1, float curveC2) {
+            float dx = Math.max(0f, x - 4.0f);
+            return curveC2 * (dx * dx) * 2.2f + curveC1 * dx;
+        }
+
+        private static float projU(float ox, float u0, float fx, float x, float y) {
+            float safeX = Math.max(2.5f, x);
+            return ox + u0 + fx * (y / safeX);
+        }
+
+        private static float projV(float oy, float v0, float fy, float camH, float x, float z) {
+            float safeX = Math.max(2.5f, x);
+            return oy + v0 + fy * ((camH - z) / safeX);
+        }
+
+        private static int argbFromAlphaRgb(float alpha01, int r, int g, int b) {
+            int a = Math.max(0, Math.min(255, Math.round(alpha01 * 255f)));
+            return (a << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+        }
+
+        private static void drawTaperedStrip3D(
+                Object c,
+                Object path,
+                Object pFill,
+                Method resetP,
+                Method moveTo,
+                Method lineTo,
+                Method closeP,
+                Method setColor,
+                Method drawPath,
+                float[] xSteps,
+                float ox,
+                float oy,
+                float u0,
+                float v0,
+                float fx,
+                float fy,
+                float camH,
+                float curveC1,
+                float curveC2,
+                float latOffset,
+                float halfWidthM,
+                int r,
+                int g,
+                int b,
+                float baseAlpha,
+                boolean dashed,
+                float phase
+        ) throws Exception {
+            for (int i = 0; i < xSteps.length - 1; i++) {
+                float x0 = xSteps[i];
+                float x1 = xSteps[i + 1];
+                if (dashed) {
+                    int seg = (int) Math.floor((x0 + phase) / 3.0f);
+                    if ((seg & 1) != 0) continue;
+                }
+                float c0 = roadCenterLat(x0, curveC1, curveC2) + latOffset;
+                float c1 = roadCenterLat(x1, curveC1, curveC2) + latOffset;
+                float v0y = projV(oy, v0, fy, camH, x0, 0f);
+                float v1y = projV(oy, v0, fy, camH, x1, 0f);
+
+                resetP.invoke(path);
+                moveTo.invoke(path, projU(ox, u0, fx, x0, c0 - halfWidthM), v0y);
+                lineTo.invoke(path, projU(ox, u0, fx, x0, c0 + halfWidthM), v0y);
+                lineTo.invoke(path, projU(ox, u0, fx, x1, c1 + halfWidthM), v1y);
+                lineTo.invoke(path, projU(ox, u0, fx, x1, c1 - halfWidthM), v1y);
+                closeP.invoke(path);
+
+                float fade = Math.max(0.08f, 1.0f - (x0 / 88.0f));
+                setColor.invoke(pFill, Integer.valueOf(argbFromAlphaRgb(fade * baseAlpha, r, g, b)));
+                drawPath.invoke(c, path, pFill);
+            }
+        }
+
+        private static void drawBarFillOnly(
+                Object c,
+                Object rf,
+                Object pFill,
+                Method setRf,
+                Method drawRoundRect,
+                Method setColor,
+                float x0,
+                float y0,
+                float maxW,
+                float h,
+                float pct,
+                int fillColor
+        ) throws Exception {
+            float clamped = Math.max(0f, Math.min(100f, pct));
+            if (clamped <= 0.1f) return;
+            float r = h * 0.5f;
+            float fillW = Math.max(h, (maxW * clamped) / 100.0f);
+            setRf.invoke(rf, x0, y0, x0 + fillW, y0 + h);
+            setColor.invoke(pFill, Integer.valueOf(fillColor));
+            drawRoundRect.invoke(c, rf, r, r, pFill);
+        }
+
+        private static String formatHvacTempNumberOnly(double tempC) {
+            if (tempC <= 14.0 && tempC > 0.0) return "LO";
+            if (tempC >= 32.0) return "HI";
+            if (tempC > 14.0 && tempC < 32.0) return String.format(Locale.US, "%.1f", tempC);
+            return "21.5";
         }
 
         private static void drawCard(
@@ -1988,43 +2272,15 @@ public class TurzxMonitorMain {
             }
         }
 
-        private static void drawProgressBar(
-                Object c,
-                Object rf,
-                Object pFill,
-                Method setRf,
-                Method drawRoundRect,
-                Method setColor,
-                float x0,
-                float y0,
-                float x1,
-                float y1,
-                int pct,
-                int fillColor
-        ) throws Exception {
-            float r = (y1 - y0) * 0.5f;
-            setRf.invoke(rf, x0, y0, x1, y1);
-            setColor.invoke(pFill, Integer.valueOf(0xFF212023));
-            drawRoundRect.invoke(c, rf, r, r, pFill);
-
-            int clamped = Math.max(0, Math.min(100, pct));
-            if (clamped > 0) {
-                float fillW = Math.max((y1 - y0), ((x1 - x0) * clamped) / 100.0f);
-                setRf.invoke(rf, x0, y0, x0 + fillW, y1);
-                setColor.invoke(pFill, Integer.valueOf(fillColor));
-                drawRoundRect.invoke(c, rf, r, r, pFill);
-            }
-        }
-
         private static String truncateText(String s, int maxChars) {
             if (s == null || s.isEmpty()) return "--";
             if (s.length() <= maxChars) return s;
             return s.substring(0, maxChars - 1) + "…";
         }
 
-        private static String formatSecMin(int totalSec) {
+        private static String formatSecMinTwoDigit(int totalSec) {
             int clamped = Math.max(0, totalSec);
-            return String.format(Locale.US, "%d:%02d", clamped / 60, clamped % 60);
+            return String.format(Locale.US, "%02d:%02d", clamped / 60, clamped % 60);
         }
     }
 
@@ -5722,10 +5978,26 @@ public class TurzxMonitorMain {
             assertTrue(parsedMode == 9 && "Supernova".equals(snap.mediaTitle) && "aespa".equals(snap.mediaArtist)
                     && "Bluetooth Audio".equals(snap.mediaSource) && snap.mediaPlaying,
                     "Expected ClusterService BT Audio log line parsed");
+
+            // 8. Verify Chromium 1:1 pre-rendered HUD PNG layers + Public Sans TTF fonts are bundled and readable
+            String[] requiredAssets = new String[]{
+                    "base_shell.png",
+                    "active_shell.png",
+                    "col2_hud_section.png",
+                    "col2_hud_traffic.png",
+                    "col2_hud_none.png",
+                    "PublicSans-Bold.ttf",
+                    "PublicSans-Medium.ttf"
+            };
+            for (int i = 0; i < requiredAssets.length; i++) {
+                byte[] assetBytes = TurzxFrameRenderer.readJarAssetBytes(requiredAssets[i]);
+                assertTrue(assetBytes != null && assetBytes.length > 8192,
+                        "Expected bundled HUD asset " + requiredAssets[i] + " (>8KB)");
+            }
         } catch (Exception e) {
             throw new RuntimeException("MonitorConfig / OTA self-test failed", e);
         }
 
-        System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");
+        System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + Chromium 1:1 HUD Assets + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");
     }
 }
