@@ -72,7 +72,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.2.1";
+    public static final String MONITOR_VERSION = "1.2.2";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -2344,6 +2344,7 @@ public class TurzxMonitorMain {
     public static final class RemoteControlDisplayBridge extends android.media.IRemoteControlDisplay.Stub {
         @Override
         public void setCurrentClientId(int clientGeneration, android.app.PendingIntent clientMediaIntent, boolean clearing) {
+            TelemetryCollector.onRemoteControlClientChanged(clientGeneration, clientMediaIntent, clearing);
             if (clearing) {
                 TelemetryCollector.onRemoteControlCleared();
             }
@@ -2405,9 +2406,14 @@ public class TurzxMonitorMain {
         private static volatile Method datcGetVrStatusMethod = null;
         private static volatile boolean datcListenerRegistered = false;
         private static volatile long lastDatcCallbackMs = 0L;
+        private static volatile Object lastRawDatcStatusObj = null;
+        private static volatile String lastRawDatcTempCallback = "none";
 
         private static volatile boolean rcDisplayRegistered = false;
         private static volatile Object rcDisplayBridgeObj = null;
+        private static volatile String lastRawRcClientInfo = "none";
+        private static volatile String lastRawRcStateInfo = "none";
+        private static volatile String lastRawRcBundleDump = "none";
         private static volatile Object clusterService = null;
         private static volatile Method clusterGetLastPlaytimeMethod = null;
         private static volatile int lastClusterMediaMode = -1;
@@ -2445,6 +2451,7 @@ public class TurzxMonitorMain {
 
         public static void onDatcStatusCallback(Object statusObj) {
             if (statusObj == null) return;
+            lastRawDatcStatusObj = statusObj;
             synchronized (liveSnapshot) {
                 if (applyDatcStatusObject(statusObj, liveSnapshot)) {
                     lastDatcCallbackMs = System.currentTimeMillis();
@@ -2457,6 +2464,9 @@ public class TurzxMonitorMain {
                 float psC, int psStateC,
                 float ambC, int ambStateC
         ) {
+            lastRawDatcTempCallback = String.format(Locale.US,
+                    "drC=%.1f(st=%d), psC=%.1f(st=%d), ambC=%.1f(st=%d)",
+                    drC, drStateC, psC, psStateC, ambC, ambStateC);
             synchronized (liveSnapshot) {
                 double drResolved = resolveDatcTempWithState(drC, drStateC);
                 if (drResolved > 0.0) {
@@ -2476,6 +2486,22 @@ public class TurzxMonitorMain {
             }
         }
 
+        public static void onRemoteControlClientChanged(int gen, Object pendingIntentObj, boolean clearing) {
+            String pkg = "null";
+            if (pendingIntentObj != null) {
+                try {
+                    Class<?> pc = pendingIntentObj.getClass();
+                    try {
+                        pkg = String.valueOf(pc.getMethod("getTargetPackage").invoke(pendingIntentObj));
+                    } catch (Throwable t1) {
+                        pkg = String.valueOf(pc.getMethod("getCreatorPackage").invoke(pendingIntentObj));
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            lastRawRcClientInfo = "gen=" + gen + ", pkg=" + pkg + ", clearing=" + clearing;
+        }
+
         public static void onRemoteControlCleared() {
             synchronized (liveSnapshot) {
                 liveSnapshot.mediaPlaying = false;
@@ -2483,6 +2509,7 @@ public class TurzxMonitorMain {
         }
 
         public static void onRemoteControlPlaybackState(int state, long currentPosMs) {
+            lastRawRcStateInfo = "state=" + state + ", posMs=" + currentPosMs;
             synchronized (liveSnapshot) {
                 // MediaFocusControl / RemoteControlClient: PLAYSTATE_PLAYING = 3
                 liveSnapshot.mediaPlaying = (state == 3);
@@ -2493,36 +2520,111 @@ public class TurzxMonitorMain {
             }
         }
 
+        private static String readBundleStringAny(Object bundleObj, Method getStr, Method getObj, String... keys) {
+            for (int i = 0; i < keys.length; i++) {
+                String k = keys[i];
+                try {
+                    if (getStr != null) {
+                        String s = (String) getStr.invoke(bundleObj, k);
+                        if (s != null && !s.trim().isEmpty()) return s.trim();
+                    }
+                } catch (Throwable ignored) {
+                }
+                try {
+                    if (getObj != null) {
+                        Object v = getObj.invoke(bundleObj, k);
+                        if (v != null) {
+                            String s = String.valueOf(v).trim();
+                            if (!s.isEmpty() && !"null".equalsIgnoreCase(s)) return s;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            return "";
+        }
+
+        private static long readBundleLongAny(Object bundleObj, Method getLong, Method getObj, String... keys) {
+            for (int i = 0; i < keys.length; i++) {
+                String k = keys[i];
+                try {
+                    if (getLong != null) {
+                        long v = ((Long) getLong.invoke(bundleObj, k, Long.valueOf(-1L))).longValue();
+                        if (v > 0L) return v;
+                    }
+                } catch (Throwable ignored) {
+                }
+                try {
+                    if (getObj != null) {
+                        Object o = getObj.invoke(bundleObj, k);
+                        if (o instanceof Number) {
+                            long v = ((Number) o).longValue();
+                            if (v > 0L) return v;
+                        } else if (o != null) {
+                            long v = Long.parseLong(String.valueOf(o).trim());
+                            if (v > 0L) return v;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            return -1L;
+        }
+
         public static void onRemoteControlMetadata(Object bundleObj) {
             if (bundleObj == null) return;
             try {
                 Class<?> bc = bundleObj.getClass();
-                Method getStr = bc.getMethod("getString", String.class);
-                Method getLong = bc.getMethod("getLong", String.class, long.class);
+                Method getStr = null;
+                Method getLong = null;
+                Method getObj = null;
+                try { getStr = bc.getMethod("getString", String.class); } catch (Throwable ignored) {}
+                try { getLong = bc.getMethod("getLong", String.class, long.class); } catch (Throwable ignored) {}
+                try { getObj = bc.getMethod("get", String.class); } catch (Throwable ignored) {}
+
+                try {
+                    Object keySetObj = bc.getMethod("keySet").invoke(bundleObj);
+                    if (keySetObj instanceof java.util.Set) {
+                        StringBuilder bsb = new StringBuilder(256);
+                        bsb.append("{");
+                        boolean first = true;
+                        for (Object kObj : (java.util.Set<?>) keySetObj) {
+                            String k = String.valueOf(kObj);
+                            Object val = (getObj != null) ? getObj.invoke(bundleObj, k) : (getStr != null ? getStr.invoke(bundleObj, k) : null);
+                            if (!first) bsb.append(", ");
+                            first = false;
+                            bsb.append(k).append("=").append(val).append("(").append(val != null ? val.getClass().getSimpleName() : "null").append(")");
+                        }
+                        bsb.append("}");
+                        lastRawRcBundleDump = bsb.toString();
+                    } else {
+                        lastRawRcBundleDump = String.valueOf(bundleObj);
+                    }
+                } catch (Throwable tDump) {
+                    lastRawRcBundleDump = String.valueOf(bundleObj);
+                }
+
                 // MediaMetadataRetriever keys used by RemoteControlClient.MetadataEditor:
                 // 7 = METADATA_KEY_TITLE, 2 = METADATA_KEY_ARTIST, 13 = METADATA_KEY_ALBUMARTIST,
                 // 1 = METADATA_KEY_ALBUM, 9 = METADATA_KEY_DURATION
-                String title = (String) getStr.invoke(bundleObj, "7");
-                String artist = (String) getStr.invoke(bundleObj, "2");
-                if (artist == null || artist.trim().isEmpty()) {
-                    artist = (String) getStr.invoke(bundleObj, "13");
-                }
-                String album = (String) getStr.invoke(bundleObj, "1");
-                long durMs = ((Long) getLong.invoke(bundleObj, "9", Long.valueOf(-1L))).longValue();
+                String title = readBundleStringAny(bundleObj, getStr, getObj, "7", "title", "android.media.metadata.TITLE");
+                String artist = readBundleStringAny(bundleObj, getStr, getObj, "2", "13", "artist", "android.media.metadata.ARTIST");
+                String album = readBundleStringAny(bundleObj, getStr, getObj, "1", "album", "android.media.metadata.ALBUM");
+                long durMs = readBundleLongAny(bundleObj, getLong, getObj, "9", "duration", "android.media.metadata.DURATION");
 
                 synchronized (liveSnapshot) {
-                    if (title != null && !title.trim().isEmpty()) {
-                        liveSnapshot.mediaTitle = title.trim();
+                    if (!title.isEmpty()) {
+                        liveSnapshot.mediaTitle = title;
                         liveSnapshot.mediaPlaying = true;
                     }
-                    if (artist != null && !artist.trim().isEmpty()) {
-                        liveSnapshot.mediaArtist = artist.trim();
+                    if (!artist.isEmpty()) {
+                        liveSnapshot.mediaArtist = artist;
                     }
                     if (album != null) {
-                        liveSnapshot.mediaAlbum = album.trim();
+                        liveSnapshot.mediaAlbum = album;
                     }
                     if (durMs > 0L && durMs < 36000000L) {
-                        liveSnapshot.mediaDurationSec = (int) (durMs / 1000L);
+                        liveSnapshot.mediaDurationSec = (int) (durMs > 36000L ? (durMs / 1000L) : durMs);
                     }
                 }
             } catch (Throwable ignored) {
@@ -4147,6 +4249,8 @@ public class TurzxMonitorMain {
             sb.append(formatTelemetryJson(snap)).append("\n");
             sb.append("Total HSCAN Packets Received: ").append(totalHscanFrames).append("\n");
 
+            appendRawBinderAndSystemDiagnostics(sb);
+
             synchronized (DebugManager.class) {
                 sb.append("\n--- [4] Recent Raw HSCAN Frames (last ").append(hscanRing.size()).append(") ---\n");
                 for (int i = 0; i < hscanRing.size(); i++) {
@@ -4169,6 +4273,201 @@ public class TurzxMonitorMain {
                 }
             }
             return sb.toString();
+        }
+
+        private static void appendRawBinderAndSystemDiagnostics(StringBuilder sb) {
+            try {
+                sb.append("\n--- [3A] Raw Binder Services & Vehicle Environment Scan ---\n");
+                sb.append("  hevService          : ").append(TelemetryCollector.hevService != null ? TelemetryCollector.hevService.getClass().getName() : "null")
+                        .append(" (canDbGen=").append(TelemetryCollector.canDbGeneration).append(")\n");
+                sb.append("  navClusterObj       : ").append(TelemetryCollector.navClusterObj != null ? TelemetryCollector.navClusterObj.getClass().getName() : "null").append("\n");
+                sb.append("  tmHscanService      : ").append(TelemetryCollector.tmHscanService != null ? TelemetryCollector.tmHscanService.getClass().getName() : "null").append("\n");
+                sb.append("  datcService         : ").append(TelemetryCollector.datcService != null ? TelemetryCollector.datcService.getClass().getName() : "null")
+                        .append(" (listenerReg=").append(TelemetryCollector.datcListenerRegistered).append(")\n");
+                sb.append("  hscanMicomService   : ").append(TelemetryCollector.hscanMicomService != null ? TelemetryCollector.hscanMicomService.getClass().getName() : "null")
+                        .append(" (listenerReg=").append(TelemetryCollector.hscanListenerRegistered).append(")\n");
+                sb.append("  clusterService      : ").append(TelemetryCollector.clusterService != null ? TelemetryCollector.clusterService.getClass().getName() : "null")
+                        .append(" (lastMode=").append(TelemetryCollector.lastClusterMediaMode).append(")\n");
+                sb.append("  rcDisplayRegistered : ").append(TelemetryCollector.rcDisplayRegistered).append("\n");
+
+                // 3B. Raw IHEVService flag scan (0..200) + getRealSchedInfo + NavigationCluster + tm_hscan_service
+                sb.append("\n--- [3B] Raw HEV / EV / DTE Scan (com.hkmc.micom.hev & tm_hscan_service) ---\n");
+                Object hev = TelemetryCollector.hevService;
+                Method getHev = TelemetryCollector.getHevStatusMethod;
+                if (hev != null && getHev != null) {
+                    StringBuilder hevFlags = new StringBuilder(512);
+                    for (int f = 0; f <= 200; f++) {
+                        try {
+                            int v = ((Integer) getHev.invoke(hev, Integer.valueOf(f))).intValue();
+                            if (v != -1) {
+                                hevFlags.append("  [").append(f).append("]=").append(v);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    sb.append("  getHEVStatus(0..200) non-(-1):").append(hevFlags.length() > 0 ? hevFlags.toString() : " (none)").append("\n");
+                }
+                if (hev != null && TelemetryCollector.getRealSchedInfoMethod != null) {
+                    try {
+                        int[] sched = (int[]) TelemetryCollector.getRealSchedInfoMethod.invoke(hev);
+                        sb.append("  getRealSchedInfo()  : ").append(formatIntArray(sched)).append("\n");
+                    } catch (Throwable ignored) {
+                    }
+                }
+                if (hev != null) {
+                    appendZeroArgMethodDump(sb, "  hevService.0arg     : ", hev);
+                }
+                if (TelemetryCollector.navClusterObj != null) {
+                    appendObjectFieldsDump(sb, "  navCluster fields   : ", TelemetryCollector.navClusterObj);
+                    appendZeroArgMethodDump(sb, "  navCluster.0arg     : ", TelemetryCollector.navClusterObj);
+                }
+                if (TelemetryCollector.tmHscanService != null) {
+                    appendZeroArgMethodDump(sb, "  tmHscanService.0arg : ", TelemetryCollector.tmHscanService);
+                }
+
+                // 3C. Raw IDATCService flag scan (0..80) + DatcStatus reflection dump
+                sb.append("\n--- [3C] Raw DATC Climate Scan (com.hkmc.micom.datc) ---\n");
+                sb.append("  lastRawDatcTempCb   : ").append(TelemetryCollector.lastRawDatcTempCallback).append("\n");
+                if (TelemetryCollector.lastRawDatcStatusObj != null) {
+                    appendObjectFieldsDump(sb, "  DatcStatus fields   : ", TelemetryCollector.lastRawDatcStatusObj);
+                    appendZeroArgMethodDump(sb, "  DatcStatus getters  : ", TelemetryCollector.lastRawDatcStatusObj);
+                } else {
+                    sb.append("  DatcStatus object   : null (no callback received yet)\n");
+                }
+                Object datc = TelemetryCollector.datcService;
+                if (datc != null) {
+                    Method getInfo = TelemetryCollector.datcGetClimateInfoMethod;
+                    Method getVr = TelemetryCollector.datcGetVrStatusMethod;
+                    StringBuilder infoSb = new StringBuilder(512);
+                    StringBuilder vrSb = new StringBuilder(512);
+                    for (int f = 0; f <= 80; f++) {
+                        if (getInfo != null) {
+                            try {
+                                int iv = ((Integer) getInfo.invoke(datc, Integer.valueOf(f))).intValue();
+                                if (iv != -1) infoSb.append(" [").append(f).append("]=").append(iv);
+                            } catch (Throwable ignored) {}
+                        }
+                        if (getVr != null) {
+                            try {
+                                float fv = ((Float) getVr.invoke(datc, Integer.valueOf(f))).floatValue();
+                                if (!Float.isNaN(fv) && fv != -1.0f) {
+                                    vrSb.append(String.format(Locale.US, " [%d]=%.1f", f, fv));
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+                    sb.append("  getClimateInfo(0..80):").append(infoSb.length() > 0 ? infoSb.toString() : " (none)").append("\n");
+                    sb.append("  getVRClimate(0..80)  :").append(vrSb.length() > 0 ? vrSb.toString() : " (none)").append("\n");
+                    appendZeroArgMethodDump(sb, "  datcService.0arg    : ", datc);
+                }
+
+                // 3D. Raw Media / RemoteControlDisplay / ClusterService / dumpsys
+                sb.append("\n--- [3D] Raw Media & Broadcast Scan (AudioService / ClusterService) ---\n");
+                sb.append("  lastRcClient        : ").append(TelemetryCollector.lastRawRcClientInfo).append("\n");
+                sb.append("  lastRcPlaybackState : ").append(TelemetryCollector.lastRawRcStateInfo).append("\n");
+                sb.append("  lastRcBundle        : ").append(TelemetryCollector.lastRawRcBundleDump).append("\n");
+                if (TelemetryCollector.clusterService != null) {
+                    appendZeroArgMethodDump(sb, "  clusterService.0arg : ", TelemetryCollector.clusterService);
+                    appendObjectFieldsDump(sb, "  clusterService flds : ", TelemetryCollector.clusterService);
+                }
+                if (new File("/system/bin/sh").isFile()) {
+                    sb.append("  [dumpsys audio (RemoteControl / Focus)]:\n");
+                    sb.append(runQuickShellCmd("dumpsys audio 2>/dev/null | grep -iE -A 2 -B 1 'RemoteControl|Focus|Client|Package|Media|Player' | head -n 60", "    "));
+                    sb.append("  [Sticky & Recent Media/Vehicle Broadcasts]:\n");
+                    sb.append(runQuickShellCmd("dumpsys activity broadcasts 2>/dev/null | grep -iE -A 4 'hkmc|media|music|avrcp|bt|cluster|datc|hev|title|artist|play' | head -n 90", "    "));
+                    sb.append("  [Binder Services (hkmc / media / audio / cluster)]:\n");
+                    sb.append(runQuickShellCmd("service list 2>/dev/null | grep -iE 'hkmc|micom|datc|hev|hscan|cluster|audio|media|tm_' | head -n 50", "    "));
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        private static String formatIntArray(int[] arr) {
+            if (arr == null) return "null";
+            StringBuilder sb = new StringBuilder(arr.length * 6 + 4);
+            sb.append("[");
+            for (int i = 0; i < arr.length; i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(i).append(":").append(arr[i]);
+            }
+            sb.append("]");
+            return sb.toString();
+        }
+
+        private static void appendObjectFieldsDump(StringBuilder sb, String prefix, Object obj) {
+            if (obj == null) return;
+            try {
+                Field[] fields = obj.getClass().getDeclaredFields();
+                StringBuilder fsb = new StringBuilder(256);
+                for (int i = 0; i < fields.length; i++) {
+                    Field f = fields[i];
+                    f.setAccessible(true);
+                    Object v = f.get(obj);
+                    if (fsb.length() > 0) fsb.append(", ");
+                    fsb.append(f.getName()).append("=");
+                    if (v instanceof int[]) {
+                        fsb.append(formatIntArray((int[]) v));
+                    } else {
+                        fsb.append(v);
+                    }
+                }
+                sb.append(prefix).append(fsb.toString()).append("\n");
+            } catch (Throwable ignored) {
+            }
+        }
+
+        private static void appendZeroArgMethodDump(StringBuilder sb, String prefix, Object obj) {
+            if (obj == null) return;
+            try {
+                Method[] methods = obj.getClass().getDeclaredMethods();
+                StringBuilder msb = new StringBuilder(512);
+                for (int i = 0; i < methods.length; i++) {
+                    Method m = methods[i];
+                    if (m.getParameterTypes().length != 0) continue;
+                    String name = m.getName();
+                    if ("asBinder".equals(name) || "toString".equals(name) || "hashCode".equals(name)
+                            || "getInterfaceDescriptor".equals(name) || name.startsWith("req")
+                            || name.startsWith("set") || name.startsWith("clear") || name.startsWith("reset")
+                            || name.startsWith("send") || name.startsWith("stop") || name.startsWith("start")) {
+                        continue;
+                    }
+                    try {
+                        m.setAccessible(true);
+                        Object v = m.invoke(obj);
+                        if (msb.length() > 0) msb.append(", ");
+                        msb.append(name).append("()=");
+                        if (v instanceof int[]) {
+                            msb.append(formatIntArray((int[]) v));
+                        } else {
+                            msb.append(v);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                sb.append(prefix).append(msb.toString()).append("\n");
+            } catch (Throwable ignored) {
+            }
+        }
+
+        private static String runQuickShellCmd(String shellCmd, String indent) {
+            Process p = null;
+            BufferedReader br = null;
+            StringBuilder out = new StringBuilder(512);
+            try {
+                p = Runtime.getRuntime().exec(new String[]{"/system/bin/sh", "-c", shellCmd});
+                br = new BufferedReader(new InputStreamReader(p.getInputStream(), UTF8), 2048);
+                String line;
+                int count = 0;
+                while ((line = br.readLine()) != null && count < 100) {
+                    out.append(indent).append(line).append("\n");
+                    count++;
+                }
+            } catch (Throwable ignored) {
+            } finally {
+                if (br != null) { try { br.close(); } catch (Throwable ignored) {} }
+                if (p != null) { try { p.destroy(); } catch (Throwable ignored) {} }
+            }
+            return out.length() > 0 ? out.toString() : (indent + "(empty)\n");
         }
 
         public static String dumpDiagnosticsToDisk(
@@ -5276,42 +5575,73 @@ public class TurzxMonitorMain {
         return -99.0;
     }
 
+    private static int readObjIntAny(Object obj, int defVal, String... names) {
+        if (obj == null) return defVal;
+        Class<?> sc = obj.getClass();
+        for (int i = 0; i < names.length; i++) {
+            String n = names[i];
+            try {
+                Object v = sc.getMethod(n).invoke(obj);
+                if (v instanceof Number) return ((Number) v).intValue();
+                if (v instanceof Boolean) return ((Boolean) v).booleanValue() ? 1 : 0;
+            } catch (Throwable ignored) {
+            }
+            try {
+                Field f = sc.getDeclaredField(n);
+                f.setAccessible(true);
+                Object v = f.get(obj);
+                if (v instanceof Number) return ((Number) v).intValue();
+                if (v instanceof Boolean) return ((Boolean) v).booleanValue() ? 1 : 0;
+            } catch (Throwable ignored) {
+            }
+        }
+        return defVal;
+    }
+
+    private static float readObjFloatAny(Object obj, float defVal, String... names) {
+        if (obj == null) return defVal;
+        Class<?> sc = obj.getClass();
+        for (int i = 0; i < names.length; i++) {
+            String n = names[i];
+            try {
+                Object v = sc.getMethod(n).invoke(obj);
+                if (v instanceof Number) return ((Number) v).floatValue();
+            } catch (Throwable ignored) {
+            }
+            try {
+                Field f = sc.getDeclaredField(n);
+                f.setAccessible(true);
+                Object v = f.get(obj);
+                if (v instanceof Number) return ((Number) v).floatValue();
+            } catch (Throwable ignored) {
+            }
+        }
+        return defVal;
+    }
+
     public static boolean applyDatcStatusObject(Object statusObj, TelemetrySnapshot target) {
         if (statusObj == null || target == null) return false;
         try {
-            Class<?> sc = statusObj.getClass();
-            int op = ((Integer) sc.getMethod("getOperationStatus").invoke(statusObj)).intValue();
-            int rawLevel = ((Integer) sc.getMethod("getMainBlowerLevel").invoke(statusObj)).intValue();
-            int autoStep = 0;
-            try { autoStep = ((Integer) sc.getMethod("getAutoStep").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
-            int mode = ((Integer) sc.getMethod("getModeDrive").invoke(statusObj)).intValue();
-            int auto = ((Integer) sc.getMethod("getAuto").invoke(statusObj)).intValue();
-            int ac = ((Integer) sc.getMethod("getAirconOnOff").invoke(statusObj)).intValue();
-            int heat = 0;
-            try { heat = ((Integer) sc.getMethod("getHeatOnOff").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
-            int defog = ((Integer) sc.getMethod("getFrontDefog").invoke(statusObj)).intValue();
-            int intake = ((Integer) sc.getMethod("getIntake").invoke(statusObj)).intValue();
-            int sync = ((Integer) sc.getMethod("getSyncDisp").invoke(statusObj)).intValue();
-            int dual = 0;
-            try { dual = ((Integer) sc.getMethod("getDual").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
-            int drvOnly = 0;
-            try { drvOnly = ((Integer) sc.getMethod("getDriverOnly").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
-            int ads = 0;
-            try { ads = ((Integer) sc.getMethod("getADSOnOffStatus").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
+            int op = readObjIntAny(statusObj, -1, "getOperationStatus", "getOpStatus", "mOperationStatus", "operationStatus");
+            int rawLevel = readObjIntAny(statusObj, -1, "getMainBlowerLevel", "getBlowerLevel", "mMainBlowerLevel", "mainBlowerLevel");
+            int autoStep = readObjIntAny(statusObj, 0, "getAutoStep", "mAutoStep", "autoStep");
+            int mode = readObjIntAny(statusObj, -1, "getModeDrive", "getBlowerMode", "mModeDrive", "modeDrive");
+            int auto = readObjIntAny(statusObj, -1, "getAuto", "getAutoStatus", "mAuto", "auto");
+            int ac = readObjIntAny(statusObj, -1, "getAirconOnOff", "getAcOnOff", "getAC", "mAirconOnOff");
+            int heat = readObjIntAny(statusObj, -1, "getHeatOnOff", "getHeaterOnOff", "mHeatOnOff");
+            int defog = readObjIntAny(statusObj, -1, "getFrontDefog", "mFrontDefog", "frontDefog");
+            int intake = readObjIntAny(statusObj, -1, "getIntake", "getIntakeMode", "mIntake", "intake");
+            int sync = readObjIntAny(statusObj, -1, "getSyncDisp", "getSync", "mSyncDisp", "sync");
+            int dual = readObjIntAny(statusObj, -1, "getDual", "mDual", "dual");
+            int drvOnly = readObjIntAny(statusObj, -1, "getDriverOnly", "mDriverOnly", "driverOnly");
+            int ads = readObjIntAny(statusObj, -1, "getADSOnOffStatus", "getAdsStatus", "mADSOnOffStatus");
 
-            float drC = ((Float) sc.getMethod("getDrTempC").invoke(statusObj)).floatValue();
-            int drStateC = 3;
-            try { drStateC = ((Integer) sc.getMethod("getDrTempStateC").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
-            float psC = ((Float) sc.getMethod("getPsTempC").invoke(statusObj)).floatValue();
-            int psStateC = 3;
-            try { psStateC = ((Integer) sc.getMethod("getPsTempStateC").invoke(statusObj)).intValue(); } catch (Throwable ignored) {}
-            float ambC = Float.NaN;
-            int ambStateC = 0;
-            try {
-                ambC = ((Float) sc.getMethod("getAmbientTempC").invoke(statusObj)).floatValue();
-                ambStateC = ((Integer) sc.getMethod("getAmbientTempStateC").invoke(statusObj)).intValue();
-            } catch (Throwable ignored) {
-            }
+            float drC = readObjFloatAny(statusObj, Float.NaN, "getDrTempC", "getDriverTempC", "mDrTempC", "drTempC");
+            int drStateC = readObjIntAny(statusObj, 3, "getDrTempStateC", "mDrTempStateC");
+            float psC = readObjFloatAny(statusObj, Float.NaN, "getPsTempC", "getPassengerTempC", "mPsTempC", "psTempC");
+            int psStateC = readObjIntAny(statusObj, 3, "getPsTempStateC", "mPsTempStateC");
+            float ambC = readObjFloatAny(statusObj, Float.NaN, "getAmbientTempC", "getOutdoorTempC", "mAmbientTempC");
+            int ambStateC = readObjIntAny(statusObj, 1, "getAmbientTempStateC", "mAmbientTempStateC");
 
             int step = normalizeDatcBlowerStep(rawLevel);
             if (step < 0 && autoStep >= 1 && autoStep <= 3) {
@@ -5323,15 +5653,19 @@ public class TurzxMonitorMain {
             if (mode >= 0 && mode <= 10) {
                 target.hvacBlowerMode = mode;
             }
-            target.hvacOn = (op == 1) || (step > 0);
-            target.hvacAuto = (auto == 1);
-            target.hvacAc = (ac == 1);
-            target.hvacHeat = (heat == 1);
-            target.hvacFrontDefog = (defog == 1);
-            target.hvacRecirc = (intake == 1);
-            target.hvacSync = (sync == 1) || (dual == 1);
-            target.hvacDriverOnly = (drvOnly == 1);
-            target.hvacAds = (ads == 1);
+            if (op == 0 || op == 1 || step >= 0) {
+                target.hvacOn = (op == 1) || (step > 0);
+            }
+            if (auto == 0 || auto == 1) target.hvacAuto = (auto == 1);
+            if (ac == 0 || ac == 1) target.hvacAc = (ac == 1);
+            if (heat == 0 || heat == 1) target.hvacHeat = (heat == 1);
+            if (defog == 0 || defog == 1) target.hvacFrontDefog = (defog == 1);
+            if (intake == 0 || intake == 1) target.hvacRecirc = (intake == 1);
+            if (sync == 0 || sync == 1 || dual == 0 || dual == 1) {
+                target.hvacSync = (sync == 1) || (dual == 1);
+            }
+            if (drvOnly == 0 || drvOnly == 1) target.hvacDriverOnly = (drvOnly == 1);
+            if (ads == 0 || ads == 1) target.hvacAds = (ads == 1);
 
             double drResolved = resolveDatcTempWithState(drC, drStateC);
             if (drResolved > 0.0) {
