@@ -1,30 +1,31 @@
 package com.hkmc.datc;
 
 public class DatcStatus {
-    public int mOperationStatus;
-    public int mMainBlowerLevel;
-    public int mAutoStep;
-    public int mModeDrive;
-    public int mAuto;
-    public int mAirconOnOff;
-    public int mHeatOnOff;
-    public int mFrontDefog;
-    public int mIntake;
-    public int mSyncDisp;
-    public int mDual;
-    public int mDriverOnly;
-    public int mADSDisp;
-    public int mADSOnOffStatus;
-    public int mFrontBlwAutoDisp;
-    public float mDrTempC;
-    public int mDrTempStateC = 3;
-    public float mDrTempF;
-    public float mPsTempC;
-    public int mPsTempStateC = 3;
-    public float mPsTempF;
-    public float mAmbientTempC;
-    public int mAmbientTempStateC;
-    public float mAmbientTempF;
+    public int mOperationStatus = 1;
+    public int mMainBlowerLevel = 1;
+    public int mAutoStep = 0;
+    public int mModeDrive = 1;
+    public int mAuto = 1;
+    public int mAirconOnOff = 1;
+    public int mHeatOnOff = 1;
+    public int mFrontDefog = 1;
+    public int mIntake = 1;
+    public int mSyncDisp = 1;
+    public int mDual = 1;
+    public int mDriverOnly = 1;
+    public int mADSDisp = 1;
+    public int mADSOnOffStatus = 1;
+    public int mFrontBlwAutoDisp = 1;
+    public int mDatcType = 1;
+    public float mDrTempC = 22.0f;
+    public int mDrTempStateC = 4;
+    public float mDrTempF = 72.0f;
+    public float mPsTempC = -18.0f;
+    public int mPsTempStateC = 1;
+    public float mPsTempF = 0.0f;
+    public float mAmbientTempC = 18.0f;
+    public int mAmbientTempStateC = 4;
+    public float mAmbientTempF = 64.0f;
 
     public int getOperationStatus() { return mOperationStatus; }
     public int getMainBlowerLevel() { return mMainBlowerLevel; }
@@ -41,6 +42,7 @@ public class DatcStatus {
     public int getADSDisp() { return mADSDisp; }
     public int getADSOnOffStatus() { return mADSOnOffStatus; }
     public int getFrontBlwAutoDisp() { return mFrontBlwAutoDisp; }
+    public int getDATCType() { return mDatcType; }
     public float getDrTempC() { return mDrTempC; }
     public int getDrTempStateC() { return mDrTempStateC; }
     public float getDrTempF() { return mDrTempF; }

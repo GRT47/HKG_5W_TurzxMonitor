@@ -61,3 +61,5 @@ node_modules/
 *.swp
 *~
 *.patch
+telemetry_app_dump/
+dump_telemetry_apps/

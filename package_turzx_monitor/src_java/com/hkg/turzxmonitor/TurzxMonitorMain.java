@@ -72,7 +72,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.2.2";
+    public static final String MONITOR_VERSION = "1.3.0";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -276,15 +276,18 @@ public class TurzxMonitorMain {
         }
 
         public double getTotalPowerKw() {
-            double subSum = Math.max(0.0, drivePowerKw)
-                    + Math.max(0.0, climatePowerKw)
+            double auxSum = Math.max(0.0, climatePowerKw)
                     + Math.max(0.0, electronicsPowerKw)
                     + Math.max(0.0, batteryCarePowerKw);
+            double subSum = drivePowerKw + auxSum;
             if (charging && hasPackCurrent && packPowerKw < -0.05) {
                 return packPowerKw;
             }
             if (hasPackCurrent && packPowerKw < -0.4) {
                 return packPowerKw;
+            }
+            if (hasSubPower && drivePowerKw < -0.05) {
+                return subSum;
             }
             if (hasSubPower && subSum > 0.005) {
                 if (hasPackCurrent && packPowerKw > subSum + 0.8) {
@@ -303,6 +306,9 @@ public class TurzxMonitorMain {
             double auxKw = Math.max(0.0, climatePowerKw)
                     + Math.max(0.0, electronicsPowerKw)
                     + Math.max(0.0, batteryCarePowerKw);
+            if (drivePowerKw < -0.05) {
+                return drivePowerKw;
+            }
             if (hasPackCurrent && packPowerKw < -0.5) {
                 return packPowerKw;
             }
@@ -2380,6 +2386,13 @@ public class TurzxMonitorMain {
         }
     }
 
+    public static final class MediaBroadcastReceiverBridge extends android.content.BroadcastReceiver {
+        @Override
+        public void onReceive(android.content.Context context, android.content.Intent intent) {
+            TelemetryCollector.onMediaWidgetBroadcast(intent);
+        }
+    }
+
     public static final class TelemetryCollector {
         private static final TelemetrySnapshot liveSnapshot = new TelemetrySnapshot();
 
@@ -2389,7 +2402,10 @@ public class TurzxMonitorMain {
         private static volatile Method reqFreqChangedSigMethod = null;
         private static volatile Method getCanDbGenMethod = null;
         private static volatile Method getRealSchedInfoMethod = null;
+        private static volatile Method getEconChargeTimeMethod = null;
+        private static volatile Method getCo2RdcMethod = null;
         private static volatile int canDbGeneration = -1;
+        private static volatile long lastEvHistoryDbPollMs = 0L;
 
         private static volatile Object navClusterObj = null;
         private static volatile Method navClusterReqBattMethod = null;
@@ -2414,6 +2430,10 @@ public class TurzxMonitorMain {
         private static volatile String lastRawRcClientInfo = "none";
         private static volatile String lastRawRcStateInfo = "none";
         private static volatile String lastRawRcBundleDump = "none";
+        private static volatile boolean mediaBroadcastRegistered = false;
+        private static volatile Object mediaReceiverObj = null;
+        private static volatile long lastMediaWidgetReqMs = 0L;
+        private static volatile String lastRawMediaBroadcastDump = "none";
         private static volatile Object clusterService = null;
         private static volatile Method clusterGetLastPlaytimeMethod = null;
         private static volatile int lastClusterMediaMode = -1;
@@ -2438,6 +2458,37 @@ public class TurzxMonitorMain {
         private static volatile boolean backgroundStarted = false;
         private static volatile long lastCarrotRxMs = 0L;
         private static int pollTick = 0;
+
+        private static final String[] MEDIA_WIDGET_ACTIONS = new String[]{
+                "com.hkmc.audio.btaudio.widgetupdate",
+                "com.hkmc.dipoaudio.widgetupdate",
+                "com.hkmc.gpmaudio.widgetupdate",
+                "com.hkmc.audio.usb.widgetupdate",
+                "com.hkmc.audio.mymusic.widgetupdate",
+                "com.hkmc.radio.widgetupdate",
+                "com.hkmc.radio.dab.widgetupdate",
+                "com.hkmc.video.dmb.widgetupdate",
+                "com.hkmc.video.usb.widgetupdate",
+                "com.hkmc.nature_sound.widgetupdate",
+                "com.hkmc.genie_music.widgetupdate",
+                "com.hkmc.melon_music.widgetupdate",
+                "com.hkmc.audio.timeupdate",
+                "com.hkmc.audiocd.timeupdate",
+                "com.hkmc.pandora.widgetupdate",
+                "com.hkmc.pandora.timeupdate",
+                "com.hkmc.qqmusic.widgetupdate",
+                "com.hkmc.kaolafm.widgetupdate",
+                "com.hkmc.audio.ipod.widgetupdate",
+                "com.hkmc.audio.mp3cd.widgetupdate",
+                "com.hkmc.audio.audiocd.widgetupdate",
+                "com.hkmc.audio.carlife.widgetupdate",
+                "com.hkmc.audio.mirrorlink.widgetupdate",
+                "com.hkmc.audio.mconnect.widgetupdate",
+                "com.hkmc.default.widgetupdate",
+                "appwidgetupdate",
+                "com.android.music.metachanged",
+                "com.android.music.playstatechanged"
+        };
 
         public static void markNativeBinderHscanRx() {
             lastNativeBinderHscanRxMs = System.currentTimeMillis();
@@ -2476,13 +2527,169 @@ public class TurzxMonitorMain {
                 double psResolved = resolveDatcTempWithState(psC, psStateC);
                 if (psResolved > 0.0) {
                     liveSnapshot.hvacPsTempC = psResolved;
-                } else if (liveSnapshot.hvacSync && liveSnapshot.hvacDrTempC > 0.0) {
+                } else if (liveSnapshot.hvacDrTempC > 0.0) {
+                    // Single-Zone FATC (psStateC == 1 STATE_NOT_DISPLAY) or Sync active
                     liveSnapshot.hvacPsTempC = liveSnapshot.hvacDrTempC;
                 }
-                if (ambStateC != 0 && !Float.isNaN(ambC) && ambC >= -45.0f && ambC <= 65.0f && Math.abs(ambC - 85.0f) > 0.5f) {
+                if (ambStateC != 1 && ambStateC != 255 && !Float.isNaN(ambC)
+                        && ambC >= -45.0f && ambC <= 65.0f && Math.abs(ambC - 85.0f) > 0.5f) {
                     liveSnapshot.outdoorTempC = Math.round(ambC * 2.0) / 2.0;
                 }
                 lastDatcCallbackMs = System.currentTimeMillis();
+            }
+        }
+
+        public static void onMediaWidgetBroadcast(Object intentObj) {
+            if (intentObj == null) return;
+            try {
+                Class<?> ic = intentObj.getClass();
+                String action = "";
+                try {
+                    Object a = ic.getMethod("getAction").invoke(intentObj);
+                    if (a != null) action = String.valueOf(a);
+                } catch (Throwable ignored) {
+                }
+                Object extrasObj = null;
+                try {
+                    extrasObj = ic.getMethod("getExtras").invoke(intentObj);
+                } catch (Throwable ignored) {
+                }
+                synchronized (liveSnapshot) {
+                    applyMediaWidgetBroadcastToSnapshot(action, extrasObj, liveSnapshot);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        public static boolean applyMediaWidgetBroadcastToSnapshot(String action, Object bundleObj, TelemetrySnapshot target) {
+            if (target == null) return false;
+            try {
+                String src = mapWidgetBroadcastActionToSource(action);
+                if (!src.isEmpty()) {
+                    target.mediaSource = src;
+                }
+                if (bundleObj == null) return !src.isEmpty();
+
+                Class<?> bc = bundleObj.getClass();
+                Method getStr = null;
+                Method getLong = null;
+                Method getInt = null;
+                Method getBool = null;
+                Method getByteArr = null;
+                Method getObj = null;
+                try { getStr = bc.getMethod("getString", String.class); } catch (Throwable ignored) {}
+                try { getLong = bc.getMethod("getLong", String.class, long.class); } catch (Throwable ignored) {}
+                try { getInt = bc.getMethod("getInt", String.class, int.class); } catch (Throwable ignored) {}
+                try { getBool = bc.getMethod("getBoolean", String.class, boolean.class); } catch (Throwable ignored) {}
+                try { getByteArr = bc.getMethod("getByteArray", String.class); } catch (Throwable ignored) {}
+                try { getObj = bc.getMethod("get", String.class); } catch (Throwable ignored) {}
+
+                try {
+                    Object keySetObj = bc.getMethod("keySet").invoke(bundleObj);
+                    if (keySetObj instanceof java.util.Set) {
+                        StringBuilder bsb = new StringBuilder(256);
+                        bsb.append(action).append(" {");
+                        boolean first = true;
+                        for (Object kObj : (java.util.Set<?>) keySetObj) {
+                            String k = String.valueOf(kObj);
+                            if (!first) bsb.append(", ");
+                            first = false;
+                            if ("artwork_raw_image".equals(k)) {
+                                bsb.append(k).append("=[byte[]]");
+                            } else {
+                                Object val = (getObj != null) ? getObj.invoke(bundleObj, k) : (getStr != null ? getStr.invoke(bundleObj, k) : null);
+                                bsb.append(k).append("=").append(val);
+                            }
+                        }
+                        bsb.append("}");
+                        lastRawMediaBroadcastDump = bsb.toString();
+                    }
+                } catch (Throwable ignored) {
+                }
+
+                boolean isTimeOnly = action != null && action.endsWith(".timeupdate");
+                if (!isTimeOnly) {
+                    String title = readBundleStringAny(bundleObj, getStr, getObj,
+                            "filename", "title", "track", "channel_name", "station_name",
+                            "service_name", "content_name", "program_name", "frequency", "freq");
+                    String artist = readBundleStringAny(bundleObj, getStr, getObj,
+                            "artist_name", "artist", "bluetooth_device_name", "pty_name", "band", "folder_name");
+                    String album = readBundleStringAny(bundleObj, getStr, getObj,
+                            "album_name", "album", "bluetooth_device_name");
+
+                    if (!title.isEmpty()) {
+                        target.mediaTitle = title;
+                        target.mediaPlaying = true;
+                    }
+                    if (!artist.isEmpty()) {
+                        target.mediaArtist = artist;
+                    }
+                    if (!album.isEmpty()) {
+                        target.mediaAlbum = album;
+                    }
+
+                    if (getInt != null) {
+                        try {
+                            int ps = ((Integer) getInt.invoke(bundleObj, "playstate", Integer.valueOf(-1))).intValue();
+                            if (ps == -1) {
+                                ps = ((Integer) getInt.invoke(bundleObj, "play_state", Integer.valueOf(-1))).intValue();
+                            }
+                            if (ps >= 0) {
+                                // Genuine BTAudio / AvWidgetMainView: 1 = playing, 0/2 = paused/stopped
+                                target.mediaPlaying = (ps == 1 || ps == 3);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    if (getBool != null && getObj != null) {
+                        try {
+                            if (getObj.invoke(bundleObj, "playing") instanceof Boolean) {
+                                target.mediaPlaying = ((Boolean) getBool.invoke(bundleObj, "playing", Boolean.FALSE)).booleanValue();
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+
+                    if (getByteArr != null) {
+                        try {
+                            byte[] rawArt = (byte[]) getByteArr.invoke(bundleObj, "artwork_raw_image");
+                            if (rawArt != null && rawArt.length > 64) {
+                                Class<?> bfCls = Class.forName("android.graphics.BitmapFactory");
+                                Object bmp = bfCls.getMethod("decodeByteArray", byte[].class, int.class, int.class)
+                                        .invoke(null, rawArt, Integer.valueOf(0), Integer.valueOf(rawArt.length));
+                                if (bmp != null) {
+                                    target.albumArtBitmap = bmp;
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+
+                long totMs = readBundleLongAny(bundleObj, getLong, getObj, "audio_total_time", "duration", "total_time");
+                if (totMs > 0L && totMs < 36000000L) {
+                    target.mediaDurationSec = (int) (totMs > 36000L ? (totMs / 1000L) : totMs);
+                }
+
+                long curMs = readBundleLongAny(bundleObj, getLong, getObj, "audio_current_time", "position", "current_time", "play_time");
+                if (curMs >= 0L && curMs < 36000000L) {
+                    target.mediaPositionSec = (int) (curMs > 36000L || totMs > 36000L ? (curMs / 1000L) : curMs);
+                    lastMediaPosUpdateMs = System.currentTimeMillis();
+                }
+                return true;
+            } catch (Throwable ignored) {
+                return false;
+            }
+        }
+
+        private static void requestMediaWidgetUpdate(Object sysContext) {
+            if (sysContext == null) return;
+            try {
+                Class<?> intentCls = Class.forName("android.content.Intent");
+                Object reqIntent = intentCls.getConstructor(String.class).newInstance("com.hkmc.request.widgetupdate");
+                sysContext.getClass().getMethod("sendBroadcast", intentCls).invoke(sysContext, reqIntent);
+                lastMediaWidgetReqMs = System.currentTimeMillis();
+            } catch (Throwable ignored) {
             }
         }
 
@@ -2685,6 +2892,11 @@ public class TurzxMonitorMain {
                 pollGearLocked();
                 pollMediaNowPlayingLocked();
 
+                if (sysContext != null && "미디어 재생 대기 중".equals(liveSnapshot.mediaTitle)
+                        && (System.currentTimeMillis() - lastMediaWidgetReqMs > 15000L)) {
+                    requestMediaWidgetUpdate(sysContext);
+                }
+
                 if (liveSnapshot.carrotConnected && (System.currentTimeMillis() - lastCarrotRxMs > 8000L)) {
                     liveSnapshot.carrotConnected = false;
                 }
@@ -2729,6 +2941,14 @@ public class TurzxMonitorMain {
                                     getRealSchedInfoMethod = sc.getMethod("getRealSchedInfo");
                                 } catch (Throwable ignored) {
                                 }
+                                try {
+                                    getEconChargeTimeMethod = sc.getMethod("getLastEconomicChargeTime");
+                                } catch (Throwable ignored) {
+                                }
+                                try {
+                                    getCo2RdcMethod = sc.getMethod("getCO2Rdc");
+                                } catch (Throwable ignored) {
+                                }
                             }
                         }
                     } catch (Throwable ignored) {
@@ -2751,6 +2971,26 @@ public class TurzxMonitorMain {
                         } catch (Throwable ignored) {
                         }
                     } catch (Throwable ignored) {
+                    }
+                }
+
+                if (!mediaBroadcastRegistered && sysContext != null) {
+                    try {
+                        Class<?> filterCls = Class.forName("android.content.IntentFilter");
+                        Object filter = filterCls.getConstructor().newInstance();
+                        Method addAct = filterCls.getMethod("addAction", String.class);
+                        for (int i = 0; i < MEDIA_WIDGET_ACTIONS.length; i++) {
+                            addAct.invoke(filter, MEDIA_WIDGET_ACTIONS[i]);
+                        }
+                        Class<?> brCls = Class.forName("android.content.BroadcastReceiver");
+                        Object receiver = new MediaBroadcastReceiverBridge();
+                        mediaReceiverObj = receiver;
+                        sysContext.getClass().getMethod("registerReceiver", brCls, filterCls).invoke(sysContext, receiver, filter);
+                        mediaBroadcastRegistered = true;
+                        DebugManager.logEvent("MEDIA", "Registered MediaBroadcastReceiverBridge (" + MEDIA_WIDGET_ACTIONS.length + " actions) & sent com.hkmc.request.widgetupdate");
+                        requestMediaWidgetUpdate(sysContext);
+                    } catch (Throwable t) {
+                        DebugManager.logError("MEDIA", "registerReceiver", t);
                     }
                 }
 
@@ -2978,19 +3218,18 @@ public class TurzxMonitorMain {
                     liveSnapshot.bmsSocPct = rawBmsSoc * 0.5;
                 }
 
-                int dte = queryHevFlag(HEV_FLAG_ELECTRIC_DTE);
-                if (!isValidDteValue(dte)) dte = queryHevFlag(HEV_FLAG_TOTAL_DTE);
-                if (!isValidDteValue(dte) && getRealSchedInfoMethod != null) {
-                    try {
-                        int[] sched = (int[]) getRealSchedInfoMethod.invoke(hevService);
-                        int schedDte = extractDteFromRealSchedInfo(sched);
-                        if (isValidDteValue(schedDte)) {
-                            dte = schedDte;
-                        }
-                    } catch (Throwable ignored) {
-                    }
+                // Genuine HKMC_TAppEV3 (f.g): Current DTE is packed in bits 8..23 of HEV_FLAG_ADDED_DIST_DATC_OFF (38),
+                // and climate-off delta DTE is packed in bits 0..7!
+                int raw38 = queryHevFlag(HEV_FLAG_ADDED_DIST_DATC_OFF);
+                int dte = extractCurrentDteFromFlag38(raw38);
+                if (raw38 != -1) {
+                    liveSnapshot.dteAirconOffDeltaKm = parseAddedDistDatcOff(raw38);
                 }
-                if (isValidDteValue(dte)) liveSnapshot.dteKm = dte;
+                if (!isValidDteValue(dte)) dte = queryHevFlag(HEV_FLAG_ELECTRIC_DTE);
+                if (!isValidDteValue(dte)) dte = queryHevFlag(HEV_FLAG_TOTAL_DTE);
+                if (isValidDteValue(dte)) {
+                    liveSnapshot.dteKm = dte;
+                }
 
                 // Fallback / supplement from NavigationCluster (mBatteryInfoResp[3] = DTE, [0] = SoC, [2] = BattMinTemp, [8] = EnergyWh)
                 if (navClusterObj != null) {
@@ -3021,18 +3260,20 @@ public class TurzxMonitorMain {
                     }
                 }
 
-                int dteDeltaRaw = queryHevFlag(HEV_FLAG_ADDED_DIST_DATC_OFF);
-                if (dteDeltaRaw != -1) {
-                    liveSnapshot.dteAirconOffDeltaKm = parseAddedDistDatcOff(dteDeltaRaw);
-                }
-
-                int fci = queryHevFlag(HEV_FLAG_AVG_FCI);
-                if (fci <= 0 || fci >= 250) fci = queryHevFlag(HEV_FLAG_TERM_AVG_FCI);
-                if (fci <= 0 || fci >= 250) fci = queryHevFlag(HEV_FLAG_AVG_FCL_DRIVE_INFO);
-                if (fci > 5 && fci < 250) {
+                int fci = queryHevFlag(HEV_FLAG_AVG_FCL_DRIVE_INFO);
+                if (fci <= 5 || fci >= 999) fci = queryHevFlag(HEV_FLAG_AVG_FCI);
+                if (fci <= 5 || fci >= 999) fci = queryHevFlag(HEV_FLAG_TERM_AVG_FCI);
+                if (fci > 5 && fci < 999) {
                     liveSnapshot.avgEconomyKmKwh = fci / 10.0;
+                } else if (liveSnapshot.avgEconomyKmKwh <= 0.0 && (System.currentTimeMillis() - lastEvHistoryDbPollMs > 15000L)) {
+                    lastEvHistoryDbPollMs = System.currentTimeMillis();
+                    double histEcon = queryEvHistoryDbAvgEconomy();
+                    if (histEcon > 0.5 && histEcon < 99.9) {
+                        liveSnapshot.avgEconomyKmKwh = histEcon;
+                    }
                 }
 
+                // Genuine HKMC_TAppEV3 (f.cu): Electronics, Motor (signed 10-bit), Climate, and Battery Care power
                 int pwrOther = queryHevFlag(HEV_FLAG_PWR_OTHER_ECU);
                 double ldcKw = parsePower10WToKw(pwrOther, 253);
                 if (ldcKw >= 0.0) {
@@ -3040,10 +3281,17 @@ public class TurzxMonitorMain {
                     liveSnapshot.hasSubPower = true;
                 }
 
-                int pwrMot = queryHevFlag(HEV_FLAG_MOTER_PWR_AVN);
-                if (pwrMot >= 0 && pwrMot < 250) {
-                    liveSnapshot.drivePowerKw = pwrMot;
+                if (canDbGeneration == 3) {
+                    int mg1 = parseSigned10BitKw(queryHevFlag(HEV_FLAG_MCU_MG1PWRAVNKWVAL));
+                    int mg2 = parseSigned10BitKw(queryHevFlag(HEV_FLAG_MCU_MG2PWRAVNKWVAL));
+                    liveSnapshot.drivePowerKw = mg1 + mg2;
                     liveSnapshot.hasSubPower = true;
+                } else {
+                    int pwrMotRaw = queryHevFlag(HEV_FLAG_MOTER_PWR_AVN);
+                    if (pwrMotRaw >= 0 && pwrMotRaw <= 1021) {
+                        liveSnapshot.drivePowerKw = parseSigned10BitKw(pwrMotRaw);
+                        liveSnapshot.hasSubPower = true;
+                    }
                 }
 
                 int clmtW = queryHevFlag(HEV_FLAG_DATC_CLMTPWRCNSMPTN_W);
@@ -3054,6 +3302,15 @@ public class TurzxMonitorMain {
                 } else {
                     double compKw = parsePower10WToKw(queryHevFlag(HEV_FLAG_PWR_E_COMPRESSOR), 1021);
                     double ptcKw = parsePower10WToKw(queryHevFlag(HEV_FLAG_DATC_PTCPWRCNSMPTNVAL), 1021);
+                    if (ptcKw < 0.0 && getEconChargeTimeMethod != null) {
+                        try {
+                            int[] econ = (int[]) getEconChargeTimeMethod.invoke(hevService);
+                            if (econ != null && econ.length > 10) {
+                                ptcKw = parsePower10WToKw(econ[10], 1021);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
                     if (compKw >= 0.0 || ptcKw >= 0.0) {
                         liveSnapshot.climatePowerKw = Math.max(0.0, compKw) + Math.max(0.0, ptcKw);
                         liveSnapshot.hasSubPower = true;
@@ -3064,6 +3321,15 @@ public class TurzxMonitorMain {
                 }
 
                 double batHeatKw = parsePower10WToKw(queryHevFlag(HEV_FLAG_XEV_BATHEATPWRMONCON_W), 253);
+                if (batHeatKw < 0.0 && getCo2RdcMethod != null) {
+                    try {
+                        int[] co2 = (int[]) getCo2RdcMethod.invoke(hevService);
+                        if (co2 != null && co2.length > 2) {
+                            batHeatKw = parsePower10WToKw(co2[2], 253);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
                 double batCoolKw = parsePower10WToKw(queryHevFlag(HEV_FLAG_DATC_BATTERYCOMPPWRCON_W), 1021);
                 if (batHeatKw >= 0.0 || batCoolKw >= 0.0) {
                     liveSnapshot.batteryCarePowerKw = Math.max(0.0, batHeatKw) + Math.max(0.0, batCoolKw);
@@ -3076,6 +3342,43 @@ public class TurzxMonitorMain {
                 liveSnapshot.batteryConditioning = (queryHevFlag(HEV_FLAG_EV_BATTERYCONDITIONING) == 1);
             } catch (Throwable ignored) {
             }
+        }
+
+        private static double queryEvHistoryDbAvgEconomy() {
+            Object db = null;
+            Object cursor = null;
+            try {
+                File dbFile = new File("/securedata/com.hkmc.daudio.app.ev3/History.db");
+                if (!dbFile.isFile()) return -1.0;
+                Class<?> sqlCls = Class.forName("android.database.sqlite.SQLiteDatabase");
+                Class<?> cfCls = Class.forName("android.database.sqlite.SQLiteDatabase$CursorFactory");
+                Method openDb = sqlCls.getMethod("openDatabase", String.class, cfCls, int.class);
+                db = openDb.invoke(null, dbFile.getAbsolutePath(), null, Integer.valueOf(1)); // OPEN_READONLY = 1
+                if (db == null) return -1.0;
+                Method rawQuery = sqlCls.getMethod("rawQuery", String.class, String[].class);
+                cursor = rawQuery.invoke(db,
+                        "SELECT average_energy_consumption FROM history WHERE average_energy_consumption > 5 AND average_energy_consumption < 999 ORDER BY _id DESC LIMIT 1",
+                        null);
+                if (cursor != null) {
+                    Class<?> curCls = cursor.getClass();
+                    boolean hasRow = ((Boolean) curCls.getMethod("moveToFirst").invoke(cursor)).booleanValue();
+                    if (hasRow) {
+                        int val = ((Integer) curCls.getMethod("getInt", int.class).invoke(cursor, Integer.valueOf(0))).intValue();
+                        if (val > 5 && val < 999) {
+                            return val / 10.0;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            } finally {
+                if (cursor != null) {
+                    try { cursor.getClass().getMethod("close").invoke(cursor); } catch (Throwable ignored) {}
+                }
+                if (db != null) {
+                    try { db.getClass().getMethod("close").invoke(db); } catch (Throwable ignored) {}
+                }
+            }
+            return -1.0;
         }
 
         private static void pollTmHscanServiceLocked() {
@@ -3091,8 +3394,10 @@ public class TurzxMonitorMain {
                     int soh = ((Integer) sc.getMethod("getXEV_Bms_GDS_SOH").invoke(svc)).intValue();
                     if (soh > 0 && soh <= 110) liveSnapshot.sohPct = soh;
                 }
-                int dte = ((Integer) sc.getMethod("realTimeAbleDriveDistance").invoke(svc)).intValue();
-                if (isValidDteValue(dte)) liveSnapshot.dteKm = dte;
+                if (!isValidDteValue(liveSnapshot.dteKm)) {
+                    int dte = ((Integer) sc.getMethod("realTimeAbleDriveDistance").invoke(svc)).intValue();
+                    if (isValidDteValue(dte)) liveSnapshot.dteKm = dte;
+                }
 
                 int acRaw = ((Integer) sc.getMethod("airConEleConsum").invoke(svc)).intValue();
                 int htrRaw = ((Integer) sc.getMethod("heaterEleConsum").invoke(svc)).intValue();
@@ -3112,86 +3417,12 @@ public class TurzxMonitorMain {
             }
         }
 
-        private static float queryDatcVrOrInfo(Object svc, Method getVr, Method getInfo, int flag) {
-            if (getVr != null) {
-                try {
-                    float v = ((Float) getVr.invoke(svc, Integer.valueOf(flag))).floatValue();
-                    if (!Float.isNaN(v) && v != -1.0f) return v;
-                } catch (Throwable ignored) {
-                }
-            }
-            if (getInfo != null) {
-                try {
-                    int iv = ((Integer) getInfo.invoke(svc, Integer.valueOf(flag))).intValue();
-                    if (iv != -1) return (float) iv;
-                } catch (Throwable ignored) {
-                }
-            }
-            return -1.0f;
-        }
-
         private static void pollDatcServiceLocked() {
             Object svc = datcService;
-            Method getInfo = datcGetClimateInfoMethod;
-            Method getVr = datcGetVrStatusMethod;
             boolean callbackFresh = (System.currentTimeMillis() - lastDatcCallbackMs) < 4000L;
 
-            if (svc != null && !callbackFresh && (getVr != null || getInfo != null)) {
-                try {
-                    int opState = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_OP_STATE));
-                    int blowerRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_BLOWER_LEVEL));
-                    int modeRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_BLOWER_MODE));
-                    int autoRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_AUTO));
-                    int acRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_AC));
-                    int defogRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_FRONT_DEFOG));
-                    int intakeRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_INTAKE));
-                    int syncRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_SYNC));
-                    int adsRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_ADS_ON_OFF));
-                    int drvOnlyRaw = Math.round(queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_DRIVER_ONLY));
-
-                    // In DATCService.getVRClimateStatus, flag 2 (DATCFlag.TEMP) is Driver Temp and flag 29 (DATCFlag.TEMP_PS_C) is Passenger Temp
-                    float vrDr = queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_TEMP_DR_C);
-                    if (vrDr <= 0.0f) {
-                        vrDr = queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_TEMP_DR_C_LEGACY);
-                    }
-                    float vrPs = queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_TEMP_PS_C);
-                    float vrOut = queryDatcVrOrInfo(svc, getVr, getInfo, DATC_FLAG_TEMP_OUTSIDE_C);
-
-                    int step = normalizeDatcBlowerStep(blowerRaw);
-                    if (step >= 0) {
-                        liveSnapshot.hvacBlowerStep = step;
-                        liveSnapshot.hasClimateData = true;
-                    }
-                    if (modeRaw >= 0 && modeRaw <= 10) {
-                        liveSnapshot.hvacBlowerMode = modeRaw;
-                        liveSnapshot.hasClimateData = true;
-                    }
-                    if (opState == 0 || opState == 1) {
-                        liveSnapshot.hvacOn = (opState == 1) || (step > 0);
-                    }
-                    if (autoRaw == 0 || autoRaw == 1) liveSnapshot.hvacAuto = (autoRaw == 1);
-                    if (acRaw == 0 || acRaw == 1) liveSnapshot.hvacAc = (acRaw == 1);
-                    if (defogRaw == 0 || defogRaw == 1) liveSnapshot.hvacFrontDefog = (defogRaw == 1);
-                    if (intakeRaw == 0 || intakeRaw == 1) liveSnapshot.hvacRecirc = (intakeRaw == 1);
-                    if (syncRaw == 0 || syncRaw == 1) liveSnapshot.hvacSync = (syncRaw == 1);
-                    if (adsRaw == 0 || adsRaw == 1) liveSnapshot.hvacAds = (adsRaw == 1);
-                    if (drvOnlyRaw == 0 || drvOnlyRaw == 1) liveSnapshot.hvacDriverOnly = (drvOnlyRaw == 1);
-
-                    double drC = convertDatcRawTempToCelsius(Math.round(vrDr), vrDr);
-                    if (drC > 0.0) {
-                        liveSnapshot.hvacDrTempC = drC;
-                        liveSnapshot.hasClimateData = true;
-                    }
-                    double psC = convertDatcRawTempToCelsius(Math.round(vrPs), vrPs);
-                    if (psC > 0.0) {
-                        liveSnapshot.hvacPsTempC = psC;
-                    } else if (liveSnapshot.hvacSync && liveSnapshot.hvacDrTempC > 0.0) {
-                        liveSnapshot.hvacPsTempC = liveSnapshot.hvacDrTempC;
-                    }
-                    if (!Float.isNaN(vrOut) && vrOut >= -45.0f && vrOut <= 65.0f && Math.abs(vrOut - 85.0f) > 0.5f && vrOut != -1.0f) {
-                        liveSnapshot.outdoorTempC = Math.round(vrOut * 2.0) / 2.0;
-                    }
-                } catch (Throwable t) {
+            if (svc != null && !callbackFresh) {
+                if (!applyDatcStatusObject(svc, liveSnapshot)) {
                     datcService = null;
                     datcListenerRegistered = false;
                 }
@@ -4362,7 +4593,9 @@ public class TurzxMonitorMain {
                 }
 
                 // 3D. Raw Media / RemoteControlDisplay / ClusterService / dumpsys
-                sb.append("\n--- [3D] Raw Media & Broadcast Scan (AudioService / ClusterService) ---\n");
+                sb.append("\n--- [3D] Raw Media & Broadcast Scan (AudioService / ClusterService / AvWidgetMainView) ---\n");
+                sb.append("  mediaBroadcastReg   : ").append(TelemetryCollector.mediaBroadcastRegistered).append("\n");
+                sb.append("  lastMediaWidgetDump : ").append(TelemetryCollector.lastRawMediaBroadcastDump).append("\n");
                 sb.append("  lastRcClient        : ").append(TelemetryCollector.lastRawRcClientInfo).append("\n");
                 sb.append("  lastRcPlaybackState : ").append(TelemetryCollector.lastRawRcStateInfo).append("\n");
                 sb.append("  lastRcBundle        : ").append(TelemetryCollector.lastRawRcBundleDump).append("\n");
@@ -5565,10 +5798,22 @@ public class TurzxMonitorMain {
         return -1;
     }
 
+    public static int extractCurrentDteFromFlag38(int raw) {
+        if (raw <= 0 || raw == 65534 || raw == 65535) return -1;
+        int dte = (raw >>> 8) & 0xFFFF;
+        return isValidDteValue(dte) ? dte : -1;
+    }
+
+    public static int parseSigned10BitKw(int raw) {
+        if (raw < 0 || raw > 1021 || raw == 510 || raw == 511) return 0;
+        return ((raw & 0x200) != 0) ? (raw - 1024) : raw;
+    }
+
     public static double resolveDatcTempWithState(float tempC, int stateC) {
-        // DatcStatus temperature state: 1 = TEMP_LOW ("LO"), 2 = TEMP_HIGH ("HI"), 3 = TEMP_NORMAL
-        if (stateC == 1) return 14.0;
-        if (stateC == 2) return 32.0;
+        // Genuine com.hkmc.datc.DATCConstants:
+        // STATE_NOT_DISPLAY = 1, STATE_LOW = 2 ("LO"), STATE_HIGH = 3 ("HI"), STATE_NORMAL = 4, STATE_NONE = 255
+        if (stateC == 2) return 14.0;
+        if (stateC == 3) return 32.0;
         if (!Float.isNaN(tempC) && tempC >= 13.5f && tempC <= 32.5f) {
             return Math.round(tempC * 2.0) / 2.0;
         }
@@ -5583,7 +5828,7 @@ public class TurzxMonitorMain {
             try {
                 Object v = sc.getMethod(n).invoke(obj);
                 if (v instanceof Number) return ((Number) v).intValue();
-                if (v instanceof Boolean) return ((Boolean) v).booleanValue() ? 1 : 0;
+                if (v instanceof Boolean) return ((Boolean) v).booleanValue() ? 2 : 1;
             } catch (Throwable ignored) {
             }
             try {
@@ -5591,7 +5836,7 @@ public class TurzxMonitorMain {
                 f.setAccessible(true);
                 Object v = f.get(obj);
                 if (v instanceof Number) return ((Number) v).intValue();
-                if (v instanceof Boolean) return ((Boolean) v).booleanValue() ? 1 : 0;
+                if (v instanceof Boolean) return ((Boolean) v).booleanValue() ? 2 : 1;
             } catch (Throwable ignored) {
             }
         }
@@ -5622,62 +5867,107 @@ public class TurzxMonitorMain {
     public static boolean applyDatcStatusObject(Object statusObj, TelemetrySnapshot target) {
         if (statusObj == null || target == null) return false;
         try {
-            int op = readObjIntAny(statusObj, -1, "getOperationStatus", "getOpStatus", "mOperationStatus", "operationStatus");
-            int rawLevel = readObjIntAny(statusObj, -1, "getMainBlowerLevel", "getBlowerLevel", "mMainBlowerLevel", "mainBlowerLevel");
-            int autoStep = readObjIntAny(statusObj, 0, "getAutoStep", "mAutoStep", "autoStep");
-            int mode = readObjIntAny(statusObj, -1, "getModeDrive", "getBlowerMode", "mModeDrive", "modeDrive");
-            int auto = readObjIntAny(statusObj, -1, "getAuto", "getAutoStatus", "mAuto", "auto");
-            int ac = readObjIntAny(statusObj, -1, "getAirconOnOff", "getAcOnOff", "getAC", "mAirconOnOff");
-            int heat = readObjIntAny(statusObj, -1, "getHeatOnOff", "getHeaterOnOff", "mHeatOnOff");
-            int defog = readObjIntAny(statusObj, -1, "getFrontDefog", "mFrontDefog", "frontDefog");
-            int intake = readObjIntAny(statusObj, -1, "getIntake", "getIntakeMode", "mIntake", "intake");
-            int sync = readObjIntAny(statusObj, -1, "getSyncDisp", "getSync", "mSyncDisp", "sync");
-            int dual = readObjIntAny(statusObj, -1, "getDual", "mDual", "dual");
-            int drvOnly = readObjIntAny(statusObj, -1, "getDriverOnly", "mDriverOnly", "driverOnly");
-            int ads = readObjIntAny(statusObj, -1, "getADSOnOffStatus", "getAdsStatus", "mADSOnOffStatus");
+            // Supports both DatcStatus parcelable and IDATCService Binder proxy getters
+            int op = readObjIntAny(statusObj, -1,
+                    "getOperationStatus", "getOpStatus", "mOperationStatus", "operationStatus");
+            int rawLevel = readObjIntAny(statusObj, -1,
+                    "getBlowerLevel", "getMainBlowerLevel", "mMainBlowerLevel", "mainBlowerLevel");
+            int autoStep = readObjIntAny(statusObj, 0,
+                    "getAutoStep", "mAutoStep", "autoStep");
+            int mode = readObjIntAny(statusObj, -1,
+                    "getDriverMode", "getModeDrive", "getBlowerMode", "mModeDrive", "modeDrive");
+            int auto = readObjIntAny(statusObj, -1,
+                    "getAutoStatus", "getAuto", "mAuto", "auto");
+            int ac = readObjIntAny(statusObj, -1,
+                    "getACStatus", "getAirconOnOff", "getAcOnOff", "getAC", "mAirconOnOff");
+            int heat = readObjIntAny(statusObj, -1,
+                    "getHeatStatus", "getHeatOnOff", "getHeaterOnOff", "mHeatOnOff");
+            int defog = readObjIntAny(statusObj, -1,
+                    "getFrontDefrostStatus", "getFrontDefog", "mFrontDefog", "frontDefog");
+            int intake = readObjIntAny(statusObj, -1,
+                    "getAirIntakeStatus", "getIntake", "getIntakeMode", "mIntake", "intake");
+            int sync = readObjIntAny(statusObj, -1,
+                    "getSyncStatus", "getSyncDisp", "getSync", "mSyncDisp", "sync");
+            int dual = readObjIntAny(statusObj, -1,
+                    "getDualStatus", "getDual", "mDual", "dual");
+            int drvOnly = readObjIntAny(statusObj, -1,
+                    "getDriverOnlyStatus", "getDriverOnly", "mDriverOnly", "driverOnly");
+            int ads = readObjIntAny(statusObj, -1,
+                    "getADSStatus", "getADSOnOffStatus", "getAdsStatus", "mADSOnOffStatus");
+            int datcType = readObjIntAny(statusObj, -1,
+                    "getDATCType", "mDatcType", "datcType");
 
-            float drC = readObjFloatAny(statusObj, Float.NaN, "getDrTempC", "getDriverTempC", "mDrTempC", "drTempC");
-            int drStateC = readObjIntAny(statusObj, 3, "getDrTempStateC", "mDrTempStateC");
-            float psC = readObjFloatAny(statusObj, Float.NaN, "getPsTempC", "getPassengerTempC", "mPsTempC", "psTempC");
-            int psStateC = readObjIntAny(statusObj, 3, "getPsTempStateC", "mPsTempStateC");
-            float ambC = readObjFloatAny(statusObj, Float.NaN, "getAmbientTempC", "getOutdoorTempC", "mAmbientTempC");
-            int ambStateC = readObjIntAny(statusObj, 1, "getAmbientTempStateC", "mAmbientTempStateC");
+            float drC = readObjFloatAny(statusObj, Float.NaN,
+                    "getDriverTempC", "getDrTempC", "mDrTempC", "drTempC");
+            int drStateC = readObjIntAny(statusObj, 4,
+                    "getDriverTempStateC", "getDrTempStateC", "mDrTempStateC");
+            float psC = readObjFloatAny(statusObj, Float.NaN,
+                    "getPassengerTempC", "getPsTempC", "mPsTempC", "psTempC");
+            int psStateC = readObjIntAny(statusObj, 4,
+                    "getPassengerTempStateC", "getPsTempStateC", "mPsTempStateC");
+            float ambC = readObjFloatAny(statusObj, Float.NaN,
+                    "getAmbientTempC", "getOutdoorTempC", "mAmbientTempC");
+            int ambStateC = readObjIntAny(statusObj, 4,
+                    "getAmbientTempStateC", "mAmbientTempStateC");
 
+            if (op == -1 && rawLevel == -1 && mode == -1 && Float.isNaN(drC)) {
+                return false;
+            }
+
+            // Genuine com.hkmc.datc.DATCConstants:
+            // OPERATION_OFF = 1, OPERATION_ON = 2, OPERATION_DEF = 3, OPERATION_LOGICOOL = 4
+            // STATUS_OFF = 1, STATUS_ON = 2
+            // LEVEL_OFF = 1, LEVEL_1..8 = 2..9, LEVEL_AUTO = 10
+            // MODE_OFF = 1, MODE_VENT = 2, MODE_BILEVEL = 3, MODE_FLOOR = 4, MODE_MIX = 5, MODE_DEFROST = 6, MODE_AUTO = 7
+            // AIR_OFF = 0, AIR_FRESH = 1, AIR_RECIRCULATION = 2
             int step = normalizeDatcBlowerStep(rawLevel);
-            if (step < 0 && autoStep >= 1 && autoStep <= 3) {
+            if ((rawLevel == 10 || step < 0) && autoStep >= 1 && autoStep <= 3) {
                 step = autoStep * 2;
             }
             if (step >= 0) {
                 target.hvacBlowerStep = step;
             }
-            if (mode >= 0 && mode <= 10) {
-                target.hvacBlowerMode = mode;
+            int normMode = normalizeDatcBlowerMode(mode);
+            if (normMode >= 0) {
+                target.hvacBlowerMode = normMode;
             }
-            if (op == 0 || op == 1 || step >= 0) {
-                target.hvacOn = (op == 1) || (step > 0);
+            if (op == 1) {
+                target.hvacOn = false;
+                target.hvacBlowerStep = 0;
+            } else if (op >= 2 && op <= 4) {
+                target.hvacOn = true;
+            } else if (step >= 0) {
+                target.hvacOn = (step > 0);
             }
-            if (auto == 0 || auto == 1) target.hvacAuto = (auto == 1);
-            if (ac == 0 || ac == 1) target.hvacAc = (ac == 1);
-            if (heat == 0 || heat == 1) target.hvacHeat = (heat == 1);
-            if (defog == 0 || defog == 1) target.hvacFrontDefog = (defog == 1);
-            if (intake == 0 || intake == 1) target.hvacRecirc = (intake == 1);
-            if (sync == 0 || sync == 1 || dual == 0 || dual == 1) {
-                target.hvacSync = (sync == 1) || (dual == 1);
-            }
-            if (drvOnly == 0 || drvOnly == 1) target.hvacDriverOnly = (drvOnly == 1);
-            if (ads == 0 || ads == 1) target.hvacAds = (ads == 1);
+
+            if (auto >= 1) target.hvacAuto = (auto == 2) || (rawLevel == 10) || (mode == 7);
+            if (ac >= 1) target.hvacAc = (ac == 2);
+            if (heat >= 1) target.hvacHeat = (heat == 2);
+            if (defog >= 1) target.hvacFrontDefog = (defog == 2) || (op == 3) || (mode == 6);
+            if (intake >= 0) target.hvacRecirc = (intake == 2);
+            if (drvOnly >= 1) target.hvacDriverOnly = (drvOnly == 2);
+            if (ads >= 1) target.hvacAds = (ads == 2);
 
             double drResolved = resolveDatcTempWithState(drC, drStateC);
             if (drResolved > 0.0) {
                 target.hvacDrTempC = drResolved;
             }
             double psResolved = resolveDatcTempWithState(psC, psStateC);
-            if (psResolved > 0.0) {
+            if (datcType == 1 || psStateC == 1 || psResolved < 0.0) {
+                // Single-Zone FATC (TYPE_SINGLE = 1 on DE22EV) or passenger display hidden: mirror driver temp
+                target.hvacSync = true;
+                if (target.hvacDrTempC > 0.0) {
+                    target.hvacPsTempC = target.hvacDrTempC;
+                }
+            } else {
                 target.hvacPsTempC = psResolved;
-            } else if (target.hvacSync && target.hvacDrTempC > 0.0) {
-                target.hvacPsTempC = target.hvacDrTempC;
+                if (sync >= 1 || dual >= 1) {
+                    target.hvacSync = (sync == 2) || (dual == 1 && Math.abs(target.hvacDrTempC - target.hvacPsTempC) < 0.1);
+                }
             }
-            if (ambStateC != 0 && !Float.isNaN(ambC) && ambC >= -45.0f && ambC <= 65.0f && Math.abs(ambC - 85.0f) > 0.5f) {
+
+            if (ambStateC != 1 && ambStateC != 255 && !Float.isNaN(ambC)
+                    && ambC >= -45.0f && ambC <= 65.0f && Math.abs(ambC - 85.0f) > 0.5f) {
                 target.outdoorTempC = Math.round(ambC * 2.0) / 2.0;
             }
             target.hasClimateData = true;
@@ -5685,6 +5975,33 @@ public class TurzxMonitorMain {
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    public static String mapWidgetBroadcastActionToSource(String action) {
+        if (action == null || action.isEmpty()) return "";
+        String a = action.toLowerCase(Locale.US);
+        if (a.contains(".timeupdate")) return "";
+        if (a.contains("btaudio")) return "Bluetooth Audio";
+        if (a.contains("dipoaudio")) return "Apple CarPlay";
+        if (a.contains("gpmaudio")) return "Android Auto";
+        if (a.contains("audio.usb")) return "USB Music";
+        if (a.contains("video.usb")) return "USB Video";
+        if (a.contains("mymusic")) return "My Music";
+        if (a.contains("radio.dab")) return "DAB";
+        if (a.contains("radio")) return "Radio";
+        if (a.contains("dmb")) return "DMB";
+        if (a.contains("nature_sound")) return "자연의 소리";
+        if (a.contains("melon")) return "Melon";
+        if (a.contains("genie")) return "Genie";
+        if (a.contains("qqmusic")) return "QQ Music";
+        if (a.contains("kaolafm")) return "Kaola FM";
+        if (a.contains("pandora")) return "Pandora";
+        if (a.contains("ipod")) return "iPod";
+        if (a.contains("audiocd") || a.contains("mp3cd")) return "Disc";
+        if (a.contains("carlife")) return "CarLife";
+        if (a.contains("mirrorlink")) return "MirrorLink";
+        if (a.contains("mconnect")) return "MConnect";
+        return "";
     }
 
     public static int parseClusterMediaLogLine(String line, TelemetrySnapshot target) {
@@ -5801,15 +6118,12 @@ public class TurzxMonitorMain {
     }
 
     public static int parseAddedDistDatcOff(int raw) {
-        if (raw == 0 || raw == -1) return 0;
+        if (raw == 0 || raw == -1 || raw == 65534 || raw == 65535) return 0;
         if (raw < 0 && raw > -150) return raw;
         if (raw < 0) return 0;
-        int highWord = (raw >>> 8) & 0xFFFF;
+        // Genuine HKMC_TAppEV3 (f.g): bits 8..23 = current DTE (km), bits 0..7 = climate-off delta DTE (km)
         int lowByte = raw & 0xFF;
-        int topByte = (raw >>> 16) & 0xFF;
-        if (highWord > 0 && highWord < 200) return highWord;
-        if (lowByte > 0 && lowByte < 200) return lowByte;
-        if (topByte > 0 && topByte < 200) return topByte;
+        if (lowByte > 0 && lowByte < 150) return lowByte;
         return 0;
     }
 
@@ -5837,11 +6151,30 @@ public class TurzxMonitorMain {
     }
 
     public static int normalizeDatcBlowerStep(int rawLevel) {
-        if (rawLevel == 0) return 0;
-        if (rawLevel == 1) return 1;
+        // Genuine com.hkmc.datc.DATCConstants:
+        // LEVEL_OFF = 1, LEVEL_1 = 2, ..., LEVEL_8 = 9, LEVEL_AUTO = 10
+        if (rawLevel == 0 || rawLevel == 1) return 0;
         if (rawLevel >= 2 && rawLevel <= 9) return rawLevel - 1;
-        if (rawLevel >= 11 && rawLevel <= 13) return (rawLevel - 10) * 2; // BLOWER_AUTO_STEP1..3 -> 2, 4, 6
+        if (rawLevel == 10) return 3;
+        if (rawLevel >= 11 && rawLevel <= 13) return (rawLevel - 10) * 2;
         return -1;
+    }
+
+    public static int normalizeDatcBlowerMode(int rawMode) {
+        // Genuine com.hkmc.datc.DATCConstants:
+        // MODE_OFF = 1, MODE_VENT = 2, MODE_BILEVEL = 3, MODE_FLOOR = 4, MODE_MIX = 5, MODE_DEFROST = 6, MODE_AUTO = 7
+        switch (rawMode) {
+            case 0:
+            case 1: return 0; // OFF
+            case 2: return 1; // VENT
+            case 3: return 2; // B/L
+            case 4: return 3; // FLOOR
+            case 5: return 4; // MIX
+            case 6: return 5; // DEF
+            case 7: return 2; // AUTO (B/L arrows)
+            default:
+                return (rawMode >= 8 && rawMode <= 10) ? rawMode : -1;
+        }
     }
 
     public static double convertDatcRawTempToCelsius(int rawCode, float vrTempC) {
@@ -6338,30 +6671,68 @@ public class TurzxMonitorMain {
                     && diagReport.contains("hdr=C7,C0,2D"),
                     "Expected complete DebugManager diagnostic report");
 
-            // 7. Verify DE22EV getRealSchedInfo() DTE extraction, DatcStatus decoding, and ClusterService media log parsing
-            int[] de22Sched = new int[]{7, 31, 63, 7, 31, 63, 198, 0, 1};
-            assertTrue(extractDteFromRealSchedInfo(de22Sched) == 198,
-                    "Expected DTE=198 km from DE22EV getRealSchedInfo()");
+            // 7. Verify genuine HKMC_TAppEV3 flag 38 DTE + signed 10-bit motor power + DATCConstants (1=OFF, 2=ON) + AvWidgetMainView media
+            assertTrue(extractCurrentDteFromFlag38(83716) == 327 && parseAddedDistDatcOff(83716) == 4,
+                    "Expected DTE=327 km and delta=4 km from DE22EV getHEVStatus(38)=83716");
+            assertTrue(parseSigned10BitKw(15) == 15 && parseSigned10BitKw(1009) == -15 && parseSigned10BitKw(1023) == 0,
+                    "Expected signed 10-bit 2's complement motor power decoding");
             assertTrue(!isValidDteValue(65535) && !isValidDteValue(65534),
                     "Expected 65535/65534 to be rejected by isValidDteValue");
 
-            com.hkmc.datc.DatcStatus ds = new com.hkmc.datc.DatcStatus();
-            ds.mOperationStatus = 1;
-            ds.mMainBlowerLevel = 5; // step 4
-            ds.mModeDrive = 2;       // B/L
-            ds.mAuto = 1;
-            ds.mAirconOnOff = 0;
-            ds.mHeatOnOff = 1;
-            ds.mIntake = 1;
-            ds.mSyncDisp = 1;
-            ds.mDrTempC = 23.5f;
-            ds.mDrTempStateC = 3;
-            ds.mPsTempC = 24.0f;
-            ds.mPsTempStateC = 3;
-            assertTrue(applyDatcStatusObject(ds, snap), "Expected DatcStatus decode success");
-            assertTrue(snap.hvacOn && snap.hvacBlowerStep == 4 && snap.hvacHeat && !snap.hvacAc
+            // Verify DE22EV Single-Zone FATC OFF state (1 = OFF, psStateC = 1 STATE_NOT_DISPLAY)
+            com.hkmc.datc.DatcStatus dsOff = new com.hkmc.datc.DatcStatus();
+            dsOff.mOperationStatus = 1; // OPERATION_OFF = 1
+            dsOff.mMainBlowerLevel = 1; // LEVEL_OFF = 1
+            dsOff.mModeDrive = 1;       // MODE_OFF = 1
+            dsOff.mAuto = 1;            // STATUS_OFF = 1
+            dsOff.mAirconOnOff = 1;     // STATUS_OFF = 1
+            dsOff.mHeatOnOff = 1;       // STATUS_OFF = 1
+            dsOff.mIntake = 1;          // AIR_FRESH = 1
+            dsOff.mDatcType = 1;        // TYPE_SINGLE = 1
+            dsOff.mDrTempC = 22.0f;
+            dsOff.mDrTempStateC = 4;    // STATE_NORMAL = 4
+            dsOff.mPsTempC = -18.0f;
+            dsOff.mPsTempStateC = 1;    // STATE_NOT_DISPLAY = 1
+            assertTrue(applyDatcStatusObject(dsOff, snap), "Expected DatcStatus OFF decode success");
+            assertTrue(!snap.hvacOn && snap.hvacBlowerStep == 0 && !snap.hvacAuto && !snap.hvacAc
+                    && !snap.hvacHeat && !snap.hvacRecirc && snap.hvacSync
+                    && Math.abs(snap.hvacDrTempC - 22.0) < 0.01 && Math.abs(snap.hvacPsTempC - 22.0) < 0.01,
+                    "Expected genuine DE22EV DATC OFF state (1=OFF) and Single-Zone passenger temp mirror");
+
+            // Verify DATC ON state (2 = ON)
+            com.hkmc.datc.DatcStatus dsOn = new com.hkmc.datc.DatcStatus();
+            dsOn.mOperationStatus = 2; // OPERATION_ON = 2
+            dsOn.mMainBlowerLevel = 5; // LEVEL_4 = 5 -> step 4
+            dsOn.mModeDrive = 3;       // MODE_BILEVEL = 3 -> mode 2 (B/L)
+            dsOn.mAuto = 2;            // STATUS_ON = 2
+            dsOn.mAirconOnOff = 1;     // STATUS_OFF = 1
+            dsOn.mHeatOnOff = 2;       // STATUS_ON = 2
+            dsOn.mIntake = 2;          // AIR_RECIRCULATION = 2
+            dsOn.mDatcType = 2;        // TYPE_DUAL = 2
+            dsOn.mDrTempC = 23.5f;
+            dsOn.mDrTempStateC = 4;
+            dsOn.mPsTempC = 24.0f;
+            dsOn.mPsTempStateC = 4;
+            assertTrue(applyDatcStatusObject(dsOn, snap), "Expected DatcStatus ON decode success");
+            assertTrue(snap.hvacOn && snap.hvacBlowerStep == 4 && snap.hvacBlowerMode == 2
+                    && snap.hvacAuto && snap.hvacHeat && !snap.hvacAc && snap.hvacRecirc
                     && Math.abs(snap.hvacDrTempC - 23.5) < 0.01 && Math.abs(snap.hvacPsTempC - 24.0) < 0.01,
-                    "Expected DatcStatus fields applied accurately");
+                    "Expected genuine DATC ON state (2=ON) applied accurately");
+
+            // Verify AvWidgetMainView media broadcast receiver (com.hkmc.audio.btaudio.widgetupdate + timeupdate)
+            android.content.Intent btIntent = new android.content.Intent("com.hkmc.audio.btaudio.widgetupdate");
+            btIntent.putExtra("filename", "Whiplash");
+            btIntent.putExtra("artist_name", "aespa");
+            btIntent.putExtra("album_name", "Whiplash - The 5th Mini Album");
+            btIntent.putExtra("playstate", 1);
+            btIntent.putExtra("audio_total_time", 183000L);
+            btIntent.putExtra("audio_current_time", 42000L);
+            assertTrue(TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(btIntent.getAction(), btIntent.getExtras(), snap),
+                    "Expected BTAudio widgetupdate broadcast decode");
+            assertTrue("Bluetooth Audio".equals(snap.mediaSource) && "Whiplash".equals(snap.mediaTitle)
+                    && "aespa".equals(snap.mediaArtist) && snap.mediaPlaying
+                    && snap.mediaDurationSec == 183 && snap.mediaPositionSec == 42,
+                    "Expected BTAudio widgetupdate fields applied");
 
             String clusterBtLine = "I/ClusterService( 1120): updateClusterWithArtistInfo : mode = 9, title = Supernova, artist = aespa";
             int parsedMode = parseClusterMediaLogLine(clusterBtLine, snap);
