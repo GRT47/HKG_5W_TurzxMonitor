@@ -1135,23 +1135,25 @@
       background-color: var(--accent);
     }
 
-    /* 5-Icon Compact Dock */
+    /* 7-Icon Compact Dock (AUTO / A/C / HEAT / 앞유리 / 후면열선미러 / 내기순환 / SYNC) */
     .hvac-icon-dock {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 5px;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 4px;
     }
 
     .hvac-dock-btn {
       height: 29px;
+      padding: 0 2px;
       background-color: var(--raised);
       border: 1px solid var(--border);
       border-top: 1px solid var(--border);
       border-radius: 4px;
       color: var(--muted);
       font-family: var(--font-sans);
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 700;
+      letter-spacing: -0.02em;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -1731,29 +1733,30 @@
                         <!-- Center: Large Air Direction (풍향) + 7-Step Visual Fan Volume (풍량) -->
                         <div class="hvac-airflow-hud" title="좌측 클릭: 풍향 전환 / 우측 클릭: 풍량(1~7단) 조절">
                           <!-- 1. Large High-Contrast Seated Air Direction Pictogram (52x38 px) -->
-                          <div class="hvac-dir-zone" onclick="cycleAirDir(event)" title="풍향 전환 (상단 / 전면 / 하단)">
+                          <div class="hvac-dir-zone" onclick="cycleAirDir(event)" title="풍향 전환 (유리 / 전면 / 하단)">
                             <svg width="52" height="38" viewBox="0 0 46 36" fill="none">
                               <!-- Seated Passenger Solid Silhouette (Right side) -->
                               <circle cx="33" cy="7.5" r="4.4" fill="#e2e4ec" />
                               <!-- Torso + Lap + Lower Leg (Bold rounded stroke for high visibility at 86 PPI) -->
                               <path d="M35.5 14 L30.5 23.5 L20.5 23.5 L16.5 32.5" stroke="#e2e4ec" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round" />
 
-                              <!-- Arrow 1: Upward / Windshield Defrost Airflow (상단 풍향) -->
+                              <!-- Arrow 1: Upward / Windshield Defrost Airflow (유리방향: 앞유리창 실루엣 + 상단 화살표) -->
                               <g id="airArrowUp" class="air-arrow off">
-                                <path d="M3 11 L17 4.5" stroke="var(--accent)" stroke-width="2.9" stroke-linecap="round" />
-                                <path d="M12.5 3.2 L18 4.2 L15.2 9.2" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" />
+                                <path d="M2.5 9.0 L11.5 2.0" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round" />
+                                <path d="M5.5 11.0 L17.5 4.6" stroke="var(--accent)" stroke-width="2.8" stroke-linecap="round" />
+                                <path d="M13.2 3.4 L18.2 4.3 L15.8 8.8" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
                               </g>
 
                               <!-- Arrow 2: Forward / Upper Body Vent Airflow (전면 풍향 - Active) -->
                               <g id="airArrowMid" class="air-arrow">
-                                <path d="M2 16.5 H20" stroke="var(--accent)" stroke-width="3.2" stroke-linecap="round" />
-                                <path d="M15.5 12.5 L20.5 16.5 L15.5 20.5" stroke="var(--accent)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" />
+                                <path d="M2 17.5 H20" stroke="var(--accent)" stroke-width="3.2" stroke-linecap="round" />
+                                <path d="M15.5 13.8 L20.5 17.5 L15.5 21.2" stroke="var(--accent)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" />
                               </g>
 
                               <!-- Arrow 3: Downward / Footwell Airflow (하단 풍향 - Active) -->
                               <g id="airArrowDown" class="air-arrow">
-                                <path d="M3 22.5 L14 30.5" stroke="var(--accent)" stroke-width="2.9" stroke-linecap="round" />
-                                <path d="M13.2 25.5 L14.8 31 L9.2 30.5" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" />
+                                <path d="M3 23.5 L14 31.2" stroke="var(--accent)" stroke-width="2.9" stroke-linecap="round" />
+                                <path d="M13.2 26.2 L14.8 31.5 L9.2 31.0" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" />
                               </g>
                             </svg>
                           </div>
@@ -1794,16 +1797,38 @@
                       </div>
 
                       <div class="hvac-icon-dock" role="group" aria-label="공조 스위치">
-                        <button type="button" class="hvac-dock-btn on" onclick="toggleHvacBtn(this)" title="AUTO">AUTO</button>
-                        <button type="button" class="hvac-dock-btn on" onclick="toggleHvacBtn(this)" title="A/C 냉방">A/C</button>
-                        <button type="button" class="hvac-dock-btn" onclick="toggleHvacBtn(this)" title="히트펌프 난방">HEAT</button>
-                        <button type="button" class="hvac-dock-btn on" onclick="toggleHvacBtn(this)" title="내기 순환" aria-label="내기 순환">
+                        <button type="button" class="hvac-dock-btn on" id="hvacBtnAuto" onclick="toggleHvacBtn(this)" title="AUTO">AUTO</button>
+                        <button type="button" class="hvac-dock-btn on" id="hvacBtnAc" onclick="toggleHvacBtn(this)" title="A/C 냉방">A/C</button>
+                        <button type="button" class="hvac-dock-btn" id="hvacBtnHeat" onclick="toggleHvacBtn(this)" title="히트펌프 난방">HEAT</button>
+                        <button type="button" class="hvac-dock-btn" id="hvacBtnFrontDefog" onclick="toggleHvacBtn(this)" title="앞유리 김서림·성에 제거 (FRONT DEFOG)" aria-label="앞유리 표시">
+                          <svg width="19" height="16" viewBox="0 0 24 20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M2 7.5 C7.5 2.2 16.5 2.2 22 7.5 L18.2 15.2 C14.5 12.2 9.5 12.2 5.8 15.2 Z" />
+                            <path d="M8.2 18.2 C7.6 15.5 8.8 12.5 8.2 9.2" />
+                            <path d="M6.8 10.6 L8.2 8.6 L9.6 10.6" />
+                            <path d="M12 18.2 C11.4 15.5 12.6 12.5 12 9.2" />
+                            <path d="M10.6 10.6 L12 8.6 L13.4 10.6" />
+                            <path d="M15.8 18.2 C15.2 15.5 16.4 12.5 15.8 9.2" />
+                            <path d="M14.4 10.6 L15.8 8.6 L17.2 10.6" />
+                          </svg>
+                        </button>
+                        <button type="button" class="hvac-dock-btn" id="hvacBtnRearDefog" onclick="toggleHvacBtn(this)" title="뒷유리 및 사이드미러 열선 (REAR DEFOG)" aria-label="후면열선미러">
+                          <svg width="19" height="16" viewBox="0 0 24 20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3.5" y="3.5" width="17" height="11" rx="1.8" />
+                            <path d="M8.2 18.2 C7.6 15.2 8.8 11.8 8.2 8.2" />
+                            <path d="M6.8 9.6 L8.2 7.6 L9.6 9.6" />
+                            <path d="M12 18.2 C11.4 15.2 12.6 11.8 12 8.2" />
+                            <path d="M10.6 9.6 L12 7.6 L13.4 9.6" />
+                            <path d="M15.8 18.2 C15.2 15.2 16.4 11.8 15.8 8.2" />
+                            <path d="M14.4 9.6 L15.8 7.6 L17.2 9.6" />
+                          </svg>
+                        </button>
+                        <button type="button" class="hvac-dock-btn on" id="hvacBtnRecirc" onclick="toggleHvacBtn(this)" title="내기 순환" aria-label="내기 순환">
                           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
                             <path d="M17 11H9a3 3 0 0 0 0 6h9"/>
                             <path d="m15 14 3 3-3 3"/>
                           </svg>
                         </button>
-                        <button type="button" class="hvac-dock-btn on" onclick="toggleHvacBtn(this)" title="좌우 동기화">SYNC</button>
+                        <button type="button" class="hvac-dock-btn on" id="hvacBtnSync" onclick="toggleHvacBtn(this)" title="좌우 동기화">SYNC</button>
                       </div>
                     </article>
                   </div>
@@ -2041,26 +2066,30 @@
       btn.classList.toggle("on");
     }
 
-    let currentAirDirMode = 0; /* 0: 전면+하단, 1: 전면 단독, 2: 상단+하단, 3: 전체(상·중·하) */
+    let currentAirDirMode = 0; /* 0: 전면+하단, 1: 전면 단독, 2: 하단 단독, 3: 유리+하단, 4: 유리 단독, 5: 전체(유리·전면·하단) */
     let currentFanStep = 3;
 
     function updateAirDir(mode) {
-      currentAirDirMode = ((mode % 4) + 4) % 4;
+      currentAirDirMode = ((mode % 6) + 6) % 6;
       const up = document.getElementById("airArrowUp");
       const mid = document.getElementById("airArrowMid");
       const down = document.getElementById("airArrowDown");
       if (!up || !mid || !down) return;
 
       const states = [
-        { u: false, m: true,  d: true  }, /* 0: 전면 + 하단 */
-        { u: false, m: true,  d: false }, /* 1: 전면 단독 */
-        { u: true,  m: false, d: true  }, /* 2: 상단 + 하단 */
-        { u: true,  m: true,  d: true  }  /* 3: 상단 + 전면 + 하단 */
+        { u: false, m: true,  d: true  }, /* 0: 전면 + 하단 (B/L) */
+        { u: false, m: true,  d: false }, /* 1: 전면 단독 (VENT) */
+        { u: false, m: false, d: true  }, /* 2: 하단 단독 (FLOOR) */
+        { u: true,  m: false, d: true  }, /* 3: 유리 + 하단 (MIX) */
+        { u: true,  m: false, d: false }, /* 4: 유리 단독 (DEF) */
+        { u: true,  m: true,  d: true  }  /* 5: 유리 + 전면 + 하단 */
       ][currentAirDirMode];
 
       up.className.baseVal = states.u ? "air-arrow" : "air-arrow off";
       mid.className.baseVal = states.m ? "air-arrow" : "air-arrow off";
       down.className.baseVal = states.d ? "air-arrow" : "air-arrow off";
+      const fBtn = document.getElementById("hvacBtnFrontDefog");
+      if (fBtn) fBtn.classList.toggle("on", !!states.u);
     }
 
     function cycleAirDir(event) {
@@ -3018,13 +3047,14 @@
           }
         }
         /* Map DATC BLOWER_MODE (1=VENT, 2=BI-LEVEL, 3=FLOOR, 4=MIX, 5=DEF) to 3-arrow SVG */
+        let uOn = !!c.frontDefog;
         if (typeof c.blowerMode === "number" && c.blowerMode >= 1) {
           const up = document.getElementById("airArrowUp");
           const mid = document.getElementById("airArrowMid");
           const down = document.getElementById("airArrowDown");
           if (up && mid && down) {
             const m = c.blowerMode;
-            const uOn = (m === 4 || m === 5 || m >= 6);
+            uOn = uOn || (m === 4 || m === 5 || m === 6 || m === 7 || m === 9 || m === 10);
             const mOn = (m === 1 || m === 2 || m === 7 || m === 9);
             const dOn = (m === 2 || m === 3 || m === 4 || m === 8 || m === 9);
             up.className.baseVal = uOn ? "air-arrow" : "air-arrow off";
@@ -3032,6 +3062,18 @@
             down.className.baseVal = dOn ? "air-arrow" : "air-arrow off";
           }
         }
+        const hOn = c.on !== false;
+        const setDockOn = (id, cond) => {
+          const el = document.getElementById(id);
+          if (el) el.classList.toggle("on", !!cond);
+        };
+        if (typeof c.auto === "boolean") setDockOn("hvacBtnAuto", hOn && c.auto);
+        if (typeof c.ac === "boolean") setDockOn("hvacBtnAc", hOn && c.ac);
+        if (typeof c.heat === "boolean") setDockOn("hvacBtnHeat", hOn && c.heat);
+        setDockOn("hvacBtnFrontDefog", hOn && (!!c.frontDefog || uOn));
+        if (typeof c.rearDefog === "boolean") setDockOn("hvacBtnRearDefog", c.rearDefog);
+        if (typeof c.recirc === "boolean") setDockOn("hvacBtnRecirc", c.recirc);
+        if (typeof c.sync === "boolean") setDockOn("hvacBtnSync", hOn && c.sync);
       }
 
       /* Apply CarrotPilot UDP fallback if WebSocket is not directly connected */

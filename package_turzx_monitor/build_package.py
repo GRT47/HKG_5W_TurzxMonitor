@@ -25,7 +25,7 @@ PKG_STAGE_DIR = BUILD_DIR / "pkg_stage"
 USB_ROOT_DIR = BUILD_DIR / "usb_root"
 
 OUTER_ZIP_PATH = REPO_ROOT / "HKG_5W_TurzxMonitor_USB.zip"
-MONITOR_VERSION = "1.3.1"
+MONITOR_VERSION = "1.3.2"
 
 PUBLIC_SANS_FONTS = {
     "PublicSans-Bold.ttf": "https://fonts.gstatic.com/s/publicsans/v21/ijwGs572Xtc6ZYQws9YVwllKVG8qX1oyOymu8Z65ww.ttf",
@@ -84,8 +84,12 @@ def sha256_bytes(data: bytes) -> str:
 
 
 def normalize_lf(path: Path) -> bytes:
-    raw = path.read_bytes().replace(b"\r\n", b"\n")
-    path.write_bytes(raw)
+    orig = path.read_bytes()
+    if b"\x00" in orig:
+        raise RuntimeError(f"Null byte detected in text file: {path}")
+    raw = orig.replace(b"\r\n", b"\n")
+    if raw != orig:
+        path.write_bytes(raw)
     return raw
 
 

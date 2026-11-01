@@ -72,10 +72,12 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.3.1";
+    public static final String MONITOR_VERSION = "1.3.2";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
+    private static final String SHARED_CARROTBRIDGE_JSON_PATH = "/data/local/tmp/carrotbridge_status.json";
+    private static final String SHARED_CARROTBRIDGE_PID_PATH = "/data/local/tmp/carrotbridge_java.pid";
     private static final String TURZX_JSON_STATE_PATH = "/data/local/tmp/hkg_turzx_state.json";
     private static final String DEBUG_DUMP_LOCAL_PATH = "/data/local/tmp/hkg_turzxmonitor_debug.txt";
     private static final String OTA_RELOAD_TRIGGER_PATH = "/data/local/tmp/hkg_turzxmonitor_ota_reload";
@@ -223,6 +225,8 @@ public class TurzxMonitorMain {
         public boolean hvacSync = true;
         public boolean hvacDriverOnly = false;
         public boolean hvacFrontDefog = false;
+        public boolean hvacRearDefog = false;
+        public boolean hvacSteerHeat = false;
         public boolean hvacRecirc = true;
         public boolean hvacAds = true;
         public int hvacBlowerStep = 3;      // 0..8
@@ -1593,15 +1597,16 @@ public class TurzxMonitorMain {
             boolean dirDown = s.hvacOn && (bm == 2 || bm == 3 || bm == 4 || bm == 8 || bm == 9 || bm < 0);
             if (bmpActiveShell != null) {
                 if (dirUp) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1396, 262, 1425, 287);
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1425, 262, 1445, 282);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1396, 260, 1425, 286);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1425, 260, 1445, 284);
                 }
                 if (dirMid) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1396, 288, 1425, 302);
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1425, 282, 1446, 305);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1396, 287, 1425, 304);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1425, 285, 1446, 307);
                 }
                 if (dirDown) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1396, 305, 1445, 331);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1396, 305, 1425, 331);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1425, 308, 1445, 331);
                 }
             }
 
@@ -1622,22 +1627,29 @@ public class TurzxMonitorMain {
                         pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
             }
 
-            // Bottom 5 HVAC Dock Buttons (composite active buttons from bmpActiveShell)
+            // Bottom 7 HVAC Dock Buttons (composite active buttons from bmpActiveShell)
+            // [1:AUTO] [2:A/C] [3:HEAT] [4:FRONT DEFOG] [5:REAR DEFOG/MIRROR] [6:RECIRC] [7:SYNC]
             if (bmpActiveShell != null) {
                 if (s.hvacOn && s.hvacAuto) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1226, 374, 1353, 436);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1226, 374, 1315, 436);
                 }
                 if (s.hvacOn && s.hvacAc) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1359, 374, 1486, 436);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1320, 374, 1411, 436);
                 }
                 if (s.hvacOn && s.hvacHeat) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1492, 374, 1618, 436);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1416, 374, 1505, 436);
+                }
+                if (s.hvacOn && (s.hvacFrontDefog || dirUp)) {
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1510, 374, 1599, 436);
+                }
+                if (s.hvacRearDefog) {
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1604, 374, 1693, 436);
                 }
                 if (s.hvacRecirc) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1624, 374, 1751, 436);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1698, 374, 1789, 436);
                 }
                 if (s.hvacOn && s.hvacSync) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1757, 374, 1884, 436);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1794, 374, 1884, 436);
                 }
             }
         }
@@ -2347,6 +2359,67 @@ public class TurzxMonitorMain {
         }
     }
 
+    public static final class BcmListenerBridge extends com.hkmc.bcm.IBCMListener.Stub {
+        @Override public void onACCChanged(int a) {}
+        @Override public void onAMPCallSystemStatusChanged(int a) {}
+        @Override public void onAccInputCheckChanged(int a) {}
+        @Override public void onAirbagStatusChanged(int a) {}
+        @Override public void onAstSeatHeaterStatusChanged(int a) {}
+        @Override public void onBatEvtAlarmChanged(int a) {}
+        @Override public void onBatSocStatus(int a) {}
+        @Override public void onBatSocStatus_M(int a) {}
+        @Override public void onBattChargeDelay(int a, int b) {}
+        @Override public void onBatteryPreconditioning(int a) {}
+        @Override public void onCCUDiagStatus(int a) {}
+        @Override public void onCDMChanged(int a, int b, int c) {}
+        @Override public void onCanNetworkStatus(int a) {}
+        @Override public void onChangedBattAutoCutPreWrng(int a) {}
+        @Override public void onChangedBattMngAlert(int a) {}
+        @Override public void onDPFLampStatChanged(int a) {}
+        @Override public void onDigitalKeyDataChanged(byte[] data) {}
+        @Override public void onDoorAllStateChanged(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j) {}
+        @Override public void onDoorLockStateChanged(int a) {}
+        @Override public void onDriveModeChanged(int a) {}
+        @Override public void onDrvSeatHeaterStatusChanged(int a) {}
+        @Override public void onEVSEChanged(long a, long b) {}
+        @Override public void onEcsStatusChanged(int a, int b, int c, int d, int e, int f, int g, int h, int i) {}
+        @Override public void onEngineIdleNotiAlarm(byte a) {}
+        @Override public void onEngineStatusChanged(boolean a) {}
+        @Override public void onFuelWarnStatusChanged(boolean a) {}
+        @Override public void onGearStatusInfoChanged(int a, int b) {}
+        @Override public void onIgnitionChanged(int a) {}
+        @Override public void onLampStatusChanged(int a, int b, int c, int d) {}
+        @Override public void onModemInfoChanged(byte[] data) {}
+        @Override public void onPanic(int a) {}
+        @Override public void onParkBrakeStatusChanged(int a) {}
+        @Override public void onParkCrashChanged(int a) {}
+        @Override public void onRLSeatHeaterStatusChanged(int a) {}
+        @Override public void onRRSeatHeaterStatusChanged(int a) {}
+        @Override public void onRctaAlarmChanged(int a, int b) {}
+        @Override public void onRearStatusInfoChanged(int a) {}
+        @Override public void onRemoteEngingStatusChanged(int a) {}
+        @Override
+        public void onRemoteTeleHeatingStatusChanged(int stWheelHeatState, int defoggerState) {
+            TelemetryCollector.onBcmTeleHeatingCallback(stWheelHeatState, defoggerState);
+        }
+        @Override public void onSBCMChanged(int a, int b, int c) {}
+        @Override public void onSeatHeaterStatusChanged(int a, int b, int c, int d) {}
+        @Override public void onSeatVentilationStatusChanged(int a, int b, int c, int d) {}
+        @Override public void onSeatbeltStatusChanged(int a, int b) {}
+        @Override public void onSideMirrorStatusChanged(int a) {}
+        @Override public void onSmartKeyBatteryWarning(int a) {}
+        @Override public void onSocAlaramStatusChanged(int a) {}
+        @Override public void onSpeedUnitChanged(int a) {}
+        @Override public void onStolen(int a) {}
+        @Override public void onSysUpdateStatusAlarm(int a) {}
+        @Override public void onVehicleStatusDeliveryMode(int a) {}
+        @Override public void onWindowActStateChanged(int a, int b, int c, int d) {}
+        @Override public void onWindowDetailOpenStateChanged(int a, int b, int c, int d) {}
+        @Override public void onWindowOpenStateChanged(int a, int b, int c, int d) {}
+        @Override public void onbreakOilStatus(int a) {}
+        @Override public void onsunroofOpen(int a) {}
+    }
+
     public static final class RemoteControlDisplayBridge extends android.media.IRemoteControlDisplay.Stub {
         @Override
         public void setCurrentClientId(int clientGeneration, android.app.PendingIntent clientMediaIntent, boolean clearing) {
@@ -2424,6 +2497,10 @@ public class TurzxMonitorMain {
         private static volatile long lastDatcCallbackMs = 0L;
         private static volatile Object lastRawDatcStatusObj = null;
         private static volatile String lastRawDatcTempCallback = "none";
+
+        private static volatile Object bcmService = null;
+        private static volatile boolean bcmListenerRegistered = false;
+        private static volatile String lastRawBcmHeatingCallback = "none";
 
         private static volatile boolean rcDisplayRegistered = false;
         private static volatile Object rcDisplayBridgeObj = null;
@@ -2507,6 +2584,18 @@ public class TurzxMonitorMain {
             synchronized (liveSnapshot) {
                 if (applyDatcStatusObject(statusObj, liveSnapshot)) {
                     lastDatcCallbackMs = System.currentTimeMillis();
+                }
+            }
+        }
+
+        public static void onBcmTeleHeatingCallback(int stWheelHeatState, int defoggerState) {
+            lastRawBcmHeatingCallback = "stWheelHeat=" + stWheelHeatState + ", defogger(C_DefoggerRly)=" + defoggerState;
+            synchronized (liveSnapshot) {
+                if (stWheelHeatState == 0 || stWheelHeatState == 1) {
+                    liveSnapshot.hvacSteerHeat = (stWheelHeatState == 1);
+                }
+                if (defoggerState == 0 || defoggerState == 1) {
+                    liveSnapshot.hvacRearDefog = (defoggerState == 1);
                 }
             }
         }
@@ -2899,6 +2988,7 @@ public class TurzxMonitorMain {
                 pollDatcServiceLocked();
                 pollGearLocked();
                 pollMediaNowPlayingLocked();
+                pollCarrotBridgeAndArpLocked();
 
                 if (sysContext != null && "미디어 재생 대기 중".equals(liveSnapshot.mediaTitle)
                         && (System.currentTimeMillis() - lastMediaWidgetReqMs > 15000L)) {
@@ -3079,6 +3169,35 @@ public class TurzxMonitorMain {
                                         DebugManager.logEvent("DATC", "Registered IDATCListener on com.hkmc.micom.datc");
                                     } catch (Throwable ignored) {
                                     }
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                if (bcmService == null) {
+                    try {
+                        Object b = getSvc.invoke(null, "com.hkmc.micom.bcm");
+                        if (b != null) {
+                            Class<?> stubCls = Class.forName("com.hkmc.bcm.IBCMService$Stub");
+                            bcmService = stubCls.getMethod("asInterface", iBinderCls).invoke(null, b);
+                            if (bcmService != null && !bcmListenerRegistered) {
+                                try {
+                                    Class<?> bcmIfc = Class.forName("com.hkmc.bcm.IBCMListener");
+                                    Object listener = new BcmListenerBridge();
+                                    Object binderObj = Class.forName("android.os.Binder").getConstructor().newInstance();
+                                    Class<?> sc = bcmService.getClass();
+                                    try {
+                                        sc.getMethod("registerBCMListener", bcmIfc, iBinderCls)
+                                                .invoke(bcmService, listener, binderObj);
+                                    } catch (NoSuchMethodException nsme) {
+                                        sc.getMethod("registerBCMListener", bcmIfc)
+                                                .invoke(bcmService, listener);
+                                    }
+                                    bcmListenerRegistered = true;
+                                    DebugManager.logEvent("BCM", "Registered IBCMListener on com.hkmc.micom.bcm (C_DefoggerRly)");
+                                } catch (Throwable ignored) {
                                 }
                             }
                         }
@@ -3558,6 +3677,33 @@ public class TurzxMonitorMain {
             }
         }
 
+        private static void pollCarrotBridgeAndArpLocked() {
+            // 1. Co-existence with HKG_5W_CarrotNavi (carrotnavi.bridge -> /data/local/tmp/carrotbridge_status.json)
+            File cbFile = new File(SHARED_CARROTBRIDGE_JSON_PATH);
+            if (cbFile.isFile() && (System.currentTimeMillis() - cbFile.lastModified() < 12000L)) {
+                String cbJson = readAllTextQuick(cbFile);
+                if (!cbJson.isEmpty()) {
+                    parseCarrotBridgeStatusJson(cbJson, liveSnapshot);
+                }
+            }
+            // 2. Fallback: scan /proc/net/arp for wlan0 hotspot clients (e.g. 192.168.0.103) if carrotIp is still empty or stale
+            if (!isValidRemoteCarrotIp(liveSnapshot.carrotIp) || (!liveSnapshot.carrotConnected && (pollTick % 5 == 0))) {
+                String arpIp = scanWlanArpCarrotIp();
+                if (isValidRemoteCarrotIp(arpIp)) {
+                    liveSnapshot.carrotIp = arpIp;
+                }
+            }
+        }
+
+        private static boolean isCarrotBridgeDaemonActive() {
+            File cbFile = new File(SHARED_CARROTBRIDGE_JSON_PATH);
+            if (cbFile.isFile() && (System.currentTimeMillis() - cbFile.lastModified() < 12000L)) {
+                return true;
+            }
+            File pidFile = new File(SHARED_CARROTBRIDGE_PID_PATH);
+            return pidFile.isFile() && (System.currentTimeMillis() - pidFile.lastModified() < 120000L);
+        }
+
         private static void startBackgroundThreadsIfNeeded() {
             if (backgroundStarted) return;
             backgroundStarted = true;
@@ -3615,12 +3761,16 @@ public class TurzxMonitorMain {
                 try {
                     proc = Runtime.getRuntime().exec(new String[]{
                             "/system/bin/logcat", "-b", "main", "-b", "system", "-v", "brief",
-                            "TM_HSCANPacketRunner:I", "ClusterService:I", "*:S"
+                            "TM_HSCANPacketRunner:I", "ClusterService:I", "BCMService:I", "*:S"
                     });
                     br = new BufferedReader(new InputStreamReader(proc.getInputStream(), UTF8), 4096);
                     String line;
                     while ((line = br.readLine()) != null) {
-                        if (line.contains("ClusterService")) {
+                        if (line.contains("BCMService") || line.contains("RES_DEFOGGER_STATE") || line.contains("C_DefoggerRly")) {
+                            synchronized (liveSnapshot) {
+                                parseBcmDefoggerLogLine(line, liveSnapshot);
+                            }
+                        } else if (line.contains("ClusterService")) {
                             synchronized (liveSnapshot) {
                                 int mode = parseClusterMediaLogLine(line, liveSnapshot);
                                 if (mode >= 0) {
@@ -3642,23 +3792,41 @@ public class TurzxMonitorMain {
 
         private static void runCarrotUdpListenerLoop(int port) {
             while (true) {
+                // When HKG_5W_CarrotNavi (carrotnavi.bridge) is active, yield UDP 7705 so CarrotBridgeMain
+                // receives 100% of CarrotPilot 7705 broadcasts without Linux kernel socket contention.
+                if (port == CARROT_UDP_PORT_PRIMARY && isCarrotBridgeDaemonActive()) {
+                    try { Thread.sleep(3000L); } catch (InterruptedException ignored) {}
+                    continue;
+                }
                 DatagramSocket sock = null;
                 try {
                     sock = new DatagramSocket(null);
                     sock.setReuseAddress(true);
+                    sock.setSoTimeout(3000);
                     sock.bind(new InetSocketAddress(port));
                     byte[] buf = new byte[4096];
                     DatagramPacket pkt = new DatagramPacket(buf, buf.length);
                     while (true) {
+                        if (port == CARROT_UDP_PORT_PRIMARY && isCarrotBridgeDaemonActive()) {
+                            break;
+                        }
                         pkt.setLength(buf.length);
-                        sock.receive(pkt);
+                        try {
+                            sock.receive(pkt);
+                        } catch (java.net.SocketTimeoutException ste) {
+                            continue;
+                        }
+                        String senderIp = (pkt.getAddress() != null) ? pkt.getAddress().getHostAddress() : "";
+                        boolean fromRemoteComma = isValidRemoteCarrotIp(senderIp);
                         String json = new String(pkt.getData(), pkt.getOffset(), pkt.getLength(), UTF8);
                         synchronized (liveSnapshot) {
-                            if (parseCarrotManJson(json, liveSnapshot)) {
-                                if ((liveSnapshot.carrotIp == null || liveSnapshot.carrotIp.isEmpty()) && pkt.getAddress() != null) {
-                                    liveSnapshot.carrotIp = pkt.getAddress().getHostAddress();
+                            if (fromRemoteComma) {
+                                liveSnapshot.carrotIp = senderIp;
+                            }
+                            if (parseCarrotManJson(json, liveSnapshot, fromRemoteComma)) {
+                                if (fromRemoteComma) {
+                                    lastCarrotRxMs = System.currentTimeMillis();
                                 }
-                                lastCarrotRxMs = System.currentTimeMillis();
                             }
                         }
                     }
@@ -3682,10 +3850,18 @@ public class TurzxMonitorMain {
                     synchronized (liveSnapshot) {
                         ip = liveSnapshot.carrotIp;
                     }
-                    if (ip == null || ip.isEmpty()) {
+                    if (!isValidRemoteCarrotIp(ip)) {
                         ip = TurzxOverlayController.getConfig().commaIp;
                     }
-                    if (ip == null || ip.isEmpty()) {
+                    if (!isValidRemoteCarrotIp(ip)) {
+                        ip = scanWlanArpCarrotIp();
+                        if (isValidRemoteCarrotIp(ip)) {
+                            synchronized (liveSnapshot) {
+                                liveSnapshot.carrotIp = ip;
+                            }
+                        }
+                    }
+                    if (!isValidRemoteCarrotIp(ip)) {
                         Thread.sleep(2500L);
                         continue;
                     }
@@ -3888,6 +4064,8 @@ public class TurzxMonitorMain {
             c.hvacSync = liveSnapshot.hvacSync;
             c.hvacDriverOnly = liveSnapshot.hvacDriverOnly;
             c.hvacFrontDefog = liveSnapshot.hvacFrontDefog;
+            c.hvacRearDefog = liveSnapshot.hvacRearDefog;
+            c.hvacSteerHeat = liveSnapshot.hvacSteerHeat;
             c.hvacRecirc = liveSnapshot.hvacRecirc;
             c.hvacAds = liveSnapshot.hvacAds;
             c.hvacBlowerStep = liveSnapshot.hvacBlowerStep;
@@ -4561,6 +4739,9 @@ public class TurzxMonitorMain {
                 sb.append("  tmHscanService      : ").append(TelemetryCollector.tmHscanService != null ? TelemetryCollector.tmHscanService.getClass().getName() : "null").append("\n");
                 sb.append("  datcService         : ").append(TelemetryCollector.datcService != null ? TelemetryCollector.datcService.getClass().getName() : "null")
                         .append(" (listenerReg=").append(TelemetryCollector.datcListenerRegistered).append(")\n");
+                sb.append("  bcmService          : ").append(TelemetryCollector.bcmService != null ? TelemetryCollector.bcmService.getClass().getName() : "null")
+                        .append(" (listenerReg=").append(TelemetryCollector.bcmListenerRegistered)
+                        .append(", lastCb=").append(TelemetryCollector.lastRawBcmHeatingCallback).append(")\n");
                 sb.append("  hscanMicomService   : ").append(TelemetryCollector.hscanMicomService != null ? TelemetryCollector.hscanMicomService.getClass().getName() : "null")
                         .append(" (listenerReg=").append(TelemetryCollector.hscanListenerRegistered).append(")\n");
                 sb.append("  clusterService      : ").append(TelemetryCollector.clusterService != null ? TelemetryCollector.clusterService.getClass().getName() : "null")
@@ -5706,7 +5887,81 @@ public class TurzxMonitorMain {
         }
     }
 
+    public static boolean isValidRemoteCarrotIp(String ip) {
+        if (ip == null) return false;
+        String s = ip.trim();
+        if (s.isEmpty()) return false;
+        if (s.startsWith("127.") || "0.0.0.0".equals(s)
+                || "192.168.0.1".equals(s) || "192.168.43.1".equals(s)
+                || s.endsWith(".255")) {
+            return false;
+        }
+        return true;
+    }
+
+    public static String scanWlanArpCarrotIp() {
+        File arp = new File("/proc/net/arp");
+        if (!arp.isFile()) return "";
+        BufferedReader br = null;
+        try {
+            br = new BufferedReader(new InputStreamReader(new FileInputStream(arp), UTF8));
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith("IP address")) continue;
+                String[] parts = line.trim().split("\\s+");
+                if (parts.length >= 6) {
+                    String ip = parts[0];
+                    String flags = parts[2];
+                    String dev = parts[5];
+                    if ("wlan0".equals(dev) && !"0x0".equals(flags) && isValidRemoteCarrotIp(ip)) {
+                        return ip;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            if (br != null) { try { br.close(); } catch (Throwable ignored) {} }
+        }
+        return "";
+    }
+
+    /**
+     * Parses /data/local/tmp/carrotbridge_status.json written by HKG_5W_CarrotNavi (carrotnavi.bridge):
+     * 1. Extracts discoveredCarrotIp (or targets IP on wlan0, e.g. 192.168.0.103) -> target.carrotIp.
+     * 2. Extracts lastPacket MNSOFT navigation SDI/TBT fields so genuine headunit speed camera, section
+     *    enforcement, road limit, and TBT turn distance/road name are reflected on the HUD.
+     */
+    public static boolean parseCarrotBridgeStatusJson(String statusJson, TelemetrySnapshot target) {
+        if (statusJson == null || target == null || !statusJson.contains("{")) return false;
+        boolean updated = false;
+        String discIp = extractJsonString(statusJson, "discoveredCarrotIp");
+        if (isValidRemoteCarrotIp(discIp)) {
+            target.carrotIp = discIp.trim();
+            updated = true;
+        } else {
+            String targetsStr = extractJsonString(statusJson, "targets");
+            if (targetsStr != null && !targetsStr.isEmpty()) {
+                String[] toks = targetsStr.split("[,\\[\\]\\s]+");
+                for (int i = 0; i < toks.length; i++) {
+                    if (isValidRemoteCarrotIp(toks[i])) {
+                        target.carrotIp = toks[i].trim();
+                        updated = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (parseCarrotManJson(statusJson, target, false)) {
+            updated = true;
+        }
+        return updated;
+    }
+
     public static boolean parseCarrotManJson(String json, TelemetrySnapshot target) {
+        return parseCarrotManJson(json, target, true);
+    }
+
+    public static boolean parseCarrotManJson(String json, TelemetrySnapshot target, boolean markConnectedIfMatched) {
         if (json == null || target == null || !json.contains("{")) return false;
         boolean matched = false;
         Integer vEgo = extractJsonInt(json, "v_ego_kph");
@@ -5718,26 +5973,71 @@ public class TurzxMonitorMain {
         Boolean active = extractJsonBool(json, "active");
         if (active == null) active = extractJsonBool(json, "activeCarrot");
         if (active != null) { target.carrotActive = active.booleanValue(); matched = true; }
+
         Integer sdiType = extractJsonInt(json, "sdi_type");
         if (sdiType == null) sdiType = extractJsonInt(json, "xSpdType");
-        if (sdiType != null) { target.carrotSdiType = sdiType.intValue(); matched = true; }
         Integer sdiLim = extractJsonInt(json, "sdi_speed_limit");
         if (sdiLim == null) sdiLim = extractJsonInt(json, "xSpdLimit");
-        if (sdiLim == null) sdiLim = extractJsonInt(json, "nRoadLimitSpeed");
-        if (sdiLim != null) { target.carrotSdiSpeedLimit = sdiLim.intValue(); matched = true; }
         Integer sdiDist = extractJsonInt(json, "sdi_dist");
         if (sdiDist == null) sdiDist = extractJsonInt(json, "xSpdDist");
-        if (sdiDist != null) { target.carrotSdiDistM = sdiDist.intValue(); matched = true; }
+
+        // Support HKG_5W_CarrotNavi (CarrotPacket 7706) SDI fields (nSdiType, nSdiSpeedLimit, nSdiDist, nSdiBlockType, nRoadLimitSpeed)
+        Integer nRoadLim = extractJsonInt(json, "nRoadLimitSpeed");
+        Integer nSdiType = extractJsonInt(json, "nSdiType");
+        Integer nSdiLim = extractJsonInt(json, "nSdiSpeedLimit");
+        Integer nSdiDist = extractJsonInt(json, "nSdiDist");
+        Integer nBlockType = extractJsonInt(json, "nSdiBlockType");
+        Integer nBlockSpd = extractJsonInt(json, "nSdiBlockSpeed");
+        Integer nBlockDist = extractJsonInt(json, "nSdiBlockDist");
+
+        if (sdiType != null || sdiLim != null || sdiDist != null) {
+            if (sdiType != null) { target.carrotSdiType = sdiType.intValue(); matched = true; }
+            if (sdiLim != null && sdiLim.intValue() > 0 && sdiLim.intValue() <= 140) {
+                target.carrotSdiSpeedLimit = sdiLim.intValue();
+                matched = true;
+            } else if (nRoadLim != null && nRoadLim.intValue() > 0 && nRoadLim.intValue() <= 140) {
+                target.carrotSdiSpeedLimit = nRoadLim.intValue();
+                matched = true;
+            }
+            if (sdiDist != null && sdiDist.intValue() >= 0) { target.carrotSdiDistM = sdiDist.intValue(); matched = true; }
+        } else if (nSdiType != null || nRoadLim != null) {
+            int roadLim = (nRoadLim != null && nRoadLim.intValue() > 0 && nRoadLim.intValue() <= 140) ? nRoadLim.intValue() : 80;
+            boolean isSection = (nSdiType != null && nSdiType.intValue() == 4) || (nBlockType != null && nBlockType.intValue() > 0);
+            int camLim = (nSdiLim != null && nSdiLim.intValue() > 0 && nSdiLim.intValue() <= 135) ? nSdiLim.intValue() : 0;
+            int camDist = (nSdiDist != null && nSdiDist.intValue() > 0 && nSdiDist.intValue() < 1023) ? nSdiDist.intValue() : 0;
+            if (isSection) {
+                int secLim = (nBlockSpd != null && nBlockSpd.intValue() > 0 && nBlockSpd.intValue() <= 135)
+                        ? nBlockSpd.intValue() : (camLim > 0 ? camLim : roadLim);
+                int secDist = (nBlockDist != null && nBlockDist.intValue() > 0 && nBlockDist.intValue() < 65535)
+                        ? nBlockDist.intValue() : Math.max(camDist, 100);
+                target.carrotSdiType = 4;
+                target.carrotSdiSpeedLimit = secLim;
+                target.carrotSdiDistM = secDist;
+                matched = true;
+            } else if (nSdiType != null && nSdiType.intValue() >= 0 && camLim > 0 && camDist > 0) {
+                target.carrotSdiType = (nSdiType.intValue() == 0) ? 1 : nSdiType.intValue();
+                target.carrotSdiSpeedLimit = camLim;
+                target.carrotSdiDistM = camDist;
+                matched = true;
+            } else {
+                target.carrotSdiType = -1;
+                target.carrotSdiSpeedLimit = roadLim;
+                target.carrotSdiDistM = 0;
+                matched = true;
+            }
+        }
+
         Integer tbtDist = extractJsonInt(json, "tbt_dist");
         if (tbtDist == null) tbtDist = extractJsonInt(json, "xDistToTurn");
-        if (tbtDist != null) { target.carrotTbtDistM = tbtDist.intValue(); matched = true; }
+        if (tbtDist == null) tbtDist = extractJsonInt(json, "nTBTDist");
+        if (tbtDist != null && tbtDist.intValue() > 0) { target.carrotTbtDistM = tbtDist.intValue(); matched = true; }
         String road = extractJsonString(json, "tbt_road");
         if (road == null || road.isEmpty()) road = extractJsonString(json, "szTBTMainText");
         if (road == null || road.isEmpty()) road = extractJsonString(json, "szPosRoadName");
         if (road != null && !road.isEmpty()) { target.carrotTbtRoad = road; matched = true; }
         String ip = extractJsonString(json, "ip");
-        if (ip != null && !ip.isEmpty()) { target.carrotIp = ip; matched = true; }
-        if (matched) target.carrotConnected = true;
+        if (isValidRemoteCarrotIp(ip)) { target.carrotIp = ip.trim(); matched = true; }
+        if (matched && markConnectedIfMatched) target.carrotConnected = true;
         return matched;
     }
 
@@ -5771,6 +6071,10 @@ public class TurzxMonitorMain {
         if (inCar != null && inCar.doubleValue() > -50.0) target.inCarTempC = inCar.doubleValue();
         Double outT = extractJsonDouble(json, "outdoorTempC");
         if (outT != null && outT.doubleValue() > -50.0) target.outdoorTempC = outT.doubleValue();
+        Boolean fDef = extractJsonBool(json, "frontDefog");
+        if (fDef != null) target.hvacFrontDefog = fDef.booleanValue();
+        Boolean rDef = extractJsonBool(json, "rearDefog");
+        if (rDef != null) target.hvacRearDefog = rDef.booleanValue();
     }
 
     public static String formatTelemetryJson(TelemetrySnapshot ev) {
@@ -5799,6 +6103,8 @@ public class TurzxMonitorMain {
         sb.append(",\"sync\":").append(ev.hvacSync);
         sb.append(",\"driverOnly\":").append(ev.hvacDriverOnly);
         sb.append(",\"frontDefog\":").append(ev.hvacFrontDefog);
+        sb.append(",\"rearDefog\":").append(ev.hvacRearDefog);
+        sb.append(",\"steerHeat\":").append(ev.hvacSteerHeat);
         sb.append(",\"recirc\":").append(ev.hvacRecirc);
         sb.append(",\"blowerStep\":").append(ev.hvacBlowerStep);
         sb.append(",\"blowerMode\":").append(ev.hvacBlowerMode);
@@ -5958,6 +6264,8 @@ public class TurzxMonitorMain {
                     "getHeatOnOff", "getHeatStatus", "getHeaterOnOff", "mHeatOnOff");
             int defog = readObjIntAny(statusObj, -1,
                     "getFrontDefrostStatus", "getFrontDefog", "mFrontDefog", "frontDefog");
+            int autoDefogBlink = readObjIntAny(statusObj, -1,
+                    "getAutoDefogBlink", "mAutoDefogBlink", "autoDefogBlink");
             int intake = readObjIntAny(statusObj, -1,
                     "getIntake", "getAirIntakeStatus", "getIntakeMode", "mIntake", "intake");
             int sync = readObjIntAny(statusObj, -1,
@@ -6039,10 +6347,11 @@ public class TurzxMonitorMain {
             if (auto == 0 || auto == 1) target.hvacAuto = (auto == 1) || (rawLevel == 10) || (mode == 8);
             if (ac == 0 || ac == 1) target.hvacAc = (ac == 1);
             if (heat == 0 || heat == 1) target.hvacHeat = (heat == 1);
+            boolean isDefMode = (mode == 5) || (mode == 6) || (mode == 10) || (mode == 14) || (autoDefogBlink == 1);
             if (defog == 0 || defog == 1) {
-                target.hvacFrontDefog = (defog == 1) || (mode == 5) || (mode == 6);
+                target.hvacFrontDefog = (defog == 1) || isDefMode;
             } else if (mode >= 0 && mode != 15) {
-                target.hvacFrontDefog = (mode == 5) || (mode == 6);
+                target.hvacFrontDefog = isDefMode;
             }
             if (intake == 0 || intake == 1) target.hvacRecirc = (intake == 1);
             if (drvOnly == 0 || drvOnly == 1) target.hvacDriverOnly = (drvOnly == 1);
@@ -6102,6 +6411,35 @@ public class TurzxMonitorMain {
         if (a.contains("mirrorlink")) return "MirrorLink";
         if (a.contains("mconnect")) return "MConnect";
         return "";
+    }
+
+    public static boolean parseBcmDefoggerLogLine(String line, TelemetrySnapshot target) {
+        if (line == null || target == null) return false;
+        int idx = line.indexOf("RES_DEFOGGER_STATE");
+        if (idx >= 0) {
+            String tail = line.substring(idx + "RES_DEFOGGER_STATE".length()).trim();
+            if (tail.startsWith(":")) tail = tail.substring(1).trim();
+            if (tail.startsWith("1")) {
+                target.hvacRearDefog = true;
+                return true;
+            } else if (tail.startsWith("0")) {
+                target.hvacRearDefog = false;
+                return true;
+            }
+        }
+        int idx2 = line.indexOf("C_DefoggerRly)");
+        if (idx2 >= 0) {
+            String tail = line.substring(idx2 + "C_DefoggerRly)".length()).trim();
+            if (tail.startsWith(":")) tail = tail.substring(1).trim();
+            if (tail.startsWith("1")) {
+                target.hvacRearDefog = true;
+                return true;
+            } else if (tail.startsWith("0")) {
+                target.hvacRearDefog = false;
+                return true;
+            }
+        }
+        return false;
     }
 
     public static int parseClusterMediaLogLine(String line, TelemetrySnapshot target) {
@@ -6262,7 +6600,9 @@ public class TurzxMonitorMain {
 
     public static int normalizeDatcBlowerMode(int rawMode) {
         // Genuine com.hkmc.datc.DATCConstants$DatcModeDisp (verified against automotive.odex & DE22EV live dump):
-        // OFF = 0, VENT = 1, BL = 2, FLOOR = 3, MIX = 4, DEF = 5, AUTODEFLOG = 6, DEF_VENT = 7, MODE_AUTO = 8, DEF_VENT_FLOOR = 9, DEF_7MODE = 10, INVALID = 15
+        // OFF = 0, VENT = 1, BL = 2, FLOOR = 3, MIX = 4, DEF = 5, AUTODEFLOG = 6, DEF_VENT = 7,
+        // MODE_AUTO / DEFFL = 8, DEF_VENT_FLOOR = 9, DEF_7MODE = 10,
+        // DEF_VENT_ARROW = 11, DEF_FLOOR_ARROW = 12, DEF_VENT_FLOOR_ARROW = 13, DEF_ARROW = 14, INVALID = 15
         switch (rawMode) {
             case 0: return 0; // OFF
             case 1: return 1; // VENT (상체)
@@ -6271,10 +6611,14 @@ public class TurzxMonitorMain {
             case 4: return 4; // MIX (유리·하체)
             case 5: return 5; // DEF (전면유리)
             case 6: return 5; // AUTODEFLOG
-            case 7: return 1; // DEF_VENT
+            case 7: return 7; // DEF_VENT (유리·상체)
             case 8: return 2; // MODE_AUTO
-            case 9: return 2; // DEF_VENT_FLOOR
-            case 10: return 5; // DEF_7MODE
+            case 9: return 9; // DEF_VENT_FLOOR (유리·상·하체)
+            case 10: return 5; // DEF_7MODE (전면유리)
+            case 11: return 7; // DEF_VENT_ARROW (유리·상체)
+            case 12: return 4; // DEF_FLOOR_ARROW (유리·하체)
+            case 13: return 9; // DEF_VENT_FLOOR_ARROW (유리·상·하체)
+            case 14: return 5; // DEF_ARROW (전면유리)
             default:
                 return -1;
         }
@@ -6733,6 +7077,23 @@ public class TurzxMonitorMain {
         assertTrue(snap.carrotSpeedKph == 88 && snap.carrotSdiType == 1 && snap.carrotSdiDistM == 290,
                 "Expected CarrotMan UDP fields updated");
 
+        // Verify HKG_5W_CarrotNavi (carrotnavi.bridge) status JSON integration & 192.168.0.1 SoftAP gateway exclusion
+        assertTrue(!isValidRemoteCarrotIp("192.168.0.1") && !isValidRemoteCarrotIp("192.168.0.255")
+                && !isValidRemoteCarrotIp("127.0.0.1") && isValidRemoteCarrotIp("192.168.0.103"),
+                "Expected isValidRemoteCarrotIp to reject headunit gateway/broadcast and accept 192.168.0.103");
+        String sampleCarrotBridgeStatus = "{\n"
+                + "  \"bridgeVersion\": \"1.2.4\",\n"
+                + "  \"timestampMs\": 1793090632998,\n"
+                + "  \"discoveredCarrotIp\": \"192.168.0.103\",\n"
+                + "  \"targets\": \"[192.168.0.103]\",\n"
+                + "  \"lastPacket\": {\"carrotIndex\":6901,\"nRoadLimitSpeed\":70,\"nSdiType\":1,\"nSdiSpeedLimit\":60,\"nSdiDist\":320,\"nTBTDist\":410,\"szTBTMainText\":\"양재IC\"}\n"
+                + "}";
+        assertTrue(parseCarrotBridgeStatusJson(sampleCarrotBridgeStatus, snap), "Expected carrotbridge_status.json parse");
+        assertTrue("192.168.0.103".equals(snap.carrotIp) && snap.carrotSdiType == 1
+                && snap.carrotSdiSpeedLimit == 60 && snap.carrotSdiDistM == 320
+                && snap.carrotTbtDistM == 410 && "양재IC".equals(snap.carrotTbtRoad),
+                "Expected HKG_5W_CarrotNavi discoveredCarrotIp=192.168.0.103 and SDI/TBT applied");
+
         // 5. Verify Telemetry JSON serialization & Config persistence
         String json = formatTelemetryJson(snap);
         assertTrue(json.contains("\"soc\":37.0") && json.contains("\"inCarTempC\":22.5")
@@ -6822,6 +7183,23 @@ public class TurzxMonitorMain {
                     && snap.hvacAuto && snap.hvacHeat && !snap.hvacAc && snap.hvacRecirc && snap.hvacSync
                     && Math.abs(snap.hvacDrTempC - 25.5) < 0.01 && Math.abs(snap.hvacPsTempC - 25.5) < 0.01,
                     "Expected genuine DE22EV live DATC ON state applied accurately");
+
+            // Verify windshield airflow modes (DEF=5, DEF_VENT=7, DEF_VENT_FLOOR=9, *_ARROW=11..14) & BCM Rear Defogger (C_DefoggerRly)
+            assertTrue(normalizeDatcBlowerMode(5) == 5 && normalizeDatcBlowerMode(7) == 7
+                    && normalizeDatcBlowerMode(9) == 9 && normalizeDatcBlowerMode(11) == 7
+                    && normalizeDatcBlowerMode(12) == 4 && normalizeDatcBlowerMode(13) == 9
+                    && normalizeDatcBlowerMode(14) == 5,
+                    "Expected all windshield DatcModeDisp constants (DEF, DEF_VENT, DEF_VENT_FLOOR, *_ARROW) preserved");
+            assertTrue(parseBcmDefoggerLogLine("I/BCMService( 1042): RES_DEFOGGER_STATE 1", snap) && snap.hvacRearDefog,
+                    "Expected BCMService RES_DEFOGGER_STATE 1 to set hvacRearDefog=true");
+            assertTrue(parseBcmDefoggerLogLine("I/HKMC_TAppService( 1420): onRemoteTeleHeatingStatusChanged() Side_Back Heating Status(C_DefoggerRly) : 0", snap) && !snap.hvacRearDefog,
+                    "Expected C_DefoggerRly : 0 to set hvacRearDefog=false");
+            BcmListenerBridge bcmBridge = new BcmListenerBridge();
+            bcmBridge.onRemoteTeleHeatingStatusChanged(1, 1);
+            TelemetrySnapshot bcmSnap = TelemetryCollector.getLatestSnapshot();
+            assertTrue(bcmSnap.hvacSteerHeat && bcmSnap.hvacRearDefog,
+                    "Expected BcmListenerBridge.onRemoteTeleHeatingStatusChanged(1, 1) to set steerHeat & rearDefog");
+            bcmBridge.onRemoteTeleHeatingStatusChanged(0, 0);
 
             // Verify AvWidgetMainView media broadcast receiver (com.hkmc.audio.btaudio.widgetupdate + timeupdate)
             android.content.Intent btIntent = new android.content.Intent("com.hkmc.audio.btaudio.widgetupdate");
