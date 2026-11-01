@@ -1,0 +1,3259 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hyundai · Kia ccNC — TURZX 9.2" (1920×462) HiDPI Cluster</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
+  <style>
+    :root {
+      /* Dealt data-terminal tokens + Hyundai/Kia ccNC 'Seon (선)' surface hierarchy */
+      --ground: #171719;
+      --surface: #131217;
+      --raised: #212023;
+      --border: #222224;
+      --rule: #1b1a1f;
+      --control: #3a3a3e;
+      --text: #ffffff;
+      --secondary: #bdbdc0;
+      --muted: #8a8c92;
+      --accent: #4a8ad6;
+      --positive: #44a282;
+      --negative: #e5566f;
+      --warning: #d9a441;
+
+      --pill-pos-bg: #1b2828;
+      --pill-pos-fg: #5fc39c;
+      --pill-neg-bg: #2c1a20;
+      --pill-neg-fg: #e5566f;
+      --pill-warn-bg: #2a2416;
+      --pill-warn-fg: #d9a441;
+      --pill-neu-bg: #212023;
+      --pill-neu-fg: #bdbdc0;
+
+      --radius-card: 6px;
+      --font-sans: "Public Sans", "Pretendard Variable", "Pretendard", Inter, system-ui, -apple-system, sans-serif;
+    }
+
+    body[data-theme="kia"] {
+      --accent: #44a282;
+    }
+
+    body[data-theme="genesis"] {
+      --accent: #d9a441;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      background-color: var(--ground);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 13px;
+      line-height: 1.45;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 18px 24px 28px;
+      gap: 16px;
+      overflow-x: hidden;
+    }
+
+    /* ==========================================================================
+       1. TOP COMMAND & STUDIO BAR (ccNC 'Seon' 1px edge selection)
+       ========================================================================== */
+    .studio-header {
+      width: 100%;
+      max-width: 1920px;
+      background-color: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-card);
+      padding: 0 20px;
+      min-height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-mark {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text);
+      padding: 14px 0;
+      border-bottom: 2px solid var(--accent);
+    }
+
+    .brand-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text);
+      margin: 0;
+    }
+
+    .brand-subtitle {
+      font-size: 13px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .studio-controls {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+
+    .tab-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .tab-group-label {
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    .edge-tab {
+      background: transparent;
+      border: none;
+      border-bottom: 1px solid transparent;
+      color: var(--muted);
+      font-family: var(--font-sans);
+      font-size: 13px;
+      font-weight: 500;
+      padding: 15px 2px 14px;
+      cursor: pointer;
+      transition: color 0.15s ease, border-color 0.15s ease;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .edge-tab:hover {
+      color: var(--text);
+    }
+
+    .edge-tab.active {
+      color: var(--text);
+      font-weight: 600;
+      border-bottom-color: var(--accent);
+    }
+
+    /* ==========================================================================
+       2. TURZX 9.2" PHYSICAL 1:1 STAGE & PPI CALIBRATION
+       ========================================================================== */
+    .monitor-stage {
+      width: 100%;
+      max-width: 1920px;
+      background-color: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-card);
+      padding: 14px 20px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .physical-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--rule);
+      flex-wrap: wrap;
+    }
+
+    .physical-spec-summary {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      font-size: 13px;
+      color: var(--secondary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .physical-spec-summary strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .ppi-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .ppi-label {
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    .ppi-btn {
+      background-color: var(--raised);
+      border: 1px solid var(--border);
+      border-top: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--muted);
+      font-family: var(--font-sans);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 5px 9px;
+      cursor: pointer;
+      font-variant-numeric: tabular-nums;
+      transition: color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .ppi-btn:hover {
+      color: var(--text);
+    }
+
+    .ppi-btn.active {
+      color: var(--text);
+      font-weight: 600;
+      border-top: 2px solid var(--accent);
+    }
+
+    .physical-comparison-row {
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      gap: 24px;
+      flex-wrap: wrap;
+      padding: 2px 0;
+    }
+
+    .turzx-device-unit {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dim-ruler-h {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      padding: 0 4px;
+    }
+
+    .dim-ruler-h::before,
+    .dim-ruler-h::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background-color: var(--border);
+    }
+
+    .dim-ruler-h span {
+      padding: 0 10px;
+      color: var(--secondary);
+      font-weight: 500;
+    }
+
+    .turzx-housing-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .dim-ruler-v {
+      writing-mode: vertical-rl;
+      text-orientation: mixed;
+      font-size: 12px;
+      color: var(--secondary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .turzx-housing {
+      background-color: #0d0d0f;
+      border: 1px solid var(--control);
+      border-radius: 8px;
+      padding: 10px 12px;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .turzx-lcd-clip {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background-color: var(--ground);
+    }
+
+    /* ==========================================================================
+       3. HiDPI 2.0x LOGICAL CANVAS (960 × 231 dp = 1920 × 462 px @ 2x)
+       Zero-Header Full-Bleed Automotive HUD Layout for Real 9.2" Legibility
+       ========================================================================== */
+    .turzx-lcd {
+      width: 960px;
+      height: 231px;
+      background-color: var(--ground);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transform-origin: top left;
+    }
+
+    .ccnc-canvas {
+      flex: 1;
+      padding: 6px;
+      display: grid;
+      /* 3 Columns: [1] EV+TPMS (292dp) | [2] Comma+CarrotNavi HUD (-25%: 388dp -> 291dp) | [3] Expanded Media+Climate (353dp) */
+      grid-template-columns: 292px 291px 1fr;
+      gap: 6px;
+      min-height: 0;
+    }
+
+    .ccnc-panel {
+      background-color: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    /* ==========================================================================
+       COLUMN 1: EV (2×2 Large Readout) + TPMS 4-Wheel Strip
+       ========================================================================== */
+    .ev-tpms-split {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 198px 1fr;
+      min-height: 0;
+    }
+
+    .ev-quad-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr;
+      border-right: 1px solid var(--rule);
+      min-height: 0;
+    }
+
+    .ev-cell {
+      padding: 7px 8px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      border-right: 1px solid var(--rule);
+      border-bottom: 1px solid var(--rule);
+      min-width: 0;
+    }
+
+    .ev-cell:nth-child(2n) {
+      border-right: none;
+    }
+
+    .ev-cell:nth-child(n+3) {
+      border-bottom: none;
+    }
+
+    .ev-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .ev-figure-row {
+      display: flex;
+      align-items: baseline;
+      gap: 2px;
+      white-space: nowrap;
+    }
+
+    /* 26px in 960dp = 52px in 1920px hardware framebuffer! */
+    .ev-figure {
+      font-size: 26px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .ev-figure.compact {
+      font-size: 22px;
+    }
+
+    .ev-unit {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .ev-subline {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--secondary);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .ccnc-bar-track {
+      width: 100%;
+      height: 4px;
+      background-color: var(--raised);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    .ccnc-bar-fill {
+      height: 100%;
+      background-color: var(--accent);
+      transition: width 0.25s ease;
+    }
+
+    .ccnc-bar-fill.pos {
+      background-color: var(--positive);
+    }
+
+    /* TPMS Sub-Pane (Compact High-Contrast 4-Corner Readout) */
+    .tpms-pane {
+      padding: 7px 7px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-width: 0;
+    }
+
+    .tpms-header-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .tpms-status-dot {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--positive);
+    }
+
+    .tpms-status-dot.warn {
+      color: var(--warning);
+    }
+
+    .tpms-diagram-grid {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 22px 1fr;
+      grid-template-rows: 1fr 1fr;
+      align-items: center;
+      gap: 2px;
+      margin: 2px 0;
+    }
+
+    .tpms-car-center {
+      grid-column: 2 / 3;
+      grid-row: 1 / 3;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+    }
+
+    .tpms-wheel-node {
+      display: flex;
+      flex-direction: column;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .tpms-wheel-node.right {
+      text-align: right;
+      align-items: flex-end;
+    }
+
+    .tpms-pos-label {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--muted);
+      line-height: 1;
+    }
+
+    /* 18px in 960dp = 36px in 1920px framebuffer */
+    .tpms-psi-val {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1.1;
+    }
+
+    .tpms-psi-val.warn {
+      color: var(--warning);
+    }
+
+    .tpms-foot-bar {
+      padding-top: 4px;
+      border-top: 1px solid var(--rule);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--muted);
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    /* ==========================================================================
+       COLUMN 2: FULL-BLEED COMMA 3X ROAD + ULTRA-COMPACT SDI/TBT STAMPS
+       ========================================================================== */
+    .panel-navi {
+      background-color: #0d0d10;
+      position: relative;
+    }
+
+    .comma-fused-stage {
+      position: relative;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .comma-road-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      z-index: 1;
+    }
+
+    /* Top Floating HUD Row (No bulky outer wrapper card — floats directly on road) */
+    .comma-fused-top {
+      position: relative;
+      z-index: 2;
+      padding: 6px 8px;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 6px;
+      pointer-events: none;
+    }
+
+    .hud-left-stamps {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 6px;
+    }
+
+    /* Compact Speed + Cruise + Gear/LFA HUD Stamp (Top-Left Primary Focal Anchor) */
+    .speed-stamp {
+      background-color: var(--surface);
+      border: 1px solid var(--border);
+      border-top: 2px solid var(--positive);
+      border-radius: 5px;
+      padding: 4px 8px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .hud-gear-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      padding-right: 5px;
+      border-right: 1px solid var(--rule);
+      line-height: 1;
+    }
+
+    .hud-gear-char {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .hud-lfa-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: var(--positive);
+      display: inline-block;
+    }
+
+    .comma-ego-num {
+      font-size: 30px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 0.95;
+      letter-spacing: -0.03em;
+    }
+
+    .comma-cruise-col {
+      display: flex;
+      flex-direction: column;
+      border-left: 1px solid var(--rule);
+      padding-left: 6px;
+      line-height: 1.05;
+    }
+
+    .comma-cruise-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .comma-cruise-val {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--positive);
+      white-space: nowrap;
+    }
+
+    /* ==========================================================================
+       COMPACT KOREAN NAVI SDI CAMERA WIDGET (Matches User Reference Images 1 & 2)
+       - Mode 1 (Section): Top "구간" cap + Red "80" circle + Bottom "2.3 km" + Right "평균속도 80" wing
+       - Mode 2 (Signal):  Top Traffic-Light (R/Y/G) cap + Red "50" circle + Bottom "130 m" (No wing)
+       ========================================================================== */
+    .sdi-compact-widget {
+      display: inline-flex;
+      align-items: flex-start;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .sdi-sign-stack {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      position: relative;
+      z-index: 2;
+    }
+
+    /* Top Cap overlapping the red speed limit ring */
+    .sdi-top-cap {
+      position: relative;
+      z-index: 3;
+      margin-bottom: -6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .sdi-cap-section {
+      background-color: #f2f2f3;
+      color: #131217;
+      border: 1px solid #222224;
+      border-radius: 3px;
+      padding: 0 5px;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.25;
+      white-space: nowrap;
+    }
+
+    .sdi-cap-traffic {
+      background-color: #171719;
+      border: 1.5px solid #ffffff;
+      border-radius: 999px;
+      padding: 2px 5px;
+      display: none;
+      align-items: center;
+      gap: 3px;
+    }
+
+    .tl-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .tl-dot.r { background-color: #e5566f; }
+    .tl-dot.y { background-color: #d9a441; }
+    .tl-dot.g { background-color: #44a282; }
+
+    /* Red Speed Limit Circle (Active Camera) & Blue Circle (No Camera / Normal Road Limit) */
+    .sdi-limit-circle {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      background-color: #ffffff;
+      border: 5px solid var(--negative);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      z-index: 2;
+      transition: border-color 0.15s ease;
+    }
+
+    .sdi-limit-circle.idle-blue {
+      border-color: #4a8ad6;
+    }
+
+    .sdi-limit-circle span {
+      font-size: 18px;
+      font-weight: 700;
+      color: #131217;
+      letter-spacing: -0.04em;
+      line-height: 1;
+    }
+
+    /* Distance pill directly under the circle ("2.3 km" / "130 m") */
+    .sdi-bottom-dist {
+      margin-top: -3px;
+      background-color: #212023;
+      border: 1px solid var(--control);
+      border-radius: 3px;
+      padding: 1px 6px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1.2;
+      white-space: nowrap;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Right Wing for Section Average Speed ("평균속도 / 80") */
+    .sdi-avg-wing {
+      margin-left: -6px;
+      margin-top: 9px;
+      background-color: #212023;
+      border: 1px solid var(--control);
+      border-left: none;
+      border-radius: 0 5px 5px 0;
+      padding: 3px 8px 3px 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 1;
+    }
+
+    .sdi-avg-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--secondary);
+      line-height: 1.05;
+      white-space: nowrap;
+    }
+
+    .sdi-avg-num {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--positive);
+      line-height: 1.05;
+      white-space: nowrap;
+    }
+
+    /* Top-Right Ultra-Compact TBT Stamp */
+    .tbt-compact-stamp {
+      background-color: var(--surface);
+      border: 1px solid var(--border);
+      border-top: 2px solid var(--accent);
+      border-radius: 5px;
+      padding: 4px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .tbt-main-line {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .tbt-dist-figure {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .tbt-road-sub {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--secondary);
+      white-space: nowrap;
+      border-top: 1px solid var(--rule);
+      padding-top: 2px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
+    .tbt-road-sub strong {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    /* Bottom Floating Corner Pills (Road goes full-bleed to bottom edge) */
+    .comma-corner-foot {
+      position: relative;
+      z-index: 2;
+      padding: 0 6px 5px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      pointer-events: none;
+    }
+
+    .corner-chip {
+      background-color: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 2px 7px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--secondary);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .lane-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: var(--positive);
+      display: inline-block;
+    }
+
+    .corner-chip strong {
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    /* ==========================================================================
+       COLUMN 3: STACKED MEDIA (Top) + ICON CLIMATE BAR (Bottom)
+       ========================================================================== */
+    .right-stack-col {
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 6px;
+      min-width: 0;
+      min-height: 0;
+    }
+
+    /* Top: Media Info + Progress Bar Only (Exact 1:1 Height with Climate) */
+    .panel-media {
+      padding: 8px 14px;
+      flex-direction: row;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .media-artwork-frame {
+      width: 88px;
+      height: 88px;
+      border-radius: 8px;
+      background-color: var(--raised);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+
+    .media-right-col {
+      flex: 1;
+      min-width: 0;
+      height: 86px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 2px 0;
+    }
+
+    .media-text-stack {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 4px;
+    }
+
+    .media-track-name {
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.02em;
+      line-height: 1.12;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .media-artist-album {
+      font-size: 15px;
+      font-weight: 500;
+      color: var(--secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .media-progress-block {
+      width: 88%;
+      max-width: 205px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .media-progress-rail {
+      width: 100%;
+      height: 5px;
+      background-color: var(--raised);
+      border-radius: 2.5px;
+      overflow: hidden;
+    }
+
+    .media-progress-bar {
+      height: 100%;
+      width: 57%;
+      background-color: var(--text);
+      transition: width 0.25s linear;
+    }
+
+    .media-time-labels {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+    }
+
+    .media-time-labels strong {
+      color: var(--text);
+    }
+
+    /* Bottom: High-Visibility DATC Climate HUD (Exact 1:1 Height with Media) */
+    .panel-hvac {
+      padding: 7px 12px;
+      justify-content: space-between;
+    }
+
+    .hvac-compact-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .hvac-temp-col {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      align-items: flex-start;
+      height: 44px;
+      flex-shrink: 0;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .hvac-temp-col.right {
+      align-items: flex-end;
+      text-align: right;
+    }
+
+    .hvac-temp-figure {
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+      padding-bottom: 2px;
+      border-bottom: 2px solid var(--accent);
+      white-space: nowrap;
+      width: 100%;
+    }
+
+    .hvac-temp-figure small {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .hvac-env-sub {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      line-height: 1;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 3px;
+    }
+
+    .hvac-env-sub strong {
+      color: var(--secondary);
+      font-weight: 700;
+    }
+
+    /* Center Wide Airflow & Fan Volume HUD Box */
+    .hvac-airflow-hud {
+      flex: 1;
+      min-width: 0;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background-color: var(--raised);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 2px 10px;
+      cursor: pointer;
+    }
+
+    /* Left half of center box: Large Air-Direction Pictogram + Active Mode Arrows */
+    .hvac-dir-zone {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding-right: 10px;
+      border-right: 1px solid var(--rule);
+      height: 100%;
+    }
+
+    .air-arrow {
+      transition: stroke 0.15s ease, fill 0.15s ease, opacity 0.15s ease;
+    }
+
+    .air-arrow.off {
+      opacity: 0.22;
+    }
+
+    /* Right half of center box: Fan Icon + Step Label + 7-Bar Step Volume Meter */
+    .hvac-fan-zone {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .fan-top-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .fan-title-group {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--secondary);
+      white-space: nowrap;
+    }
+
+    .fan-step-num {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    /* 7-Step Ascending Fan Volume Bars (1단 ~ 7단) */
+    .fan-bars-rail {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      align-items: end;
+      gap: 3.5px;
+      height: 17px;
+    }
+
+    .fan-bar-seg {
+      width: 100%;
+      border-radius: 2px;
+      background-color: #2f313a;
+      transition: background-color 0.15s ease;
+    }
+
+    .fan-bar-seg.b1 { height: 5.5px; }
+    .fan-bar-seg.b2 { height: 7.5px; }
+    .fan-bar-seg.b3 { height: 9.5px; }
+    .fan-bar-seg.b4 { height: 11.5px; }
+    .fan-bar-seg.b5 { height: 13.5px; }
+    .fan-bar-seg.b6 { height: 15.2px; }
+    .fan-bar-seg.b7 { height: 17px; }
+
+    .fan-bar-seg.active {
+      background-color: var(--accent);
+    }
+
+    /* 5-Icon Compact Dock */
+    .hvac-icon-dock {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 5px;
+    }
+
+    .hvac-dock-btn {
+      height: 29px;
+      background-color: var(--raised);
+      border: 1px solid var(--border);
+      border-top: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--muted);
+      font-family: var(--font-sans);
+      font-size: 13px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .hvac-dock-btn:hover {
+      color: var(--text);
+    }
+
+    .hvac-dock-btn.on {
+      color: var(--text);
+      border-top: 2px solid var(--accent);
+    }
+
+    /* 1:1 Physical Credit Card (ISO ID-1: 85.60 × 53.98 mm) Reference Guide */
+    .credit-card-ref-unit {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .credit-card-box {
+      width: 290px;
+      height: 183px;
+      background-color: var(--raised);
+      border: 1px solid var(--control);
+      border-top: 2px solid var(--accent);
+      border-radius: 8px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .card-ref-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--secondary);
+      font-weight: 600;
+    }
+
+    .card-chip-svg {
+      width: 34px;
+      height: 24px;
+      border-radius: 4px;
+      background-color: #2a2416;
+      border: 1px solid var(--warning);
+    }
+
+    .card-ref-desc {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.38;
+    }
+
+    .card-ref-desc strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* ==========================================================================
+       4. LOWER WORKBENCH: SCENARIO SIMULATOR & DPI EXPLANATION TABLE
+       ========================================================================== */
+    .workbench-grid {
+      width: 100%;
+      max-width: 1920px;
+      display: grid;
+      grid-template-columns: 1fr 1.25fr;
+      gap: 16px;
+      align-items: start;
+    }
+
+    .workbench-card {
+      background-color: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-card);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .workbench-header {
+      height: 42px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--rule);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .workbench-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .workbench-sub {
+      font-size: 13px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .scenario-list {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .scenario-row {
+      flex: 1;
+      width: 100%;
+      min-height: 48px;
+      padding: 8px 18px;
+      background: transparent;
+      border: none;
+      border-bottom: 1px solid var(--rule);
+      border-left: 2px solid transparent;
+      color: var(--text);
+      font-family: var(--font-sans);
+      text-align: left;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      cursor: pointer;
+      transition: border-color 0.15s ease, background-color 0.15s ease;
+    }
+
+    .scenario-row:last-child {
+      border-bottom: none;
+    }
+
+    .scenario-row:hover {
+      background-color: var(--raised);
+    }
+
+    .scenario-row.active {
+      border-left-color: var(--accent);
+      background-color: var(--raised);
+    }
+
+    .scenario-main {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .scenario-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .scenario-desc {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .scenario-metrics {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--secondary);
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .telemetry-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .telemetry-table th {
+      height: 38px;
+      padding: 0 14px;
+      text-align: left;
+      font-weight: 500;
+      color: var(--muted);
+      border-bottom: 1px solid var(--rule);
+      white-space: nowrap;
+    }
+
+    .telemetry-table th.num,
+    .telemetry-table td.num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .telemetry-table td {
+      height: 48px;
+      padding: 0 14px;
+      color: var(--secondary);
+      border-bottom: 1px solid var(--rule);
+      white-space: nowrap;
+    }
+
+    .telemetry-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .telemetry-table td strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* ==========================================================================
+       5. RESPONSIVE ADAPTATION FOR TABLET / MOBILE VIEWPORT INSPECTION
+       ========================================================================== */
+    @media (max-width: 1100px) {
+      body {
+        padding: 16px;
+      }
+
+      .turzx-housing {
+        width: 100%;
+      }
+
+      .turzx-lcd-clip {
+        width: 100% !important;
+        height: auto !important;
+      }
+
+      .turzx-lcd {
+        width: 100% !important;
+        height: auto !important;
+        transform: none !important;
+      }
+
+      .credit-card-ref-unit,
+      .dim-ruler-v {
+        display: none !important;
+      }
+
+      .ccnc-canvas {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto;
+      }
+
+      .ev-tpms-split,
+      .navi-dual-body {
+        grid-template-columns: 1fr;
+      }
+
+      .ev-quad-grid,
+      .comma-adas-pane {
+        border-right: none;
+        border-bottom: 1px solid var(--rule);
+      }
+
+      .comma-road-stage {
+        height: 150px;
+      }
+
+      .workbench-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 600px) {
+      .ev-quad-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .ev-cell {
+        border-right: none;
+        border-bottom: 1px solid var(--rule);
+      }
+
+      .telemetry-table th:nth-child(3),
+      .telemetry-table td:nth-child(3) {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body data-theme="hyundai">
+
+  <!-- 1. TOP STUDIO HEADER -->
+  <header class="studio-header">
+    <div class="brand-group">
+      <span class="brand-mark">ccNC</span>
+      <h1 class="brand-title">현대·기아 ccNC ('선 Seon') 클러스터</h1>
+      <span class="brand-subtitle">TURZX 9.2" HiDPI 2.0x (960×231 dp → 1920×462 px)</span>
+    </div>
+
+    <div class="studio-controls">
+      <div class="tab-group" role="group" aria-label="브랜드 테마 선택">
+        <span class="tab-group-label">테마</span>
+        <button type="button" class="edge-tab active" onclick="setTheme('hyundai', this)">Hyundai Cyan</button>
+        <button type="button" class="edge-tab" onclick="setTheme('kia', this)">Kia EV Green</button>
+        <button type="button" class="edge-tab" onclick="setTheme('genesis', this)">Genesis Copper</button>
+      </div>
+
+      <div class="tab-group" role="group" aria-label="단속 표지 상태 전환">
+        <span class="tab-group-label">표지판</span>
+        <button type="button" class="edge-tab active" id="btnSdiSection" onclick="setSdiEnforcementState('section', 80, '2.3 km', 80, this)">🔴 구간 80</button>
+        <button type="button" class="edge-tab" id="btnSdiTraffic" onclick="setSdiEnforcementState('traffic', 50, '130 m', '', this)">🔴 신호 50</button>
+        <button type="button" class="edge-tab" id="btnSdiBlue" onclick="setSdiEnforcementState('none', 80, '', '', this)">🔵 일반 (파란 원형)</button>
+      </div>
+
+      <div class="tab-group" role="group" aria-label="화면 배율">
+        <span class="tab-group-label">크기</span>
+        <button type="button" class="edge-tab active" id="btnPhysical" onclick="setScaleMode('physical', this)">실물 9.2" 크기 (227×55mm)</button>
+        <button type="button" class="edge-tab" id="btnFit" onclick="setScaleMode('fit', this)">화면 폭 맞춤</button>
+        <button type="button" class="edge-tab" id="btnNative" onclick="setScaleMode('native', this)">1:1 픽셀 (1920px)</button>
+        <button type="button" class="edge-tab" id="btnLiveLink" onclick="toggleLiveTelemetryModal()" title="Headunit :8765/status.json + Comma 3X :7000/ws/raw 실시간 연동">📡 실차 연동</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 2. TURZX 9.2" (1920 × 462) MONITOR STAGE -->
+  <main class="monitor-stage">
+    <div class="physical-toolbar" id="physicalToolbar">
+      <div class="physical-spec-summary">
+        <span><strong>실물 9.2" 시인성 개선 적용</strong></span>
+        <span><strong>2.0x HiDPI 논리 해상도(960×231 dp)</strong> + 상단바/패널타이틀 제거 + <strong>미디어·공조 상하 적층 3열 구조</strong>로 글자·아이콘 면적 <strong>4배 확대</strong></span>
+      </div>
+
+      <div class="ppi-controls" role="group" aria-label="현재 PC 모니터 PPI 보정">
+        <span class="ppi-label">PC 모니터 PPI:</span>
+        <button type="button" class="ppi-btn active" onclick="setMonitorPpi(86, this)">내 PC 기본 (86 PPI)</button>
+        <button type="button" class="ppi-btn" onclick="setMonitorPpi(92, this)">92 PPI</button>
+        <button type="button" class="ppi-btn" onclick="setMonitorPpi(96, this)">96 PPI</button>
+        <button type="button" class="ppi-btn" onclick="setMonitorPpi(109, this)">109 PPI</button>
+        <button type="button" class="ppi-btn" onclick="adjustMonitorPpi(-1)" title="1 PPI 축소">- 축소</button>
+        <button type="button" class="ppi-btn" onclick="adjustMonitorPpi(1)" title="1 PPI 확대">+ 확대</button>
+      </div>
+    </div>
+
+    <div class="physical-comparison-row">
+      <!-- Left: Actual Physical Size TURZX 9.2" Monitor -->
+      <div class="turzx-device-unit">
+        <div class="dim-ruler-h">
+          <span id="rulerTopText">실제 액티브 가로 227.2 mm (대각선 9.2 inch · 233.7 mm / 현재 86 PPI 기준 · 2.0x HiDPI 적용)</span>
+        </div>
+
+        <div class="turzx-housing-row">
+          <div class="turzx-housing" id="turzxHousing">
+            <div class="turzx-lcd-clip" id="turzxLcdClip">
+              <section class="turzx-lcd" id="turzxLcd" aria-label="TURZX 9.2인치 디스플레이 화면">
+
+                <!-- 3-Column Zero-Header Automotive HUD Canvas -->
+                <div class="ccnc-canvas">
+
+                  <!-- ① COLUMN 1: EV MONITOR (2×2) + TPMS (Right Strip) -->
+                  <article class="ccnc-panel panel-ev">
+                    <div class="ev-tpms-split">
+                      <!-- 4 Core EV Metrics -->
+                      <div class="ev-quad-grid">
+                        <!-- 1. 배터리 잔량 -->
+                        <div class="ev-cell">
+                          <div class="ev-label">배터리 잔량</div>
+                          <div class="ev-figure-row">
+                            <span class="ev-figure" id="socText">74.5</span>
+                            <span class="ev-unit">%</span>
+                          </div>
+                          <div class="ccnc-bar-track">
+                            <div class="ccnc-bar-fill" id="socBar" style="width: 74.5%;"></div>
+                          </div>
+                        </div>
+
+                        <!-- 2. 주행가능거리 -->
+                        <div class="ev-cell">
+                          <div class="ev-label">주행가능거리</div>
+                          <div class="ev-figure-row">
+                            <span class="ev-figure" id="dteText">342</span>
+                            <span class="ev-unit">km</span>
+                          </div>
+                          <div class="ev-subline" id="effSubText">5.6 km/kWh</div>
+                        </div>
+
+                        <!-- 3. 실시간 전력 (누적 소모량 + HUD 충·방전 게이지) -->
+                        <div class="ev-cell">
+                          <div class="ev-label">실시간 전력</div>
+                          <div class="ev-figure-row">
+                            <span class="ev-figure compact" id="pwrText">+18.4</span>
+                            <span class="ev-unit">kW</span>
+                          </div>
+                          <div class="ccnc-bar-track">
+                            <div class="ccnc-bar-fill" id="pwrBar" style="width: 36%;"></div>
+                          </div>
+                          <div class="ev-subline">누적 <strong id="cumEnergyText">12.6 kWh</strong></div>
+                        </div>
+
+                        <!-- 4. 배터리 온도 -->
+                        <div class="ev-cell">
+                          <div class="ev-label">배터리 온도</div>
+                          <div class="ev-figure-row">
+                            <span class="ev-figure compact" id="batTempText">24.0</span>
+                            <span class="ev-unit">°C</span>
+                          </div>
+                          <div class="ev-subline" id="batMinMaxText">23.0~25.0°C</div>
+                        </div>
+                      </div>
+
+                      <!-- Right: TPMS 4-Wheel Tire Pressure -->
+                      <div class="tpms-pane" aria-label="TPMS 타이어 공기압">
+                        <div class="tpms-header-line">
+                          <span>TPMS</span>
+                          <span class="tpms-status-dot" id="tpmsStatusTag">psi</span>
+                        </div>
+
+                        <div class="tpms-diagram-grid">
+                          <div class="tpms-wheel-node">
+                            <span class="tpms-pos-label">FL</span>
+                            <span class="tpms-psi-val" id="tpmsFlVal">38</span>
+                          </div>
+
+                          <div class="tpms-car-center" aria-hidden="true">
+                            <svg width="22" height="74" viewBox="0 0 26 90" fill="none">
+                              <!-- Front & Rear Axle Callout Lines -->
+                              <line x1="0" y1="18" x2="26" y2="18" stroke="#2f323d" stroke-width="1" />
+                              <line x1="0" y1="72" x2="26" y2="72" stroke="#2f323d" stroke-width="1" />
+                              <line x1="13" y1="18" x2="13" y2="72" stroke="#252730" stroke-width="1" />
+                              <!-- 4 Tires -->
+                              <rect id="svgTireFl" x="1" y="10" width="4" height="16" rx="1.5" fill="#212023" stroke="#4a8ad6" stroke-width="1.6" />
+                              <rect id="svgTireFr" x="21" y="10" width="4" height="16" rx="1.5" fill="#212023" stroke="#4a8ad6" stroke-width="1.6" />
+                              <rect id="svgTireRl" x="1" y="64" width="4" height="16" rx="1.5" fill="#212023" stroke="#4a8ad6" stroke-width="1.6" />
+                              <rect id="svgTireRr" x="21" y="64" width="4" height="16" rx="1.5" fill="#212023" stroke="#4a8ad6" stroke-width="1.6" />
+                              <!-- Sculpted Chassis Outline -->
+                              <rect x="5" y="4" width="16" height="82" rx="6" fill="#171719" stroke="#454854" stroke-width="1.5" />
+                              <path d="M7 18 L19 18 L18 30 L8 30 Z" fill="#131217" stroke="#2d3039" stroke-width="1" />
+                              <rect x="8" y="31" width="10" height="28" rx="2" fill="#111217" stroke="#262830" stroke-width="1" />
+                            </svg>
+                          </div>
+
+                          <div class="tpms-wheel-node right">
+                            <span class="tpms-pos-label">FR</span>
+                            <span class="tpms-psi-val" id="tpmsFrVal">38</span>
+                          </div>
+
+                          <div class="tpms-wheel-node">
+                            <span class="tpms-pos-label">RL</span>
+                            <span class="tpms-psi-val" id="tpmsRlVal">39</span>
+                          </div>
+
+                          <div class="tpms-wheel-node right">
+                            <span class="tpms-pos-label">RR</span>
+                            <span class="tpms-psi-val" id="tpmsRrVal">39</span>
+                          </div>
+                        </div>
+
+                        <div class="tpms-foot-bar" id="tpmsTempSummary">26~27°C</div>
+                      </div>
+                    </div>
+                  </article>
+
+                  <!-- ② COLUMN 2: FUSED COMMA 3X ROAD VIEW + SIMPLE SDI/TBT OVERLAY (291dp = -25% width) -->
+                  <article class="ccnc-panel panel-navi" aria-label="콤마 주행 및 심플 내비게이션 통합 화면">
+                    <div class="comma-fused-stage">
+                      <!-- High-Precision 2x HiDPI 3D Perspective ADAS Canvas (582x434 for 291x217dp) -->
+                      <canvas id="commaRoadCanvas" class="comma-road-canvas" width="582" height="434" aria-label="콤마 3D 차선 인식·조향 예측 궤적·선행차 레이더 타겟"></canvas>
+
+                      <!-- Top Floating Stamps: Left Column (Speed+Cruise on top, Compact SDI underneath) | Right (Compact TBT) -->
+                      <div class="comma-fused-top">
+                        <div class="hud-left-stamps">
+                          <!-- 1. Speed, Gear & Cruise Target Stamp (Primary HUD Focal Anchor) -->
+                          <div class="speed-stamp" id="hudSpeedStamp" title="기어 단수 · 현재 속도 · 크루즈 목표 속도">
+                            <div class="hud-gear-col">
+                              <span class="hud-gear-char" id="hudGearChar">D</span>
+                              <i class="hud-lfa-dot" title="LFA 조향 보조 활성"></i>
+                            </div>
+                            <span class="comma-ego-num" id="egoSpeedText">78</span>
+                            <div class="comma-cruise-col">
+                              <span class="comma-cruise-label">MAX</span>
+                              <span class="comma-cruise-val" id="cruiseTargetText">80</span>
+                            </div>
+                          </div>
+
+                          <!-- 2. Ultra-Compact SDI Speed Camera Widget (Directly underneath Speed+Cruise) -->
+                          <div class="sdi-compact-widget" id="sdiCompactWidget" onclick="cycleSdiMode()" style="cursor: pointer;" title="클릭하여 전환: 구간단속(빨간 원형) ↔ 신호과속(빨간 원형) ↔ 단속없음(파란 원형)">
+                            <div class="sdi-sign-stack">
+                              <div class="sdi-top-cap">
+                                <!-- Shown in Section Speed Camera mode (Image 1) -->
+                                <span class="sdi-cap-section" id="sdiCapSection">구간</span>
+                                <!-- Shown in Signal+Speed Camera mode (Image 2) -->
+                                <span class="sdi-cap-traffic" id="sdiCapTraffic" aria-label="신호과속 카메라">
+                                  <i class="tl-dot r"></i>
+                                  <i class="tl-dot y"></i>
+                                  <i class="tl-dot g"></i>
+                                </span>
+                              </div>
+                              <div class="sdi-limit-circle" id="sdiLimitCircle" aria-label="제한속도">
+                                <span id="camLimitNum">80</span>
+                              </div>
+                              <div class="sdi-bottom-dist" id="camDistFigure">2.3 km</div>
+                            </div>
+
+                            <!-- Attached Right Wing for Section Average Speed (Image 1) -->
+                            <div class="sdi-avg-wing" id="sdiAvgWing">
+                              <span class="sdi-avg-label">평균속도</span>
+                              <span class="sdi-avg-num" id="camAvgSpeed">80</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <!-- Top-Right Compact TBT Stamp -->
+                        <div class="tbt-compact-stamp" title="심플 TBT 안내">
+                          <div class="tbt-main-line">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+                              <path d="M7 20V8a4 4 0 0 1 4-4h7" />
+                              <path d="m14 0 4 4-4 4" />
+                            </svg>
+                            <span class="tbt-dist-figure" id="tbtDistFigure">280m</span>
+                          </div>
+                          <div class="tbt-road-sub">
+                            <span id="tbtRoadName">판교JC</span>
+                            <strong id="tbtNextText">+450m</strong>
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Bottom Corner Floating Chips (Road extends all the way to bottom) -->
+                      <div class="comma-corner-foot">
+                        <div class="corner-chip">
+                          <i class="lane-dot"></i>
+                          <span id="laneConfText">차선 98%</span>
+                        </div>
+                        <div class="corner-chip">
+                          <span>앞차 <strong id="leadDistText">42m</strong></span>
+                          <span>·</span>
+                          <span id="steerAngleText">+2.4°</span>
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+
+                  <!-- ③ COLUMN 3: MEDIA (Top) + COMPACT ICON CLIMATE (Bottom) -->
+                  <div class="right-stack-col">
+                    <!-- Top: Now Playing Media (Media Info + Playback Bar Only) -->
+                    <article class="ccnc-panel panel-media" aria-label="재생 중인 미디어">
+                      <div class="media-artwork-frame" aria-hidden="true">
+                        <svg width="86" height="86" viewBox="0 0 112 112" fill="none">
+                          <rect width="112" height="112" fill="#1b1a1f" />
+                          <circle cx="56" cy="56" r="44" stroke="#2c2d34" stroke-width="1.5" />
+                          <circle cx="56" cy="56" r="35" stroke="#3a3a3e" stroke-width="2" />
+                          <circle cx="56" cy="56" r="15" fill="#212023" stroke="var(--accent)" stroke-width="3.2" />
+                          <circle cx="56" cy="56" r="4" fill="#ffffff" />
+                        </svg>
+                      </div>
+
+                      <div class="media-right-col">
+                        <div class="media-text-stack">
+                          <div class="media-track-name" id="mediaTitleText">Supernova</div>
+                          <div class="media-artist-album" id="mediaArtistText">aespa · Armageddon</div>
+                        </div>
+
+                        <div class="media-progress-block">
+                          <div class="media-progress-rail">
+                            <div class="media-progress-bar" id="mediaProgressBar" style="width: 57%;"></div>
+                          </div>
+                          <div class="media-time-labels">
+                            <strong id="mediaCurTime">01:42</strong>
+                            <span id="mediaDurTime">02:58</span>
+                          </div>
+                        </div>
+                      </div>
+                    </article>
+
+                    <!-- Bottom: High-Visibility DATC Climate HUD (Large Air Direction + 7-Step Fan Volume) -->
+                    <article class="ccnc-panel panel-hvac" aria-label="공조 모니터">
+                      <div class="hvac-compact-top">
+                        <!-- Left: Driver Set Temp + Cabin (실내) Temp -->
+                        <div class="hvac-temp-col">
+                          <span class="hvac-temp-figure" id="drvTempText">21.5<small>°</small></span>
+                          <span class="hvac-env-sub">실내 <strong id="inTempText">22.5°</strong></span>
+                        </div>
+
+                        <!-- Center: Large Air Direction (풍향) + 7-Step Visual Fan Volume (풍량) -->
+                        <div class="hvac-airflow-hud" title="좌측 클릭: 풍향 전환 / 우측 클릭: 풍량(1~7단) 조절">
+                          <!-- 1. Large High-Contrast Seated Air Direction Pictogram (52x38 px) -->
+                          <div class="hvac-dir-zone" onclick="cycleAirDir(event)" title="풍향 전환 (상단 / 전면 / 하단)">
+                            <svg width="52" height="38" viewBox="0 0 46 36" fill="none">
+                              <!-- Seated Passenger Solid Silhouette (Right side) -->
+                              <circle cx="33" cy="7.5" r="4.4" fill="#e2e4ec" />
+                              <!-- Torso + Lap + Lower Leg (Bold rounded stroke for high visibility at 86 PPI) -->
+                              <path d="M35.5 14 L30.5 23.5 L20.5 23.5 L16.5 32.5" stroke="#e2e4ec" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round" />
+
+                              <!-- Arrow 1: Upward / Windshield Defrost Airflow (상단 풍향) -->
+                              <g id="airArrowUp" class="air-arrow off">
+                                <path d="M3 11 L17 4.5" stroke="var(--accent)" stroke-width="2.9" stroke-linecap="round" />
+                                <path d="M12.5 3.2 L18 4.2 L15.2 9.2" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" />
+                              </g>
+
+                              <!-- Arrow 2: Forward / Upper Body Vent Airflow (전면 풍향 - Active) -->
+                              <g id="airArrowMid" class="air-arrow">
+                                <path d="M2 16.5 H20" stroke="var(--accent)" stroke-width="3.2" stroke-linecap="round" />
+                                <path d="M15.5 12.5 L20.5 16.5 L15.5 20.5" stroke="var(--accent)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" />
+                              </g>
+
+                              <!-- Arrow 3: Downward / Footwell Airflow (하단 풍향 - Active) -->
+                              <g id="airArrowDown" class="air-arrow">
+                                <path d="M3 22.5 L14 30.5" stroke="var(--accent)" stroke-width="2.9" stroke-linecap="round" />
+                                <path d="M13.2 25.5 L14.8 31 L9.2 30.5" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" />
+                              </g>
+                            </svg>
+                          </div>
+
+                          <!-- 2. Visual Fan Volume Zone: Fan Icon + Step Label + 7-Step Ascending Bar Graph -->
+                          <div class="hvac-fan-zone" onclick="cycleFanStep(event)" title="풍량 1~7단 조절">
+                            <div class="fan-top-row">
+                              <span class="fan-title-group">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.4">
+                                  <path d="M12 12c0-3 2.5-5.5 5.5-5.5S23 9 23 12H12z"/>
+                                  <path d="M12 12c3 0 5.5 2.5 5.5 5.5S15 23 12 23V12z"/>
+                                  <path d="M12 12c0 3-2.5 5.5-5.5 5.5S1 15 1 12h11z"/>
+                                  <path d="M12 12c-3 0-5.5-2.5-5.5-5.5S9 1 12 1v11z"/>
+                                </svg>
+                                <span>풍량</span>
+                              </span>
+                              <span class="fan-step-num" id="fanStepLabel">3단</span>
+                            </div>
+
+                            <!-- 7-Step Ascending Fan Speed Bar Graph (1단 ~ 7단) -->
+                            <div class="fan-bars-rail" id="fanBarsRail" aria-label="풍량 7단계 게이지">
+                              <i class="fan-bar-seg b1 active"></i>
+                              <i class="fan-bar-seg b2 active"></i>
+                              <i class="fan-bar-seg b3 active"></i>
+                              <i class="fan-bar-seg b4"></i>
+                              <i class="fan-bar-seg b5"></i>
+                              <i class="fan-bar-seg b6"></i>
+                              <i class="fan-bar-seg b7"></i>
+                            </div>
+                          </div>
+                        </div>
+
+                        <!-- Right: Passenger Set Temp + Outdoor (실외) Temp -->
+                        <div class="hvac-temp-col right">
+                          <span class="hvac-temp-figure" id="pasTempText">21.5<small>°</small></span>
+                          <span class="hvac-env-sub">실외 <strong id="outTempText">18.0°</strong></span>
+                        </div>
+                      </div>
+
+                      <div class="hvac-icon-dock" role="group" aria-label="공조 스위치">
+                        <button type="button" class="hvac-dock-btn on" onclick="toggleHvacBtn(this)" title="AUTO">AUTO</button>
+                        <button type="button" class="hvac-dock-btn on" onclick="toggleHvacBtn(this)" title="A/C 냉방">A/C</button>
+                        <button type="button" class="hvac-dock-btn" onclick="toggleHvacBtn(this)" title="히트펌프 난방">HEAT</button>
+                        <button type="button" class="hvac-dock-btn on" onclick="toggleHvacBtn(this)" title="내기 순환" aria-label="내기 순환">
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <path d="M17 11H9a3 3 0 0 0 0 6h9"/>
+                            <path d="m15 14 3 3-3 3"/>
+                          </svg>
+                        </button>
+                        <button type="button" class="hvac-dock-btn on" onclick="toggleHvacBtn(this)" title="좌우 동기화">SYNC</button>
+                      </div>
+                    </article>
+                  </div>
+
+                </div>
+              </section>
+            </div>
+          </div>
+          <span class="dim-ruler-v" id="rulerSideText">세로 54.7 mm</span>
+        </div>
+      </div>
+
+      <!-- Right: 1:1 Standard Credit Card (85.60 × 53.98 mm) Physical Ruler Guide -->
+      <div class="credit-card-ref-unit" id="creditCardRefUnit">
+        <div class="dim-ruler-h">
+          <span>실물 대조 기준 (신용카드 가로 85.6 mm)</span>
+        </div>
+        <div class="credit-card-box" id="creditCardBox">
+          <div class="card-ref-top">
+            <span>실물 신용카드 대조 (1:1)</span>
+            <span>85.6 × 54.0 mm</span>
+          </div>
+          <div class="card-chip-svg" aria-hidden="true"></div>
+          <p class="card-ref-desc">
+            모니터에 <strong>실제 신용카드</strong>를 가로로 대어 크기를 맞추면 좌측 화면이 <strong>실제 9.2인치 모니터(높이 54.7 mm)</strong>와 100% 동일한 실물 크기가 됩니다.
+          </p>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 3. WORKBENCH: INTERACTIVE SCENARIO PRESETS & HiDPI DESIGN SUMMARY -->
+  <section class="workbench-grid" aria-label="주행 시나리오 프리셋 및 고시인성 설계 요약">
+    <!-- Left: Interactive Driving Scenarios -->
+    <div class="workbench-card">
+      <div class="workbench-header">
+        <span class="workbench-title">주행 상태 프리셋 시뮬레이션</span>
+        <span class="workbench-sub">클릭 시 상단 9.2" 실물 화면 즉시 갱신</span>
+      </div>
+      <div class="scenario-list">
+        <button type="button" class="scenario-row active" onclick="applyScenario(0, this)">
+          <div class="scenario-main">
+            <span class="scenario-name">구간단속 주행 (첨부 이미지 1 스타일: 구간 80 · 2.3 km · 평균속도 80)</span>
+            <span class="scenario-desc">표지판 상단 '구간' 캡 + 하단 '2.3 km' + 우측 '평균속도 80' 결합형 배지</span>
+          </div>
+          <span class="scenario-metrics">구간 80 · 2.3 km</span>
+        </button>
+
+        <button type="button" class="scenario-row" onclick="applyScenario(1, this)">
+          <div class="scenario-main">
+            <span class="scenario-name">신호·과속 단속 접근 (첨부 이미지 2 스타일: 신호등 캡 + 50 · 130 m)</span>
+            <span class="scenario-desc">표지판 상단 3색 신호등 아이콘 캡 + 중앙 '50' + 하단 '130 m' 초소형 배지 (우측 날개 생략)</span>
+          </div>
+          <span class="scenario-metrics">신호 50 · 130 m</span>
+        </button>
+
+        <button type="button" class="scenario-row" onclick="applyScenario(2, this)">
+          <div class="scenario-main">
+            <span class="scenario-name">단속 이벤트 없음 · 일반 고속 주행 (파란색 원형 '100' 단독 표시)</span>
+            <span class="scenario-desc">단속 구간이 아닐 때 상단 캡·하단 거리·우측 날개 없이 파란색 원형 표지만 심플 표시</span>
+          </div>
+          <span class="scenario-metrics">파란 원형 · 100</span>
+        </button>
+
+        <button type="button" class="scenario-row" onclick="applyScenario(3, this)">
+          <div class="scenario-main">
+            <span class="scenario-name">도심 정체 Stop &amp; Go + 신호·과속 30 (85 m) + TPMS RR 저압</span>
+            <span class="scenario-desc">현재 0 / 목표 50 km/h · 앞차 6 m · TPMS RR 29 psi 저압 경고 점등</span>
+          </div>
+          <span class="scenario-metrics">신호 30 · RR 29 psi</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Right: Why 9.2" Needed 2.0x HiDPI & 3-Column Stacking -->
+    <div class="workbench-card">
+      <div class="workbench-header">
+        <span class="workbench-title">9.2인치(215 PPI) 실물 시인성 극대화 설계 기법</span>
+        <span class="workbench-sub">차량 운전석 시청 거리(60~80 cm) 기준 최적화</span>
+      </div>
+      <table class="telemetry-table">
+        <thead>
+          <tr>
+            <th>적용 기법</th>
+            <th>기존 (1x 데스크탑 기준)</th>
+            <th>개선 (2.0x 차량용 HiDPI HUD)</th>
+            <th class="num">시인성 향상</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>논리 해상도 (DPI)</strong></td>
+            <td>1920 × 462 dp (1.0x 축소)</td>
+            <td>960 × 231 dp → 1920 × 462 (2.0x)</td>
+            <td class="num">글자 면적 4.0배</td>
+          </tr>
+          <tr>
+            <td><strong>크롬/헤더 다이어트</strong></td>
+            <td>상단바(38px) + 패널헤더(36px)</td>
+            <td>상단바·패널제목 제거 (단위로 직관 인지)</td>
+            <td class="num">유효 높이 +24%</td>
+          </tr>
+          <tr>
+            <td><strong>우측 컬럼 상하 적층</strong></td>
+            <td>4열 병렬 (가로폭이 좁아 여백 낭비)</td>
+            <td>미디어(상) + 공조(하) 적층 3열 와이드</td>
+            <td class="num">가로 밀도 최적화</td>
+          </tr>
+          <tr>
+            <td><strong>핵심 주행 수치 크기</strong></td>
+            <td>실물 높이 약 3.6 mm (원거리 식별 곤란)</td>
+            <td>실물 높이 7.2~8.5 mm (운전석 즉시 인지)</td>
+            <td class="num">ISO 15008 충족</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <script>
+    let currentScaleMode = "physical";
+    let monitorPpi = 86;
+    let elapsedSec = 102;
+    const totalSec = 178;
+
+    const twoDigit = (n) => (n < 10 ? "0" + n : "" + n);
+
+    function updateViewportScale() {
+      const clip = document.getElementById("turzxLcdClip");
+      const lcd = document.getElementById("turzxLcd");
+      const cardUnit = document.getElementById("creditCardRefUnit");
+      const cardBox = document.getElementById("creditCardBox");
+      const rulerTop = document.getElementById("rulerTopText");
+      const rulerSide = document.getElementById("rulerSideText");
+      if (!clip || !lcd) return;
+
+      if (window.innerWidth <= 1100) {
+        clip.style.width = "100%";
+        clip.style.height = "auto";
+        lcd.style.transform = "none";
+        return;
+      }
+
+      /* Logical resolution of .turzx-lcd is 960 x 231 dp (2.0x HiDPI for 1920 x 462 hardware) */
+      const logicalW = 960;
+      const logicalH = 231;
+
+      if (currentScaleMode === "physical") {
+        const pxPerMm = monitorPpi / 25.4;
+        const targetW = Math.round(227.2 * pxPerMm);
+        const scale = targetW / logicalW;
+        const targetH = Math.round(logicalH * scale);
+
+        clip.style.width = targetW + "px";
+        clip.style.height = targetH + "px";
+        lcd.style.transform = "scale(" + scale.toFixed(5) + ")";
+
+        if (cardUnit && cardBox) {
+          cardUnit.style.display = "flex";
+          cardBox.style.width = Math.round(85.6 * pxPerMm) + "px";
+          cardBox.style.height = Math.round(53.98 * pxPerMm) + "px";
+        }
+        if (rulerTop) {
+          rulerTop.textContent = "실제 액티브 가로 227.2 mm (대각선 9.2 inch · 233.7 mm / 현재 " + monitorPpi + " PPI 기준 · 2.0x HiDPI)";
+        }
+        if (rulerSide) {
+          rulerSide.style.display = "inline-block";
+          rulerSide.textContent = "세로 54.7 mm";
+        }
+        return;
+      }
+
+      if (cardUnit) cardUnit.style.display = "none";
+
+      if (currentScaleMode === "native") {
+        clip.style.width = "1920px";
+        clip.style.height = "462px";
+        lcd.style.transform = "scale(2)";
+        if (rulerTop) rulerTop.textContent = "1:1 픽셀 원본 모드 (1920 × 462 px · 2.0x HiDPI 렌더링)";
+        if (rulerSide) rulerSide.textContent = "462 px";
+        return;
+      }
+
+      /* Fit to browser width */
+      const availWidth = Math.min(1860, window.innerWidth - 110);
+      const scale = availWidth / logicalW;
+      const targetW = Math.round(logicalW * scale);
+      const targetH = Math.round(logicalH * scale);
+      clip.style.width = targetW + "px";
+      clip.style.height = targetH + "px";
+      lcd.style.transform = "scale(" + scale.toFixed(5) + ")";
+      if (rulerTop) rulerTop.textContent = "화면 폭 맞춤 확대 모드 (" + targetW + " × " + targetH + " px)";
+      if (rulerSide) rulerSide.textContent = targetH + " px";
+    }
+
+    function setScaleMode(mode, btn) {
+      currentScaleMode = mode;
+      const parent = btn.parentElement;
+      parent.querySelectorAll(".edge-tab").forEach((el) => el.classList.remove("active"));
+      btn.classList.add("active");
+      updateViewportScale();
+    }
+
+    function setMonitorPpi(ppi, btn) {
+      monitorPpi = ppi;
+      document.querySelectorAll(".ppi-btn").forEach((el) => el.classList.remove("active"));
+      if (btn) btn.classList.add("active");
+      if (currentScaleMode !== "physical") {
+        const physBtn = document.getElementById("btnPhysical");
+        if (physBtn) setScaleMode("physical", physBtn);
+      } else {
+        updateViewportScale();
+      }
+    }
+
+    function adjustMonitorPpi(delta) {
+      monitorPpi = Math.max(72, Math.min(180, monitorPpi + delta));
+      document.querySelectorAll(".ppi-btn").forEach((el) => el.classList.remove("active"));
+      if (currentScaleMode !== "physical") {
+        const physBtn = document.getElementById("btnPhysical");
+        if (physBtn) setScaleMode("physical", physBtn);
+      } else {
+        updateViewportScale();
+      }
+    }
+
+    function setTheme(theme, btn) {
+      document.body.setAttribute("data-theme", theme);
+      const parent = btn.parentElement;
+      parent.querySelectorAll(".edge-tab").forEach((el) => el.classList.remove("active"));
+      btn.classList.add("active");
+    }
+
+    function toggleHvacBtn(btn) {
+      btn.classList.toggle("on");
+    }
+
+    let currentAirDirMode = 0; /* 0: 전면+하단, 1: 전면 단독, 2: 상단+하단, 3: 전체(상·중·하) */
+    let currentFanStep = 3;
+
+    function updateAirDir(mode) {
+      currentAirDirMode = ((mode % 4) + 4) % 4;
+      const up = document.getElementById("airArrowUp");
+      const mid = document.getElementById("airArrowMid");
+      const down = document.getElementById("airArrowDown");
+      if (!up || !mid || !down) return;
+
+      const states = [
+        { u: false, m: true,  d: true  }, /* 0: 전면 + 하단 */
+        { u: false, m: true,  d: false }, /* 1: 전면 단독 */
+        { u: true,  m: false, d: true  }, /* 2: 상단 + 하단 */
+        { u: true,  m: true,  d: true  }  /* 3: 상단 + 전면 + 하단 */
+      ][currentAirDirMode];
+
+      up.className.baseVal = states.u ? "air-arrow" : "air-arrow off";
+      mid.className.baseVal = states.m ? "air-arrow" : "air-arrow off";
+      down.className.baseVal = states.d ? "air-arrow" : "air-arrow off";
+    }
+
+    function cycleAirDir(event) {
+      if (event) event.stopPropagation();
+      updateAirDir(currentAirDirMode + 1);
+    }
+
+    function updateFanBars(step) {
+      currentFanStep = Math.max(1, Math.min(7, step));
+      const label = document.getElementById("fanStepLabel");
+      if (label) label.textContent = currentFanStep + "단";
+      const rail = document.getElementById("fanBarsRail");
+      if (!rail) return;
+      const bars = rail.querySelectorAll(".fan-bar-seg");
+      bars.forEach((bar, i) => {
+        if (i < currentFanStep) bar.classList.add("active");
+        else bar.classList.remove("active");
+      });
+    }
+
+    function cycleFanStep(event) {
+      if (event) event.stopPropagation();
+      const next = currentFanStep >= 7 ? 1 : currentFanStep + 1;
+      updateFanBars(next);
+    }
+
+    let currentScenarioIdx = 0;
+    let roadPhase = 0;
+
+    const scenarios = [
+      {
+        soc: "74.5",
+        dte: "342",
+        eff: "5.6 km/kWh",
+        pwr: "+18.4",
+        cum: "12.6 kWh",
+        batTemp: "24.0",
+        batMinMax: "23.0~25.0°C",
+        /* TPMS */
+        tpmsState: "psi",
+        tpmsWarn: false,
+        flPsi: "38",
+        frPsi: "38",
+        rlPsi: "39",
+        rrPsi: "39",
+        tpmsTemp: "26~27°C",
+        /* Fused Comma 3D ADAS + CarrotNavi */
+        egoSpeed: "78",
+        egoSpeedVal: 78,
+        cruiseTarget: "80",
+        leadDist: "42m",
+        leadDistM: 34,
+        curveC2: 0.00048,
+        curveC1: 0.008,
+        laneConf: "차선 98%",
+        steerAngle: "+2.4°",
+        sdiMode: "section",
+        camLimit: "80",
+        camDist: "2.3 km",
+        camAvg: "80",
+        tbtDist: "280m",
+        tbtRoad: "판교JC",
+        tbtNext: "+450m",
+        drvTemp: "21.5",
+        pasTemp: "21.5",
+        inTemp: "22.5°",
+        outTemp: "18.0°",
+        fanStep: 3,
+        title: "Supernova",
+        artist: "aespa · Armageddon"
+      },
+      {
+        soc: "75.1",
+        dte: "348",
+        eff: "6.1 km/kWh",
+        pwr: "-24.2",
+        cum: "12.3 kWh",
+        batTemp: "23.5",
+        batMinMax: "23.0~24.0°C",
+        /* TPMS */
+        tpmsState: "psi",
+        tpmsWarn: false,
+        flPsi: "37",
+        frPsi: "37",
+        rlPsi: "38",
+        rrPsi: "38",
+        tpmsTemp: "24~25°C",
+        /* Fused Comma 3D ADAS + CarrotNavi: Image 2 Traffic Light 50 + 130 m */
+        egoSpeed: "46",
+        egoSpeedVal: 46,
+        cruiseTarget: "50",
+        leadDist: "18m",
+        leadDistM: 18,
+        curveC2: -0.00125,
+        curveC1: -0.015,
+        laneConf: "차선 92%",
+        steerAngle: "-11.8°",
+        sdiMode: "traffic",
+        camLimit: "50",
+        camDist: "130 m",
+        camAvg: "",
+        tbtDist: "190m",
+        tbtRoad: "판교역로",
+        tbtNext: "+320m",
+        drvTemp: "22.0",
+        pasTemp: "22.0",
+        inTemp: "22.0°",
+        outTemp: "14.5°",
+        fanStep: 2,
+        title: "Night Driving",
+        artist: "HYUKOH · 24"
+      },
+      {
+        soc: "58.0",
+        dte: "254",
+        eff: "4.7 km/kWh",
+        pwr: "+64.8",
+        cum: "24.8 kWh",
+        batTemp: "31.5",
+        batMinMax: "30.0~33.0°C",
+        /* TPMS */
+        tpmsState: "psi",
+        tpmsWarn: false,
+        flPsi: "40",
+        frPsi: "40",
+        rlPsi: "41",
+        rrPsi: "41",
+        tpmsTemp: "33~34°C",
+        /* Fused Comma 3D ADAS + CarrotNavi: No Camera Event -> Blue Circle "100" only */
+        egoSpeed: "98",
+        egoSpeedVal: 98,
+        cruiseTarget: "100",
+        leadDist: "68m",
+        leadDistM: 52,
+        curveC2: 0.00005,
+        curveC1: 0.0,
+        laneConf: "차선 99%",
+        steerAngle: "+0.3°",
+        sdiMode: "none",
+        camLimit: "100",
+        camDist: "",
+        camAvg: "",
+        tbtDist: "1.2km",
+        tbtRoad: "동탄JC",
+        tbtNext: "+4.5km",
+        drvTemp: "20.0",
+        pasTemp: "20.5",
+        inTemp: "21.0°",
+        outTemp: "27.5°",
+        fanStep: 5,
+        title: "Ditto",
+        artist: "NewJeans · OMG"
+      },
+      {
+        soc: "71.2",
+        dte: "326",
+        eff: "5.4 km/kWh",
+        pwr: "+0.8",
+        cum: "14.1 kWh",
+        batTemp: "25.0",
+        batMinMax: "24.5~25.5°C",
+        /* TPMS: RR Low tire pressure warning (29 psi) */
+        tpmsState: "저압",
+        tpmsWarn: true,
+        flPsi: "37",
+        frPsi: "37",
+        rlPsi: "38",
+        rrPsi: "29",
+        tpmsTemp: "RR 저압주의",
+        /* Fused Comma 3D ADAS + CarrotNavi: Stop & Go */
+        egoSpeed: "0",
+        egoSpeedVal: 0,
+        cruiseTarget: "50",
+        leadDist: "6m",
+        leadDistM: 10.5,
+        curveC2: 0.0,
+        curveC1: 0.0,
+        laneConf: "차선 95%",
+        steerAngle: "0.0°",
+        sdiMode: "traffic",
+        camLimit: "30",
+        camDist: "85 m",
+        camAvg: "",
+        tbtDist: "85m",
+        tbtRoad: "삼성역",
+        tbtNext: "+620m",
+        drvTemp: "22.0",
+        pasTemp: "22.0",
+        inTemp: "22.0°",
+        outTemp: "19.5°",
+        fanStep: 2,
+        title: "Love Wins All",
+        artist: "IU · The Winning"
+      }
+    ];
+
+    /* ==========================================================================
+       3D PERSPECTIVE CAMERA RENDERER FOR COMMA 3X / ccNC ADAS CANVAS
+       Projects 3D vehicle-frame coordinates (X_forward, Y_lateral, Z_up) to 2D
+       ========================================================================== */
+    function renderCommaAdasCanvas() {
+      const canvas = document.getElementById("commaRoadCanvas");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width;   /* 776 px (2x HiDPI for 388 dp) */
+      const H = canvas.height;  /* 434 px (2x HiDPI for 217 dp) */
+      const s = scenarios[currentScenarioIdx] || scenarios[0];
+
+      ctx.clearRect(0, 0, W, H);
+
+      /* 1. Sky, Atmospheric Horizon Glow & Ground Plane Base */
+      const horizonY = 130;
+      const skyGrad = ctx.createLinearGradient(0, 0, 0, horizonY);
+      skyGrad.addColorStop(0, "#07080c");
+      skyGrad.addColorStop(1, "#0f131d");
+      ctx.fillStyle = skyGrad;
+      ctx.fillRect(0, 0, W, horizonY);
+
+      const groundGrad = ctx.createLinearGradient(0, horizonY, 0, H);
+      groundGrad.addColorStop(0, "#0e1118");
+      groundGrad.addColorStop(0.45, "#11131a");
+      groundGrad.addColorStop(1, "#0b0c10");
+      ctx.fillStyle = groundGrad;
+      ctx.fillRect(0, horizonY, W, H - horizonY);
+
+      /* Camera intrinsics in 582x434 pixel space (291x217dp, -25% width) */
+      const u0 = W * 0.565;
+      const v0 = horizonY;
+      const fx = 395;
+      const fy = 950;
+      const camH = 1.35;
+
+      /* Map real radar distance (10.5m ~ 52m) to compressed 3D cluster visual distance (8.8m ~ 18.2m) */
+      const visualLeadX = 6.2 + Math.pow(Math.max(6, s.leadDistM), 0.62) * 1.05;
+
+      const roadCenterY = (x) => {
+        const dx = Math.max(0, x - 4.0);
+        return s.curveC2 * (dx * dx) * 2.2 + s.curveC1 * dx;
+      };
+
+      const proj = (x, y, z = 0) => {
+        const safeX = Math.max(2.5, x);
+        const u = u0 + fx * (y / safeX);
+        const v = v0 + fy * ((camH - z) / safeX);
+        return { x: u, y: v };
+      };
+
+      /* Subtle radial horizon glow around vanishing point */
+      const vpHoriz = proj(75, roadCenterY(75), 0);
+      const hGlow = ctx.createRadialGradient(vpHoriz.x, horizonY + 4, 8, vpHoriz.x, horizonY + 12, 310);
+      hGlow.addColorStop(0, "rgba(74, 138, 214, 0.16)");
+      hGlow.addColorStop(0.5, "rgba(68, 162, 130, 0.06)");
+      hGlow.addColorStop(1, "rgba(11, 12, 16, 0)");
+      ctx.fillStyle = hGlow;
+      ctx.fillRect(0, 0, W, H);
+
+      /* 2. Horizon Azimuth Rule & Subtle Sensor Ticks */
+      ctx.strokeStyle = "#1f2430";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(0, horizonY);
+      ctx.lineTo(W, horizonY);
+      ctx.stroke();
+
+      for (let lat = -12; lat <= 12; lat += 2) {
+        const p = proj(60, lat, 0);
+        ctx.strokeStyle = lat === 0 ? "#3a4152" : "#1c2029";
+        ctx.beginPath();
+        ctx.moveTo(p.x, horizonY - 4);
+        ctx.lineTo(p.x, horizonY + 4);
+        ctx.stroke();
+      }
+
+      /* 3. Multi-Lane Asphalt Roadbed Surface (3 Lanes: Y = -5.4m to +5.4m, Non-linear near sampling) */
+      const xSteps = [];
+      for (let i = 0; i <= 38; i++) {
+        const t = i / 38;
+        xSteps.push(3.85 + 82.0 * (t * t));
+      }
+
+      const roadSurfGrad = ctx.createLinearGradient(0, horizonY, 0, H);
+      roadSurfGrad.addColorStop(0, "#12151e");
+      roadSurfGrad.addColorStop(0.4, "#161922");
+      roadSurfGrad.addColorStop(1, "#101218");
+      ctx.fillStyle = roadSurfGrad;
+      ctx.beginPath();
+      xSteps.forEach((x, i) => {
+        const p = proj(x, roadCenterY(x) - 5.4, 0);
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      });
+      for (let i = xSteps.length - 1; i >= 0; i--) {
+        const x = xSteps[i];
+        const p = proj(x, roadCenterY(x) + 5.4, 0);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
+      ctx.fill();
+
+      /* Ego Lane Subtle Surface Contrast (Y = -1.82m to +1.82m) */
+      const egoSurfGrad = ctx.createLinearGradient(0, horizonY, 0, H);
+      egoSurfGrad.addColorStop(0, "#161a24");
+      egoSurfGrad.addColorStop(0.5, "#1b202c");
+      egoSurfGrad.addColorStop(1, "#141821");
+      ctx.fillStyle = egoSurfGrad;
+      ctx.beginPath();
+      xSteps.forEach((x, i) => {
+        const p = proj(x, roadCenterY(x) - 1.82, 0);
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      });
+      for (let i = xSteps.length - 1; i >= 0; i--) {
+        const x = xSteps[i];
+        const p = proj(x, roadCenterY(x) + 1.82, 0);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
+      ctx.fill();
+
+      /* 4. Perspective Distance Grid Lines on Roadbed */
+      [5.0, 6.8, 9.5, 13.5, 19.5, 29.0, 45.0].forEach((dist) => {
+        const alpha = Math.min(0.09, Math.max(0.025, 0.45 / dist));
+        ctx.strokeStyle = `rgba(255, 255, 255, ${alpha.toFixed(3)})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let lat = -5.4; lat <= 5.4; lat += 0.6) {
+          const p = proj(dist, roadCenterY(dist) + lat, 0);
+          if (lat === -5.4) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+      });
+
+      /* 5. Helper to Draw 3D Tapered Road Strip (Width in meters tapers naturally by 1/X) */
+      const drawTaperedStrip = (latOffset, halfWidthM, colorFn, dashed = false) => {
+        for (let i = 0; i < xSteps.length - 1; i++) {
+          const x0 = xSteps[i];
+          const x1 = xSteps[i + 1];
+          if (dashed) {
+            const scrolledX = x0 + roadPhase;
+            if (Math.floor(scrolledX / 3.0) % 2 !== 0) continue;
+          }
+          const c0 = roadCenterY(x0) + latOffset;
+          const c1 = roadCenterY(x1) + latOffset;
+
+          const p0L = proj(x0, c0 - halfWidthM, 0);
+          const p0R = proj(x0, c0 + halfWidthM, 0);
+          const p1R = proj(x1, c1 + halfWidthM, 0);
+          const p1L = proj(x1, c1 - halfWidthM, 0);
+
+          const fade = Math.max(0.08, 1 - (x0 / 88));
+          ctx.fillStyle = colorFn(fade, x0);
+          ctx.beginPath();
+          ctx.moveTo(p0L.x, p0L.y);
+          ctx.lineTo(p0R.x, p0R.y);
+          ctx.lineTo(p1R.x, p1R.y);
+          ctx.lineTo(p1L.x, p1L.y);
+          ctx.closePath();
+          ctx.fill();
+        }
+      };
+
+      /* Road Shoulder Edges (-5.4m, +5.4m) */
+      drawTaperedStrip(-5.4, 0.06, (f) => `rgba(74, 82, 98, ${f * 0.65})`, false);
+      drawTaperedStrip(5.4, 0.06, (f) => `rgba(74, 82, 98, ${f * 0.65})`, false);
+
+      /* Adjacent Dashed Lane Lines (-3.6m, +3.6m) */
+      drawTaperedStrip(-3.6, 0.055, (f) => `rgba(148, 163, 184, ${f * 0.38})`, true);
+      drawTaperedStrip(3.6, 0.055, (f) => `rgba(148, 163, 184, ${f * 0.38})`, true);
+
+      /* 6. Comma modelV2 Predicted Steering Trajectory Carpet (Context-Aware HUD Color Adaptation) */
+      const pathMaxX = Math.max(6.8, visualLeadX - 0.6);
+      const pathHalfW = 0.76; /* 1.52m wide trajectory carpet */
+      const pathSteps = 34;
+      const isCloseLead = s.leadDistM <= 18;
+      const isCriticalLead = s.leadDistM <= 12;
+
+      for (let i = 0; i < pathSteps; i++) {
+        const t0 = i / pathSteps;
+        const t1 = (i + 1) / pathSteps;
+        const x0 = 3.85 + (pathMaxX - 3.85) * (t0 * t0);
+        const x1 = 3.85 + (pathMaxX - 3.85) * (t1 * t1);
+        const w0 = pathHalfW * (1 - t0 * 0.16);
+        const w1 = pathHalfW * (1 - t1 * 0.16);
+        const c0 = roadCenterY(x0);
+        const c1 = roadCenterY(x1);
+
+        const p0L = proj(x0, c0 - w0, 0);
+        const p0R = proj(x0, c0 + w0, 0);
+        const p1R = proj(x1, c1 + w1, 0);
+        const p1L = proj(x1, c1 - w1, 0);
+
+        const alpha = (1 - t0 * 0.65) * 0.38;
+        ctx.fillStyle = isCriticalLead
+          ? `rgba(229, 86, 111, ${alpha.toFixed(3)})`
+          : isCloseLead
+          ? `rgba(217, 164, 65, ${alpha.toFixed(3)})`
+          : `rgba(68, 162, 130, ${alpha.toFixed(3)})`;
+        ctx.beginPath();
+        ctx.moveTo(p0L.x, p0L.y);
+        ctx.lineTo(p0R.x, p0R.y);
+        ctx.lineTo(p1R.x, p1R.y);
+        ctx.lineTo(p1L.x, p1L.y);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      /* Trajectory Left & Right 3D Edge Rails */
+      for (let side of [-1, 1]) {
+        for (let i = 0; i < pathSteps; i++) {
+          const t0 = i / pathSteps;
+          const t1 = (i + 1) / pathSteps;
+          const x0 = 3.85 + (pathMaxX - 3.85) * (t0 * t0);
+          const x1 = 3.85 + (pathMaxX - 3.85) * (t1 * t1);
+          const w0 = pathHalfW * (1 - t0 * 0.16);
+          const w1 = pathHalfW * (1 - t1 * 0.16);
+          const lat0 = roadCenterY(x0) + side * w0;
+          const lat1 = roadCenterY(x1) + side * w1;
+          const wRail = 0.045;
+
+          const p0L = proj(x0, lat0 - wRail, 0);
+          const p0R = proj(x0, lat0 + wRail, 0);
+          const p1R = proj(x1, lat1 + wRail, 0);
+          const p1L = proj(x1, lat1 - wRail, 0);
+
+          const fade = Math.max(0.22, 1 - t0 * 0.72);
+          ctx.fillStyle = isCriticalLead
+            ? `rgba(255, 133, 152, ${fade.toFixed(3)})`
+            : isCloseLead
+            ? `rgba(245, 194, 96, ${fade.toFixed(3)})`
+            : `rgba(95, 195, 156, ${fade.toFixed(3)})`;
+          ctx.beginPath();
+          ctx.moveTo(p0L.x, p0L.y);
+          ctx.lineTo(p0R.x, p0R.y);
+          ctx.lineTo(p1R.x, p1R.y);
+          ctx.lineTo(p1L.x, p1L.y);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+
+      /* Trajectory Internal Chevron Rungs (Perspective-projected flowing chevrons) */
+      const rungSpacing = 2.4;
+      for (let d = 4.4; d < pathMaxX - 0.8; d += rungSpacing) {
+        const xRung = d - ((roadPhase * 0.45) % rungSpacing);
+        if (xRung < 4.0 || xRung > pathMaxX - 0.7) continue;
+        const t = (xRung - 3.85) / Math.max(1, pathMaxX - 3.85);
+        const w = pathHalfW * (1 - t * 0.16) * 0.76;
+        const cMid = roadCenterY(xRung);
+        const cTip = roadCenterY(xRung + 0.55);
+        const pL = proj(xRung, cMid - w, 0);
+        const pM = proj(xRung + 0.55, cTip, 0);
+        const pR = proj(xRung, cMid + w, 0);
+
+        const fade = Math.max(0.18, 1 - t * 0.75);
+        ctx.strokeStyle = isCriticalLead
+          ? `rgba(255, 180, 192, ${(fade * 0.65).toFixed(3)})`
+          : isCloseLead
+          ? `rgba(253, 224, 142, ${(fade * 0.65).toFixed(3)})`
+          : `rgba(167, 243, 208, ${(fade * 0.62).toFixed(3)})`;
+        ctx.lineWidth = Math.max(1.5, 3.6 * fade);
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(pL.x, pL.y);
+        ctx.lineTo(pM.x, pM.y);
+        ctx.lineTo(pR.x, pR.y);
+        ctx.stroke();
+      }
+
+      /* Safe Following Distance Threshold Bar on Roadbed (HUD Braking Buffer Reference) */
+      const safeBufferX = Math.min(pathMaxX - 0.3, 6.4);
+      const sbC = roadCenterY(safeBufferX);
+      const sbL = proj(safeBufferX, sbC - 0.92, 0);
+      const sbR = proj(safeBufferX, sbC + 0.92, 0);
+      ctx.strokeStyle = isCriticalLead ? "rgba(229, 86, 111, 0.78)" : "rgba(74, 138, 214, 0.45)";
+      ctx.lineWidth = 2.0;
+      ctx.beginPath();
+      ctx.moveTo(sbL.x, sbL.y);
+      ctx.lineTo(sbR.x, sbR.y);
+      ctx.stroke();
+
+      /* Ego-Vehicle Front Sensor Shield Arc at Near Plane (x = 4.1m) */
+      const egoArcC = roadCenterY(4.15);
+      const egoArcL = proj(4.15, egoArcC - 1.28, 0);
+      const egoArcM = proj(4.42, egoArcC, 0);
+      const egoArcR = proj(4.15, egoArcC + 1.28, 0);
+      ctx.strokeStyle = "rgba(120, 188, 255, 0.52)";
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(egoArcL.x, egoArcL.y);
+      ctx.quadraticCurveTo(egoArcM.x, egoArcM.y - 6, egoArcR.x, egoArcR.y);
+      ctx.stroke();
+
+      /* 7. Ego Left & Right Recognized Lane Lines (-1.82m, +1.82m) with Outer Halo + Crisp Core */
+      drawTaperedStrip(-1.82, 0.19, (f) => `rgba(74, 138, 214, ${f * 0.25})`, false);
+      drawTaperedStrip(1.82, 0.19, (f) => `rgba(74, 138, 214, ${f * 0.25})`, false);
+      drawTaperedStrip(-1.82, 0.068, (f) => `rgba(120, 188, 255, ${f * 0.96})`, false);
+      drawTaperedStrip(1.82, 0.068, (f) => `rgba(120, 188, 255, ${f * 0.96})`, false);
+
+      /* 7b. Surround Traffic: 3D Ghost Vehicle in Right Adjacent Lane (ccNC / ADAS Surround View) */
+      const ghostX = 16.5;
+      const ghostLat = roadCenterY(ghostX) + 3.6;
+      const gGround = proj(ghostX, ghostLat, 0);
+      const gLeft = proj(ghostX, ghostLat - 0.88, 0);
+      const gRight = proj(ghostX, ghostLat + 0.88, 0);
+      const gW = Math.abs(gRight.x - gLeft.x);
+      const gH = gW * 0.66;
+      if (gW > 20) {
+        const gcx = gGround.x;
+        const gby = gGround.y;
+        ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+        ctx.beginPath();
+        ctx.ellipse(gcx, gby + 2, gW * 0.52, Math.max(3, gH * 0.12), 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "rgba(34, 39, 50, 0.62)";
+        ctx.strokeStyle = "rgba(138, 148, 166, 0.38)";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(gcx - gW * 0.48, gby - 3);
+        ctx.lineTo(gcx - gW * 0.48, gby - gH * 0.58);
+        ctx.lineTo(gcx - gW * 0.34, gby - gH * 0.94);
+        ctx.lineTo(gcx + gW * 0.34, gby - gH * 0.94);
+        ctx.lineTo(gcx + gW * 0.48, gby - gH * 0.58);
+        ctx.lineTo(gcx + gW * 0.48, gby - 3);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "rgba(229, 86, 111, 0.48)";
+        ctx.fillRect(gcx - gW * 0.42, gby - gH * 0.52, gW * 0.22, Math.max(2, gH * 0.08));
+        ctx.fillRect(gcx + gW * 0.20, gby - gH * 0.52, gW * 0.22, Math.max(2, gH * 0.08));
+      }
+
+      /* 8. 3D-Projected Lead Vehicle Model + CarrotPilot Radar Lock */
+      const leadX = visualLeadX;
+      const leadLat = roadCenterY(leadX);
+      const pGround = proj(leadX, leadLat, 0);
+      const pLeftEdge = proj(leadX, leadLat - 0.96, 0);
+      const pRightEdge = proj(leadX, leadLat + 0.96, 0);
+
+      /* Proportionally sized 3D lead vehicle in the middle of the lane */
+      const rawCarW = Math.abs(pRightEdge.x - pLeftEdge.x);
+      const carW = Math.max(72, Math.min(146, rawCarW));
+      const carH = carW * 0.68;
+      const cx = pGround.x;
+      const by = pGround.y; /* Bottom tire contact Y */
+
+      /* (a) Ground Occlusion Shadow under Lead Vehicle */
+      ctx.fillStyle = "rgba(0, 0, 0, 0.72)";
+      ctx.beginPath();
+      ctx.ellipse(cx, by + 2, carW * 0.56, Math.max(5, carH * 0.14), 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      /* (b) Left & Right Rear Tires */
+      const tireW = Math.max(9, carW * 0.17);
+      const tireH = Math.max(11, carH * 0.28);
+      ctx.fillStyle = "#090a0f";
+      ctx.strokeStyle = "#2f3340";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.roundRect(cx - carW * 0.46, by - tireH, tireW, tireH, 2.5);
+      ctx.roundRect(cx + carW * 0.46 - tireW, by - tireH, tireW, tireH, 2.5);
+      ctx.fill();
+      ctx.stroke();
+
+      /* (c) Main Lower Vehicle Body (Sculpted Wide-Haunch EV Rear) */
+      const bodyTopY = by - carH * 0.62;
+      const roofTopY = by - carH * 0.96;
+      const bodyGrad = ctx.createLinearGradient(cx, roofTopY, cx, by);
+      bodyGrad.addColorStop(0, "#2d3240");
+      bodyGrad.addColorStop(0.45, "#1f232e");
+      bodyGrad.addColorStop(1, "#12141c");
+      ctx.fillStyle = bodyGrad;
+      ctx.strokeStyle = "#525868";
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(cx - carW * 0.48, by - tireH * 0.42);
+      ctx.lineTo(cx - carW * 0.49, bodyTopY);
+      ctx.lineTo(cx - carW * 0.34, roofTopY);
+      ctx.lineTo(cx + carW * 0.34, roofTopY);
+      ctx.lineTo(cx + carW * 0.49, bodyTopY);
+      ctx.lineTo(cx + carW * 0.48, by - tireH * 0.42);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      /* (d) Rear Windshield Glass with Sky Reflection */
+      const glassGrad = ctx.createLinearGradient(cx, roofTopY, cx, bodyTopY);
+      glassGrad.addColorStop(0, "#1e293b");
+      glassGrad.addColorStop(1, "#0f1117");
+      ctx.fillStyle = glassGrad;
+      ctx.strokeStyle = "#383d4a";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx - carW * 0.38, bodyTopY - 1);
+      ctx.lineTo(cx - carW * 0.29, roofTopY + carH * 0.07);
+      ctx.lineTo(cx + carW * 0.29, roofTopY + carH * 0.07);
+      ctx.lineTo(cx + carW * 0.38, bodyTopY - 1);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      /* (e) Lower Rear Metallic Diffuser & Skid Recess */
+      ctx.fillStyle = "#161821";
+      ctx.strokeStyle = "#2e323d";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(cx - carW * 0.38, by - carH * 0.28, carW * 0.76, carH * 0.14, 2);
+      ctx.fill();
+      ctx.stroke();
+
+      /* (f) Full-Width Parametric LED Tail Lightbar + Soft Brake Glow */
+      const lampY = bodyTopY + carH * 0.04;
+      const lampH = Math.max(4.5, carH * 0.095);
+      const tailGlow = ctx.createRadialGradient(cx, lampY + lampH * 0.5, carW * 0.08, cx, lampY + lampH * 0.5, carW * 0.54);
+      tailGlow.addColorStop(0, "rgba(229, 86, 111, 0.45)");
+      tailGlow.addColorStop(1, "rgba(229, 86, 111, 0)");
+      ctx.fillStyle = tailGlow;
+      ctx.fillRect(cx - carW * 0.55, lampY - lampH * 1.5, carW * 1.1, lampH * 4);
+
+      ctx.fillStyle = "#e5566f";
+      ctx.beginPath();
+      ctx.roundRect(cx - carW * 0.45, lampY, carW * 0.90, lampH, 2);
+      ctx.fill();
+
+      /* Bright brake-lamp pixel cores on left & right */
+      ctx.fillStyle = "#ffb3c0";
+      ctx.fillRect(cx - carW * 0.43, lampY + 1, carW * 0.22, Math.max(2, lampH - 2));
+      ctx.fillRect(cx + carW * 0.21, lampY + 1, carW * 0.22, Math.max(2, lampH - 2));
+
+      /* (g) CarrotPilot / openpilot Radar Lock Chevron & Target Brackets */
+      const isClose = s.leadDistM <= 20;
+      const radarColor = isClose ? "#e5566f" : "#d9a441";
+
+      /* Corner Target Lock Brackets around Lead Vehicle */
+      const bx0 = cx - carW * 0.55;
+      const bx1 = cx + carW * 0.55;
+      const by0 = roofTopY - 5;
+      const by1 = by + 3;
+      const brk = Math.max(7, carW * 0.11);
+
+      ctx.strokeStyle = radarColor;
+      ctx.lineWidth = 2.0;
+      ctx.beginPath();
+      /* Top-Left */
+      ctx.moveTo(bx0, by0 + brk); ctx.lineTo(bx0, by0); ctx.lineTo(bx0 + brk, by0);
+      /* Top-Right */
+      ctx.moveTo(bx1 - brk, by0); ctx.lineTo(bx1, by0); ctx.lineTo(bx1, by0 + brk);
+      /* Bottom-Left */
+      ctx.moveTo(bx0, by1 - brk); ctx.lineTo(bx0, by1); ctx.lineTo(bx0 + brk, by1);
+      /* Bottom-Right */
+      ctx.moveTo(bx1 - brk, by1); ctx.lineTo(bx1, by1); ctx.lineTo(bx1, by1 - brk);
+      ctx.stroke();
+
+      /* Lead Radar Chevron on Road Surface + Distance Pill */
+      const chevY = by + 8;
+      ctx.fillStyle = radarColor;
+      ctx.beginPath();
+      ctx.moveTo(cx, chevY);
+      ctx.lineTo(cx - 12, chevY + 10);
+      ctx.lineTo(cx - 5, chevY + 10);
+      ctx.lineTo(cx, chevY + 5);
+      ctx.lineTo(cx + 5, chevY + 10);
+      ctx.lineTo(cx + 12, chevY + 10);
+      ctx.closePath();
+      ctx.fill();
+
+      /* Crisp Distance Tag Right Above Top Bracket */
+      const tagW = 62;
+      const tagH = 24;
+      const tagX = cx - tagW / 2;
+      const tagY = Math.max(8, by0 - tagH - 5);
+      ctx.fillStyle = "rgba(19, 18, 23, 0.92)";
+      ctx.strokeStyle = radarColor;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.roundRect(tagX, tagY, tagW, tagH, 5);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "700 16px 'Public Sans', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(s.leadDist, cx, tagY + tagH / 2 + 0.5);
+    }
+
+    function applyScenario(idx, btn) {
+      const s = scenarios[idx];
+      if (!s) return;
+      currentScenarioIdx = idx;
+
+      document.querySelectorAll(".scenario-row").forEach((el) => el.classList.remove("active"));
+      if (btn) btn.classList.add("active");
+
+      document.getElementById("socText").textContent = s.soc;
+      document.getElementById("socBar").style.width = s.soc + "%";
+      document.getElementById("dteText").textContent = s.dte;
+      document.getElementById("effSubText").textContent = s.eff;
+      document.getElementById("pwrText").textContent = s.pwr;
+      const pwrValNum = parseFloat(s.pwr) || 0;
+      const pwrBarEl = document.getElementById("pwrBar");
+      if (pwrBarEl) {
+        const pctPwr = Math.min(100, Math.max(8, Math.round((Math.abs(pwrValNum) / 75) * 100)));
+        pwrBarEl.style.width = pctPwr + "%";
+        pwrBarEl.className = pwrValNum < 0 ? "ccnc-bar-fill pos" : "ccnc-bar-fill";
+      }
+      document.getElementById("cumEnergyText").textContent = s.cum;
+      document.getElementById("batTempText").textContent = s.batTemp;
+      document.getElementById("batMinMaxText").textContent = s.batMinMax;
+
+      /* TPMS update */
+      const tpmsTag = document.getElementById("tpmsStatusTag");
+      tpmsTag.textContent = s.tpmsState;
+      tpmsTag.className = s.tpmsWarn ? "tpms-status-dot warn" : "tpms-status-dot";
+
+      document.getElementById("tpmsFlVal").textContent = s.flPsi;
+      document.getElementById("tpmsFrVal").textContent = s.frPsi;
+      document.getElementById("tpmsRlVal").textContent = s.rlPsi;
+      const rrValEl = document.getElementById("tpmsRrVal");
+      rrValEl.textContent = s.rrPsi;
+      rrValEl.className = s.tpmsWarn ? "tpms-psi-val warn" : "tpms-psi-val";
+
+      const rrTireSvg = document.getElementById("svgTireRr");
+      if (rrTireSvg) {
+        rrTireSvg.setAttribute("stroke", s.tpmsWarn ? "#d9a441" : "#4a8ad6");
+      }
+      document.getElementById("tpmsTempSummary").textContent = s.tpmsTemp;
+
+      /* Fused Comma + CarrotNavi update */
+      document.getElementById("egoSpeedText").textContent = s.egoSpeed;
+      document.getElementById("cruiseTargetText").textContent = s.cruiseTarget;
+      document.getElementById("leadDistText").textContent = s.leadDist;
+      document.getElementById("laneConfText").textContent = s.laneConf;
+      document.getElementById("steerAngleText").textContent = s.steerAngle;
+
+      renderCommaAdasCanvas();
+
+      document.getElementById("camLimitNum").textContent = s.camLimit;
+      setSdiEnforcementState(s.sdiMode, s.camLimit, s.camDist, s.camAvg, null);
+
+      document.getElementById("tbtDistFigure").textContent = s.tbtDist;
+      document.getElementById("tbtRoadName").textContent = s.tbtRoad;
+      document.getElementById("tbtNextText").textContent = s.tbtNext;
+
+      document.getElementById("drvTempText").innerHTML = s.drvTemp + "<small>°</small>";
+      document.getElementById("pasTempText").innerHTML = s.pasTemp + "<small>°</small>";
+      const inTempEl = document.getElementById("inTempText");
+      const outTempEl = document.getElementById("outTempText");
+      if (inTempEl) inTempEl.textContent = s.inTemp;
+      if (outTempEl) outTempEl.textContent = s.outTemp;
+      updateFanBars(s.fanStep);
+      updateAirDir(idx % 4);
+
+      document.getElementById("mediaTitleText").textContent = s.title;
+      document.getElementById("mediaArtistText").textContent = s.artist;
+    }
+
+    setInterval(() => {
+      elapsedSec = (elapsedSec + 1) % totalSec;
+      const pct = ((elapsedSec / totalSec) * 100).toFixed(1);
+      const bar = document.getElementById("mediaProgressBar");
+      const cur = document.getElementById("mediaCurTime");
+      if (bar) bar.style.width = pct + "%";
+      if (cur) {
+        const m = Math.floor(elapsedSec / 60);
+        const s = elapsedSec % 60;
+        cur.textContent = twoDigit(m) + ":" + twoDigit(s);
+      }
+    }, 1000);
+
+    /* 30fps smooth road & trajectory animation loop */
+    setInterval(() => {
+      const s = scenarios[currentScenarioIdx] || scenarios[0];
+      if (s.egoSpeedVal > 0) {
+        roadPhase = (roadPhase + (s.egoSpeedVal / 360)) % 36;
+        renderCommaAdasCanvas();
+      }
+    }, 40);
+
+    /* ==========================================================================
+       SDI SPEED SIGN STATE CONTROLLER (Red Camera Circle vs Blue Road Limit Circle)
+       & LIVE TELEMETRY CLIENT (Headunit :8765/status.json + Comma 3X :7000/ws/raw)
+       ========================================================================== */
+    let currentSdiMode = "section";
+
+    function setSdiEnforcementState(mode, limitVal, distText, avgVal, btn) {
+      currentSdiMode = mode || "none";
+      const limitNumEl = document.getElementById("camLimitNum");
+      const distEl = document.getElementById("camDistFigure");
+      const limitCircle = document.getElementById("sdiLimitCircle");
+      const capSec = document.getElementById("sdiCapSection");
+      const capTrf = document.getElementById("sdiCapTraffic");
+      const avgWing = document.getElementById("sdiAvgWing");
+      if (!limitCircle || !capSec || !capTrf || !distEl || !avgWing) return;
+
+      if (limitVal !== undefined && limitVal !== null && limitNumEl) {
+        limitNumEl.textContent = String(limitVal);
+      }
+
+      if (mode === "section") {
+        limitCircle.className = "sdi-limit-circle";
+        capSec.style.display = "inline-block";
+        capTrf.style.display = "none";
+        distEl.style.display = "block";
+        if (distText) distEl.textContent = distText;
+        avgWing.style.display = "flex";
+        if (avgVal !== undefined && avgVal !== null && avgVal !== "") {
+          document.getElementById("camAvgSpeed").textContent = String(avgVal);
+        }
+      } else if (mode === "traffic") {
+        limitCircle.className = "sdi-limit-circle";
+        capSec.style.display = "none";
+        capTrf.style.display = "inline-flex";
+        distEl.style.display = "block";
+        if (distText) distEl.textContent = distText;
+        avgWing.style.display = "none";
+      } else {
+        /* No camera enforcement event -> Blue circular ring (`idle-blue`) only */
+        limitCircle.className = "sdi-limit-circle idle-blue";
+        capSec.style.display = "none";
+        capTrf.style.display = "none";
+        distEl.style.display = "none";
+        avgWing.style.display = "none";
+      }
+
+      const bSec = document.getElementById("btnSdiSection");
+      const bTrf = document.getElementById("btnSdiTraffic");
+      const bBlu = document.getElementById("btnSdiBlue");
+      if (bSec && bTrf && bBlu) {
+        bSec.classList.toggle("active", mode === "section");
+        bTrf.classList.toggle("active", mode === "traffic");
+        bBlu.classList.toggle("active", mode !== "section" && mode !== "traffic");
+      }
+    }
+
+    function cycleSdiMode() {
+      if (currentSdiMode === "section") {
+        setSdiEnforcementState("traffic", 50, "130 m", "");
+      } else if (currentSdiMode === "traffic") {
+        setSdiEnforcementState("none", 80, "", "");
+      } else {
+        setSdiEnforcementState("section", 80, "2.3 km", 80);
+      }
+    }
+
+    /* Live Telemetry Client for Headunit (TurzxMonitor :8766/status.json or SysMonitor :8765/status.json) & Comma 3X (:7000/ws/raw CVS1/CVB1) */
+    let liveTelemetryEnabled = false;
+    const defaultHuUrl = (window.location && window.location.protocol && window.location.protocol.indexOf("http") === 0)
+      ? (window.location.origin + "/status.json")
+      : "http://127.0.0.1:8766/status.json";
+    let liveHuUrl = localStorage.getItem("hkg_hu_url") || defaultHuUrl;
+    let liveCommaWsUrl = localStorage.getItem("hkg_comma_ws") || "ws://192.168.43.10:7000/ws/raw";
+    let liveHuTimer = null;
+    let liveCommaWs = null;
+
+    function formatDistMeters(m) {
+      if (!m || m <= 0) return "";
+      if (m >= 1000) return (m / 1000).toFixed(1) + " km";
+      return Math.round(m) + " m";
+    }
+
+    function formatSecMmSs(sec) {
+      const s = Math.max(0, Math.floor(sec || 0));
+      const m = Math.floor(s / 60);
+      const r = s % 60;
+      return m + ":" + (r < 10 ? "0" + r : r);
+    }
+
+    function applyHeadunitStatusJson(data) {
+      if (!data || !data.ok) return;
+      if (typeof data.soc === "number" && data.soc >= 0) {
+        document.getElementById("socText").textContent = data.soc.toFixed(1);
+        document.getElementById("socBar").style.width = Math.min(100, Math.max(0, data.soc)) + "%";
+      }
+      if (typeof data.dteKm === "number" && data.dteKm >= 0) {
+        document.getElementById("dteText").textContent = String(data.dteKm);
+      }
+      if (typeof data.avgEcon === "number" && data.avgEcon > 0) {
+        document.getElementById("effSubText").textContent = data.avgEcon.toFixed(1) + " km/kWh";
+      }
+      if (typeof data.totalKw === "number") {
+        const sign = data.totalKw >= 0 ? "+" : "";
+        document.getElementById("pwrText").textContent = sign + data.totalKw.toFixed(1);
+        const pwrBarEl = document.getElementById("pwrBar");
+        if (pwrBarEl) {
+          const pct = Math.min(100, Math.max(6, Math.round((Math.abs(data.totalKw) / 75) * 100)));
+          pwrBarEl.style.width = pct + "%";
+          pwrBarEl.className = data.totalKw < 0 ? "ccnc-bar-fill pos" : "ccnc-bar-fill";
+        }
+      }
+      if (typeof data.remainKwh === "number" && data.remainKwh > 0) {
+        document.getElementById("cumEnergyText").textContent = "가용 " + data.remainKwh.toFixed(1) + " kWh";
+      }
+      if (typeof data.battTempC === "number") {
+        document.getElementById("batTempText").textContent = data.battTempC.toFixed(1);
+      }
+      if (typeof data.cellDiffMv === "number" && data.cellDiffMv >= 0) {
+        document.getElementById("batMinMaxText").textContent = "셀편차 Δ" + data.cellDiffMv + "mV";
+      }
+      if (data.gear) {
+        const gearEl = document.getElementById("hudGearChar");
+        if (gearEl) gearEl.textContent = data.gear;
+      }
+
+      /* Apply TPMS 4-Wheel Tire Pressure */
+      if (data.tpms) {
+        const t = data.tpms;
+        if (typeof t.fl === "number" && t.fl > 10) document.getElementById("tpmsFlVal").textContent = String(Math.round(t.fl));
+        if (typeof t.fr === "number" && t.fr > 10) document.getElementById("tpmsFrVal").textContent = String(Math.round(t.fr));
+        if (typeof t.rl === "number" && t.rl > 10) document.getElementById("tpmsRlVal").textContent = String(Math.round(t.rl));
+        if (typeof t.rr === "number" && t.rr > 10) document.getElementById("tpmsRrVal").textContent = String(Math.round(t.rr));
+      }
+
+      /* Apply Media Now Playing */
+      if (data.media) {
+        const m = data.media;
+        if (m.title) document.getElementById("mediaTitleText").textContent = m.title;
+        if (m.artist || m.album) {
+          document.getElementById("mediaArtistText").textContent =
+            (m.artist || "") + (m.album ? " — " + m.album : "");
+        }
+        if (typeof m.posSec === "number" && typeof m.durSec === "number" && m.durSec > 0) {
+          const pct = Math.min(100, Math.max(0, Math.round((m.posSec / m.durSec) * 100)));
+          const fillEl = document.getElementById("mediaProgFill");
+          if (fillEl) fillEl.style.width = pct + "%";
+          document.getElementById("mediaTimeCur").textContent = formatSecMmSs(m.posSec);
+          document.getElementById("mediaTimeTot").textContent = formatSecMmSs(m.durSec);
+        }
+      }
+
+      /* Apply DATC Climate + Indoor/Outdoor Temperatures */
+      if (data.climate) {
+        const c = data.climate;
+        if (typeof c.drTempC === "number" && c.drTempC > 0) {
+          document.getElementById("drvTempText").innerHTML = c.drTempC.toFixed(1) + "<small>°</small>";
+        }
+        if (typeof c.psTempC === "number" && c.psTempC > 0) {
+          document.getElementById("pasTempText").innerHTML = c.psTempC.toFixed(1) + "<small>°</small>";
+        }
+        if (typeof c.inCarTempC === "number" && c.inCarTempC > -50) {
+          document.getElementById("inTempText").textContent = c.inCarTempC.toFixed(1) + "°";
+        }
+        if (typeof c.outdoorTempC === "number" && c.outdoorTempC > -50) {
+          document.getElementById("outTempText").textContent = c.outdoorTempC.toFixed(1) + "°";
+        }
+        if (typeof c.blowerStep === "number" && c.blowerStep >= 0) {
+          if (c.blowerStep === 0) {
+            const label = document.getElementById("fanStepLabel");
+            if (label) label.textContent = "OFF";
+            document.querySelectorAll("#fanBarsRail .fan-bar-seg").forEach((b) => b.classList.remove("active"));
+          } else {
+            updateFanBars(Math.min(7, c.blowerStep));
+          }
+        }
+        /* Map DATC BLOWER_MODE (1=VENT, 2=BI-LEVEL, 3=FLOOR, 4=MIX, 5=DEF) to 3-arrow SVG */
+        if (typeof c.blowerMode === "number" && c.blowerMode >= 1) {
+          const up = document.getElementById("airArrowUp");
+          const mid = document.getElementById("airArrowMid");
+          const down = document.getElementById("airArrowDown");
+          if (up && mid && down) {
+            const m = c.blowerMode;
+            const uOn = (m === 4 || m === 5 || m >= 6);
+            const mOn = (m === 1 || m === 2 || m === 7 || m === 9);
+            const dOn = (m === 2 || m === 3 || m === 4 || m === 8 || m === 9);
+            up.className.baseVal = uOn ? "air-arrow" : "air-arrow off";
+            mid.className.baseVal = mOn ? "air-arrow" : "air-arrow off";
+            down.className.baseVal = dOn ? "air-arrow" : "air-arrow off";
+          }
+        }
+      }
+
+      /* Apply CarrotPilot UDP fallback if WebSocket is not directly connected */
+      if (data.carrot && data.carrot.connected && (!liveCommaWs || liveCommaWs.readyState !== 1)) {
+        const cr = data.carrot;
+        if (cr.speedKph >= 0) {
+          document.getElementById("egoSpeedText").textContent = String(cr.speedKph);
+          scenarios[currentScenarioIdx].egoSpeedVal = cr.speedKph;
+        }
+        if (cr.cruiseKph > 0) {
+          document.getElementById("cruiseTargetText").textContent = String(cr.cruiseKph);
+        }
+        if (cr.sdiType >= 0 && cr.sdiSpeedLimit > 0 && cr.sdiDistM > 0) {
+          const mode = (cr.sdiType === 2 || cr.sdiType === 3) ? "section" : "traffic";
+          setSdiEnforcementState(mode, cr.sdiSpeedLimit, formatDistMeters(cr.sdiDistM), cr.sdiSpeedLimit);
+        } else {
+          const roadLim = cr.sdiSpeedLimit > 0 ? cr.sdiSpeedLimit : (cr.cruiseKph > 0 ? cr.cruiseKph : 80);
+          setSdiEnforcementState("none", roadLim, "", "");
+        }
+        if (cr.tbtDistM > 0) {
+          document.getElementById("tbtDistFigure").textContent = formatDistMeters(cr.tbtDistM);
+        }
+      }
+    }
+
+    function decodeSingleCvs1FrameView(dv, base, len) {
+      if (len < 12 || base + len > dv.byteLength) return;
+      if (dv.getUint8(base) !== 0x43 || dv.getUint8(base + 1) !== 0x56 || dv.getUint8(base + 2) !== 0x53 || dv.getUint8(base + 3) !== 0x31) {
+        return;
+      }
+      const serviceId = dv.getUint8(base + 4);
+      const s = scenarios[currentScenarioIdx] || scenarios[0];
+
+      if (serviceId === 1 && len >= 73) {
+        /* carState (73 bytes) */
+        const vEgoMs = dv.getFloat32(base + 8, true);
+        const vEgoClusterMs = dv.getFloat32(base + 16, true);
+        const vCruiseKph = Math.round(dv.getFloat32(base + 20, true));
+        const steerDeg = dv.getFloat32(base + 24, true);
+        const gearShifter = dv.getUint8(base + 46);
+        const flPsi = dv.getFloat32(base + 57, true);
+        const frPsi = dv.getFloat32(base + 61, true);
+        const rlPsi = dv.getFloat32(base + 65, true);
+        const rrPsi = dv.getFloat32(base + 69, true);
+
+        const refMs = (!isNaN(vEgoClusterMs) && vEgoClusterMs > 0.1) ? vEgoClusterMs : vEgoMs;
+        const egoKph = Math.max(0, Math.round(refMs * 3.6));
+        document.getElementById("egoSpeedText").textContent = String(egoKph);
+        s.egoSpeedVal = egoKph;
+        if (vCruiseKph > 0 && vCruiseKph < 250) {
+          document.getElementById("cruiseTargetText").textContent = String(vCruiseKph);
+        }
+        const gearMap = { 1: "P", 2: "D", 3: "N", 4: "R" };
+        if (gearMap[gearShifter]) {
+          document.getElementById("hudGearChar").textContent = gearMap[gearShifter];
+        }
+        if (!isNaN(steerDeg) && Math.abs(steerDeg) < 500) {
+          const sign = steerDeg >= 0 ? "+" : "";
+          document.getElementById("steerAngleText").textContent = sign + steerDeg.toFixed(1) + "°";
+          s.curveC1 = steerDeg * 0.0012;
+        }
+        if (flPsi > 10 && flPsi < 70) document.getElementById("tpmsFlVal").textContent = String(Math.round(flPsi));
+        if (frPsi > 10 && frPsi < 70) document.getElementById("tpmsFrVal").textContent = String(Math.round(frPsi));
+        if (rlPsi > 10 && rlPsi < 70) document.getElementById("tpmsRlVal").textContent = String(Math.round(rlPsi));
+        if (rrPsi > 10 && rrPsi < 70) document.getElementById("tpmsRrVal").textContent = String(Math.round(rrPsi));
+      } else if (serviceId === 2 && len >= 18) {
+        /* controlsState */
+        const vCruise = Math.round(dv.getFloat32(base + 9, true));
+        const curvature = dv.getFloat32(base + 14, true);
+        if (vCruise > 0 && vCruise < 250) {
+          document.getElementById("cruiseTargetText").textContent = String(vCruise);
+        }
+        if (!isNaN(curvature) && Math.abs(curvature) < 0.5) {
+          s.curveC1 = curvature * 12.0;
+        }
+      } else if (serviceId === 5 && len >= 44) {
+        /* carrotMan (SDI speed camera + TBT navigation) */
+        const roadLim = dv.getInt32(base + 12, true);
+        const sdiType = dv.getInt32(base + 16, true);
+        const sdiLim = dv.getInt32(base + 20, true);
+        const sdiDistM = dv.getInt32(base + 24, true);
+        const tbtDistM = dv.getInt32(base + 36, true);
+
+        if (sdiType >= 0 && sdiLim > 0 && sdiDistM > 0) {
+          const mode = (sdiType === 2 || sdiType === 3) ? "section" : "traffic";
+          setSdiEnforcementState(mode, sdiLim, formatDistMeters(sdiDistM), sdiLim);
+        } else {
+          const normLim = roadLim > 0 ? roadLim : (sdiLim > 0 ? sdiLim : 80);
+          setSdiEnforcementState("none", normLim, "", "");
+        }
+        if (tbtDistM > 0) {
+          document.getElementById("tbtDistFigure").textContent = formatDistMeters(tbtDistM);
+        }
+        let p = base + 44;
+        const end = base + len;
+        const dec = typeof TextDecoder !== "undefined" ? new TextDecoder("utf-8") : null;
+        for (let idx = 0; idx < 3 && p + 2 <= end; idx++) {
+          const sLen = dv.getUint16(p, true);
+          p += 2;
+          if (p + sLen > end) break;
+          if (idx >= 1 && sLen > 0 && dec) {
+            const txt = dec.decode(new Uint8Array(dv.buffer, dv.byteOffset + p, sLen)).trim();
+            if (txt) document.getElementById("tbtRoadLabel").textContent = txt;
+          }
+          p += sLen;
+        }
+      } else if (serviceId === 13 && len >= 50) {
+        /* radarState (leadOne starts at offset 8) */
+        const dRel = dv.getFloat32(base + 8, true);
+        const status = dv.getUint8(base + 49);
+        if (status && dRel > 1 && dRel < 180) {
+          s.leadDistM = dRel;
+          s.leadDist = Math.round(dRel) + "m";
+          document.getElementById("leadDistText").textContent = s.leadDist;
+        }
+      }
+    }
+
+    function decodeCarrotCvs1Frame(buf) {
+      if (!buf || buf.byteLength < 12) return;
+      const dv = new DataView(buf);
+      /* Unpack CVB1 batch (magic 'CVB1' = 0x43, 0x56, 0x42, 0x31) or single CVS1 frame */
+      if (dv.getUint8(0) === 0x43 && dv.getUint8(1) === 0x56 && dv.getUint8(2) === 0x42 && dv.getUint8(3) === 0x31) {
+        const count = dv.getUint16(4, true);
+        let off = 6;
+        for (let i = 0; i < count && off + 4 <= dv.byteLength; i++) {
+          const fLen = dv.getUint32(off, true);
+          off += 4;
+          if (fLen <= 0 || off + fLen > dv.byteLength) break;
+          decodeSingleCvs1FrameView(dv, off, fLen);
+          off += fLen;
+        }
+      } else {
+        decodeSingleCvs1FrameView(dv, 0, dv.byteLength);
+      }
+      renderCommaAdasCanvas();
+    }
+
+    function startLiveTelemetry() {
+      stopLiveTelemetry();
+      liveTelemetryEnabled = true;
+      const btn = document.getElementById("btnLiveLink");
+      if (btn) {
+        btn.classList.add("active");
+        btn.textContent = "🟢 실차 연동중";
+      }
+      /* 1. Poll Headunit :8766/status.json (with fallback to :8765/status.json) every 500ms */
+      const pollHu = () => {
+        if (!liveTelemetryEnabled) return;
+        fetch(liveHuUrl, { cache: "no-store" })
+          .then((r) => r.json())
+          .then((d) => applyHeadunitStatusJson(d))
+          .catch(() => {
+            if (liveHuUrl.indexOf(":8766") !== -1) {
+              fetch(liveHuUrl.replace(":8766", ":8765"), { cache: "no-store" })
+                .then((r) => r.json())
+                .then((d) => applyHeadunitStatusJson(d))
+                .catch(() => {});
+            }
+          });
+      };
+      pollHu();
+      liveHuTimer = setInterval(pollHu, 500);
+
+      /* 2. Connect Comma 3X ws://<ip>:7000/ws/raw binary stream */
+      try {
+        liveCommaWs = new WebSocket(liveCommaWsUrl);
+        liveCommaWs.binaryType = "arraybuffer";
+        liveCommaWs.onmessage = (ev) => {
+          if (ev.data instanceof ArrayBuffer) {
+            decodeCarrotCvs1Frame(ev.data);
+          } else if (typeof ev.data === "string" && ev.data.startsWith("{")) {
+            try {
+              const obj = JSON.parse(ev.data);
+              applyHeadunitStatusJson({ ok: true, carrot: { connected: true, speedKph: obj.v_ego_kph, cruiseKph: obj.v_cruise_kph, sdiType: obj.sdi_type, sdiSpeedLimit: obj.sdi_speed_limit, sdiDistM: obj.sdi_dist, tbtDistM: obj.tbt_dist } });
+            } catch (e) {}
+          }
+        };
+      } catch (e) {}
+    }
+
+    function stopLiveTelemetry() {
+      liveTelemetryEnabled = false;
+      if (liveHuTimer) {
+        clearInterval(liveHuTimer);
+        liveHuTimer = null;
+      }
+      if (liveCommaWs) {
+        try { liveCommaWs.close(); } catch (e) {}
+        liveCommaWs = null;
+      }
+      const btn = document.getElementById("btnLiveLink");
+      if (btn) {
+        btn.classList.remove("active");
+        btn.textContent = "📡 실차 연동";
+      }
+    }
+
+    function toggleLiveTelemetryModal() {
+      if (liveTelemetryEnabled) {
+        stopLiveTelemetry();
+        return;
+      }
+      const huInput = prompt("헤드유닛 상태 JSON 주소 (SysMonitor v2.4.0 :8765):", liveHuUrl);
+      if (!huInput) return;
+      const commaInput = prompt("Comma 3X (carrot-wip) WebSocket 주소 (:7000/ws/raw):", liveCommaWsUrl);
+      liveHuUrl = huInput.trim();
+      if (commaInput) liveCommaWsUrl = commaInput.trim();
+      localStorage.setItem("hkg_hu_url", liveHuUrl);
+      localStorage.setItem("hkg_comma_ws", liveCommaWsUrl);
+      startLiveTelemetry();
+    }
+
+    window.addEventListener("resize", updateViewportScale);
+    window.addEventListener("DOMContentLoaded", () => {
+      updateViewportScale();
+      renderCommaAdasCanvas();
+      /* Auto-start live telemetry if ?live=1 is in the URL query string */
+      if (window.location.search.indexOf("live=1") !== -1) {
+        startLiveTelemetry();
+      }
+    });
+  </script>
+</body>
+</html>

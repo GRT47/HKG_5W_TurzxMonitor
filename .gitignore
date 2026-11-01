@@ -1,0 +1,63 @@
+# Build outputs
+build/
+out/
+.gradle/
+.externalNativeBuild/
+.cxx/
+captures/
+package_turzx_monitor/build/
+
+# Compiled binaries & archives
+*.apk
+*.aab
+*.dex
+*.class
+*.jar
+*.zip
+*.o
+*.os
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.sconsign.dblite
+*_pyx.cpp
+dist/
+*.egg-info/
+
+# Local environment / IDE / Agent folders
+local.properties
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+venv/
+.venv/
+node_modules/
+.taste-skill/
+
+# Secrets & keys
+.env
+.env.*
+*.jks
+*.keystore
+*.pem
+*.key
+*.p12
+
+# Logs & temporary files
+*.log
+*.bak
+*.orig
+*.rej
+*.tmp
+*.swp
+*~
+*.patch

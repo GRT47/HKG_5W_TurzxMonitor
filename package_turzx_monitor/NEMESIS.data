@@ -1,0 +1,20 @@
+[nemesis]
+version=1.0.0
+id=hkg.turzxmonitor
+name=HKG 5W TURZX 9.2 Cluster
+types=application,service
+postinstall=scripts/post.sh
+preuninstall=scripts/preun.sh
+
+[app.0]
+kind=sh
+path=bin/launch.sh
+uid=root
+
+[service.0]
+name=hkg-turzxmonitor
+kind=sh
+path=svc/turzx-daemon.sh
+uid=root
+mode=background
+
