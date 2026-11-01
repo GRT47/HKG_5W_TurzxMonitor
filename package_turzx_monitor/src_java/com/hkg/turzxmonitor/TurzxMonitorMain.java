@@ -72,7 +72,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.2.0";
+    public static final String MONITOR_VERSION = "1.2.1";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -3564,6 +3564,7 @@ public class TurzxMonitorMain {
         private static volatile Object rootView = null;
         private static volatile Object currentWmLp = null;
         private static volatile Object statusTv = null;
+        private static volatile String lastStatusText = "";
         private static volatile boolean isVisible = false;
         private static volatile String bannerMsg = "";
         private static volatile long bannerUntilMs = 0L;
@@ -3768,35 +3769,38 @@ public class TurzxMonitorMain {
                 tvCls.getMethod("setText", CharSequence.class).invoke(tv, "🖥️ TURZX 9.2 HUD · 초기화 중...");
                 tvCls.getMethod("setTextSize", int.class, float.class).invoke(tv, 2, 13.5f);
                 tvCls.getMethod("setTextColor", int.class).invoke(tv, 0xFFF8FAFC);
+                viewCls.getMethod("setPadding", int.class, int.class, int.class, int.class).invoke(tv, 4, 6, 10, 6);
 
                 Constructor<?> llLpCtor = llLpCls.getConstructor(int.class, int.class);
-                vgCls.getMethod("addView", viewCls, vgLpCls).invoke(root, tv, llLpCtor.newInstance(-2, -2));
 
-                // Action buttons: [☁️ 업데이트] [💾 로그저장] [✖]
+                // Place action buttons FIRST on the left so 1Hz statusTv text updates never shift button coordinates!
                 Object btnUpdate = createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls,
-                        "  ☁️ 업데이트  ", 0xFF0284C7, new Runnable() {
+                        " ☁️ 업데이트 ", 0xFF0284C7, new Runnable() {
                             @Override
                             public void run() {
                                 OtaUpdateManager.triggerManualOta(installDir, false);
                             }
                         });
                 Object lpBtn1 = llLpCtor.newInstance(-2, -2);
-                llLpCls.getMethod("setMargins", int.class, int.class, int.class, int.class).invoke(lpBtn1, 14, 0, 0, 0);
+                llLpCls.getMethod("setMargins", int.class, int.class, int.class, int.class).invoke(lpBtn1, 0, 0, 8, 0);
                 vgCls.getMethod("addView", viewCls, vgLpCls).invoke(root, btnUpdate, lpBtn1);
 
                 Object btnLog = createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls,
-                        "  💾 로그저장  ", 0xFF0D9488, new Runnable() {
+                        " 💾 로그저장 ", 0xFF0D9488, new Runnable() {
                             @Override
                             public void run() {
                                 DebugManager.triggerAsyncDump(installDir);
                             }
                         });
                 Object lpBtn2 = llLpCtor.newInstance(-2, -2);
-                llLpCls.getMethod("setMargins", int.class, int.class, int.class, int.class).invoke(lpBtn2, 8, 0, 0, 0);
+                llLpCls.getMethod("setMargins", int.class, int.class, int.class, int.class).invoke(lpBtn2, 0, 0, 12, 0);
                 vgCls.getMethod("addView", viewCls, vgLpCls).invoke(root, btnLog, lpBtn2);
 
+                // Status text in the middle (drag handle)
+                vgCls.getMethod("addView", viewCls, vgLpCls).invoke(root, tv, llLpCtor.newInstance(-2, -2));
+
                 Object btnHide = createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls,
-                        "  ✖  ", 0xFF334155, new Runnable() {
+                        " ✖ ", 0xFF334155, new Runnable() {
                             @Override
                             public void run() {
                                 setEnabledAndShow(false);
@@ -3806,8 +3810,8 @@ public class TurzxMonitorMain {
                 llLpCls.getMethod("setMargins", int.class, int.class, int.class, int.class).invoke(lpBtn3, 8, 0, 0, 0);
                 vgCls.getMethod("addView", viewCls, vgLpCls).invoke(root, btnHide, lpBtn3);
 
-                // Drag to move overlay
-                attachDragAndHideTouchListener(root);
+                // Attach drag listener to status text view so button touches are never intercepted by drag!
+                attachDragAndHideTouchListener(tv);
 
                 Class<?> wmLpCls = Class.forName("android.view.WindowManager$LayoutParams");
                 Constructor<?> lpCtor = wmLpCls.getConstructor(int.class, int.class, int.class, int.class, int.class);
@@ -3823,6 +3827,7 @@ public class TurzxMonitorMain {
                 rootView = root;
                 currentWmLp = lp;
                 statusTv = tv;
+                lastStatusText = "";
                 isVisible = true;
                 refreshOnUiThread();
             } catch (Throwable ignored) {
@@ -3833,40 +3838,56 @@ public class TurzxMonitorMain {
                 Class<?> ctxCls,
                 Class<?> viewCls,
                 Class<?> tvCls,
-                Class<?> gdCls,
+                final Class<?> gdCls,
                 Class<?> drawableCls,
                 String label,
-                int strokeColor,
+                final int strokeColor,
                 final Runnable onClick
         ) throws Exception {
-            Object btn = tvCls.getConstructor(ctxCls).newInstance(sysContext);
+            final Object btn = tvCls.getConstructor(ctxCls).newInstance(sysContext);
             tvCls.getMethod("setText", CharSequence.class).invoke(btn, label);
-            tvCls.getMethod("setTextSize", int.class, float.class).invoke(btn, 2, 12.0f);
+            tvCls.getMethod("setTextSize", int.class, float.class).invoke(btn, 2, 13.0f);
             tvCls.getMethod("setTextColor", int.class).invoke(btn, 0xFFF8FAFC);
-            viewCls.getMethod("setPadding", int.class, int.class, int.class, int.class).invoke(btn, 8, 4, 8, 4);
+            viewCls.getMethod("setPadding", int.class, int.class, int.class, int.class).invoke(btn, 16, 9, 16, 9);
 
-            Object gd = gdCls.getConstructor().newInstance();
+            final Object gd = gdCls.getConstructor().newInstance();
             gdCls.getMethod("setColor", int.class).invoke(gd, 0xFF1E293B);
             gdCls.getMethod("setCornerRadius", float.class).invoke(gd, 10f);
-            gdCls.getMethod("setStroke", int.class, int.class).invoke(gd, 1, strokeColor);
+            gdCls.getMethod("setStroke", int.class, int.class).invoke(gd, 2, strokeColor);
             viewCls.getMethod("setBackgroundDrawable", drawableCls).invoke(btn, gd);
             viewCls.getMethod("setClickable", boolean.class).invoke(btn, true);
 
-            Class<?> clickIfc = Class.forName("android.view.View$OnClickListener");
-            Object clickProxy = Proxy.newProxyInstance(
-                    clickIfc.getClassLoader(),
-                    new Class<?>[]{clickIfc},
+            // Handle touch directly on ACTION_DOWN / ACTION_UP so 1Hz layout refreshes never cancel clicks!
+            Class<?> touchIfc = Class.forName("android.view.View$OnTouchListener");
+            Object touchProxy = Proxy.newProxyInstance(
+                    touchIfc.getClassLoader(),
+                    new Class<?>[]{touchIfc},
                     new InvocationHandler() {
                         @Override
                         public Object invoke(Object proxy, Method method, Object[] args) {
-                            if ("onClick".equals(method.getName()) && onClick != null) {
-                                try { onClick.run(); } catch (Throwable ignored) {}
+                            if ("onTouch".equals(method.getName()) && args != null && args.length >= 2 && args[1] != null) {
+                                try {
+                                    Object me = args[1];
+                                    int act = ((Integer) me.getClass().getMethod("getAction").invoke(me)).intValue() & 0xFF;
+                                    if (act == 0) { // ACTION_DOWN: instant highlight feedback
+                                        gdCls.getMethod("setColor", int.class).invoke(gd, strokeColor);
+                                        btn.getClass().getMethod("invalidate").invoke(btn);
+                                    } else if (act == 1 || act == 3) { // ACTION_UP / ACTION_CANCEL
+                                        gdCls.getMethod("setColor", int.class).invoke(gd, 0xFF1E293B);
+                                        btn.getClass().getMethod("invalidate").invoke(btn);
+                                        if (act == 1 && onClick != null) {
+                                            onClick.run();
+                                        }
+                                    }
+                                } catch (Throwable ignored) {
+                                }
+                                return Boolean.TRUE;
                             }
-                            return null;
+                            return Boolean.FALSE;
                         }
                     }
             );
-            viewCls.getMethod("setOnClickListener", clickIfc).invoke(btn, clickProxy);
+            viewCls.getMethod("setOnTouchListener", touchIfc).invoke(btn, touchProxy);
             return btn;
         }
 
@@ -3875,6 +3896,7 @@ public class TurzxMonitorMain {
             rootView = null;
             currentWmLp = null;
             statusTv = null;
+            lastStatusText = "";
             isVisible = false;
             try {
                 if (oldRoot != null && windowManager != null) {
@@ -3892,10 +3914,10 @@ public class TurzxMonitorMain {
                 TelemetrySnapshot snap = TelemetryCollector.getLatestSnapshot();
                 long now = System.currentTimeMillis();
                 String extra = "";
-                if (OtaUpdateManager.isUpdating()) {
-                    extra = "   |   ☁️ " + OtaUpdateManager.getStatusText();
-                } else if (now < bannerUntilMs && bannerMsg != null && !bannerMsg.isEmpty()) {
+                if (now < bannerUntilMs && bannerMsg != null && !bannerMsg.isEmpty()) {
                     extra = "   |   " + bannerMsg;
+                } else if (OtaUpdateManager.isUpdating()) {
+                    extra = "   |   ☁️ " + OtaUpdateManager.getStatusText();
                 }
                 String text = String.format(Locale.US,
                         "🖥️ v%s · %s   |   ⚡ %.0f%% (%dkm)   |   ❄️ 실내 %.1f°·실외 %.1f°%s",
@@ -3907,7 +3929,10 @@ public class TurzxMonitorMain {
                         snap.outdoorTempC > -50 ? snap.outdoorTempC : 18.0,
                         extra
                 );
-                statusTv.getClass().getMethod("setText", CharSequence.class).invoke(statusTv, text);
+                if (!text.equals(lastStatusText)) {
+                    lastStatusText = text;
+                    statusTv.getClass().getMethod("setText", CharSequence.class).invoke(statusTv, text);
+                }
             } catch (Throwable ignored) {
             }
             postDelayedToUi(REFRESH_TASK, 1000L);
@@ -4220,7 +4245,10 @@ public class TurzxMonitorMain {
         private static volatile String otaStatusText = "대기 중";
         private static volatile String remoteVersion = MONITOR_VERSION;
         private static volatile long lastCheckMs = 0L;
+        private static volatile long lastManualTriggerMs = 0L;
         private static volatile boolean workerStarted = false;
+        private static volatile int otaRunGen = 0;
+        private static volatile Socket activeRawSocket = null;
 
         public static boolean isUpdating() {
             return otaUpdating;
@@ -4247,7 +4275,7 @@ public class TurzxMonitorMain {
                     while (true) {
                         try {
                             MonitorConfig cfg = TurzxOverlayController.getConfig();
-                            if (cfg == null || cfg.autoUpdate) {
+                            if ((cfg == null || cfg.autoUpdate) && !otaUpdating) {
                                 checkAndApplyGitHubOta(installDir, true, false, true);
                             }
                         } catch (Throwable tErr) {
@@ -4265,10 +4293,22 @@ public class TurzxMonitorMain {
         }
 
         public static void triggerManualOta(final String installDir, final boolean forceApply) {
-            if (otaUpdating) {
-                TurzxOverlayController.showBannerMessage("☁️ 이미 업데이트 확인 중입니다", 3500L);
+            long now = System.currentTimeMillis();
+            if (otaUpdating && (now - lastManualTriggerMs) < 2500L) {
+                TurzxOverlayController.showBannerMessage("☁️ GitHub 최신 버전 확인 중...", 4000L);
                 return;
             }
+            lastManualTriggerMs = now;
+            // Preempt any stuck or slow background check immediately
+            otaRunGen++;
+            Socket s = activeRawSocket;
+            if (s != null) {
+                try {
+                    s.close();
+                } catch (Throwable ignored) {
+                }
+            }
+            otaUpdating = false;
             TurzxOverlayController.showBannerMessage("☁️ GitHub 최신 버전 확인 중...", 5000L);
             Thread t = new Thread(new Runnable() {
                 @Override
@@ -4280,13 +4320,13 @@ public class TurzxMonitorMain {
             t.start();
         }
 
-        public static synchronized boolean checkAndApplyGitHubOta(
+        public static boolean checkAndApplyGitHubOta(
                 String dir,
                 boolean applyIfNew,
                 boolean forceApply,
                 boolean silentIfUpToDate
         ) {
-            if (otaUpdating) return false;
+            final int myGen = ++otaRunGen;
             otaUpdating = true;
             String installDir = (dir != null && !dir.isEmpty()) ? dir : "/data/nemesis/apps/hkg.turzxmonitor";
             try {
@@ -4294,11 +4334,12 @@ public class TurzxMonitorMain {
                 otaStatusText = "GitHub 연결 중...";
                 ensureGitHubRoutingRule();
 
-                byte[] verBytes = downloadGitHubOtaFile(GITHUB_OTA_BASE_PATH + "/version.json", 32768);
+                byte[] verBytes = downloadGitHubOtaFile(GITHUB_OTA_BASE_PATH + "/version.json", 32768, myGen);
+                if (myGen != otaRunGen) return false;
                 if (verBytes == null || verBytes.length < 10) {
                     otaStatusText = "서버 응답 없음 (네트워크 확인)";
                     if (!silentIfUpToDate) {
-                        TurzxOverlayController.showBannerMessage("⚠️ GitHub 연결 실패", 5000L);
+                        TurzxOverlayController.showBannerMessage("⚠️ GitHub 연결 실패 (네트워크 확인)", 5000L);
                     }
                     return false;
                 }
@@ -4312,6 +4353,9 @@ public class TurzxMonitorMain {
 
                 if (rVer == null || rVer.isEmpty() || rJarSha == null || rJarSha.length() != 64) {
                     otaStatusText = "버전 메타데이터 오류";
+                    if (!silentIfUpToDate) {
+                        TurzxOverlayController.showBannerMessage("⚠️ 버전 메타데이터 오류", 5000L);
+                    }
                     return false;
                 }
                 remoteVersion = rVer;
@@ -4348,7 +4392,8 @@ public class TurzxMonitorMain {
                 TurzxOverlayController.showBannerMessage("☁️ v" + rVer + " 업데이트 다운로드 중...", 10000L);
 
                 if (forceApply || jarChanged) {
-                    byte[] b64Bytes = downloadGitHubOtaFile(GITHUB_OTA_BASE_PATH + "/turzxmonitor.b64", 4 * 1024 * 1024);
+                    byte[] b64Bytes = downloadGitHubOtaFile(GITHUB_OTA_BASE_PATH + "/turzxmonitor.b64", 4 * 1024 * 1024, myGen);
+                    if (myGen != otaRunGen) return false;
                     if (b64Bytes == null || b64Bytes.length < 100) {
                         otaStatusText = "JAR 다운로드 실패";
                         TurzxOverlayController.showBannerMessage("⚠️ 업데이트 다운로드 실패", 5000L);
@@ -4367,7 +4412,7 @@ public class TurzxMonitorMain {
                 }
 
                 if (forceApply || daemonChanged) {
-                    byte[] daemonBytes = downloadGitHubOtaFile(GITHUB_OTA_BASE_PATH + "/turzx-daemon.sh", 262144);
+                    byte[] daemonBytes = downloadGitHubOtaFile(GITHUB_OTA_BASE_PATH + "/turzx-daemon.sh", 262144, myGen);
                     if (daemonBytes != null && daemonBytes.length > 50) {
                         String dlDaemonSha = sha256Hex(daemonBytes);
                         if (rDaemonSha == null || rDaemonSha.isEmpty() || rDaemonSha.equalsIgnoreCase(dlDaemonSha)) {
@@ -4379,7 +4424,7 @@ public class TurzxMonitorMain {
                 }
 
                 if (forceApply || launchChanged) {
-                    byte[] launchBytes = downloadGitHubOtaFile(GITHUB_OTA_BASE_PATH + "/launch.sh", 262144);
+                    byte[] launchBytes = downloadGitHubOtaFile(GITHUB_OTA_BASE_PATH + "/launch.sh", 262144, myGen);
                     if (launchBytes != null && launchBytes.length > 50) {
                         String dlLaunchSha = sha256Hex(launchBytes);
                         if (rLaunchSha == null || rLaunchSha.isEmpty() || rLaunchSha.equalsIgnoreCase(dlLaunchSha)) {
@@ -4417,10 +4462,14 @@ public class TurzxMonitorMain {
                 return true;
             } catch (Throwable t) {
                 DebugManager.logError("OTA", "checkAndApplyGitHubOta", t);
-                otaStatusText = "업데이트 오류";
+                if (myGen == otaRunGen) {
+                    otaStatusText = "업데이트 오류";
+                }
                 return false;
             } finally {
-                otaUpdating = false;
+                if (myGen == otaRunGen) {
+                    otaUpdating = false;
+                }
             }
         }
 
@@ -4462,7 +4511,7 @@ public class TurzxMonitorMain {
                 DatagramSocket ds = null;
                 try {
                     ds = new DatagramSocket();
-                    ds.setSoTimeout(2000);
+                    ds.setSoTimeout(1200);
                     ByteArrayOutputStream q = new ByteArrayOutputStream(64);
                     q.write(new byte[]{0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
                     String[] labels = host.split("\\.");
@@ -4525,11 +4574,13 @@ public class TurzxMonitorMain {
             return ips;
         }
 
-        private static byte[] downloadGitHubOtaFile(String path, int maxBytes) {
+        private static byte[] downloadGitHubOtaFile(String path, int maxBytes, int myGen) {
             List<String> ips = resolveHostViaPublicDns(GITHUB_RAW_HOST);
             for (int i = 0; i < ips.size(); i++) {
+                if (myGen != otaRunGen) return null;
                 String ip = ips.get(i);
                 SSLSocket sslSock = null;
+                Socket rawSock = null;
                 try {
                     TrustManager[] trustAll = new TrustManager[]{
                             new X509TrustManager() {
@@ -4541,9 +4592,10 @@ public class TurzxMonitorMain {
                     SSLContext sc = SSLContext.getInstance("TLSv1.2");
                     sc.init(null, trustAll, new SecureRandom());
 
-                    Socket rawSock = new Socket();
-                    rawSock.connect(new InetSocketAddress(ip, 443), 5000);
-                    rawSock.setSoTimeout(10000);
+                    rawSock = new Socket();
+                    activeRawSocket = rawSock;
+                    rawSock.connect(new InetSocketAddress(ip, 443), 3000);
+                    rawSock.setSoTimeout(7000);
 
                     sslSock = (SSLSocket) sc.getSocketFactory().createSocket(rawSock, GITHUB_RAW_HOST, 443, true);
                     sslSock.setEnabledProtocols(new String[]{"TLSv1.2"});
@@ -4588,7 +4640,11 @@ public class TurzxMonitorMain {
                     return body;
                 } catch (Throwable ignored) {
                 } finally {
+                    if (activeRawSocket == rawSock) {
+                        activeRawSocket = null;
+                    }
                     if (sslSock != null) { try { sslSock.close(); } catch (Throwable ignored) {} }
+                    else if (rawSock != null) { try { rawSock.close(); } catch (Throwable ignored) {} }
                 }
             }
             return null;
