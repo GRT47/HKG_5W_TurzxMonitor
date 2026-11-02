@@ -65,14 +65,14 @@ import javax.net.ssl.X509TrustManager;
  *    - EV & BMS (com.hkmc.micom.hev, com.hkmc.micom.hscanmicomservice, TM_HSCANPacketRunner logcat fallback,
  *      tm_hscan_service, NavigationCluster, and shared /data/local/tmp/hkg_monitor_state.json)
  *    - DATC Climate (com.hkmc.micom.datc IDATCService + VCRM2.0 DATC3/DATC4 & UDS 61 01 indoor/outdoor temps)
- *    - Comma 3X (ajouatom/openpilot carrot-wip) UDP (:7705/:7706) + CVS1 Binary WebSocket (ws://<ip>:7000/ws/raw)
- *    - Now Playing Media (system properties / media broadcast cache / AudioManager state)
+ *    - Comma 3X (ajouatom/openpilot carrot-wip) UDP (:7705/:7706) + CVS1/CVB1 Binary WebSocket (ws://<ip>:7000/ws/compact_state)
+ *    - Now Playing Media (ActivityManagerNative IIntentReceiver.Stub + system properties / AudioManager state)
  * 4. Embedded Web Server (:8766) serving turzx_92_mockup.html, /status.json, and /frame.jpg +
  *    Gen5W WindowManager (TYPE_VOLUME_OVERLAY 2020) Control & Live Preview Overlay.
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.3.2";
+    public static final String MONITOR_VERSION = "1.3.3";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -236,21 +236,24 @@ public class TurzxMonitorMain {
         public double outdoorTempC = 18.0;
         public double inCarTempC = 22.5;
 
-        // 3. Comma 3X (carrot-wip) ADAS + SDI/TBT + TPMS
+        // 3. Comma 3X (carrot-wip) ADAS + Headunit CAN Steering/Speed + SDI/TBT + TPMS
         public boolean carrotConnected = false;
         public int carrotSpeedKph = 0;
-        public int carrotCruiseKph = 80;
+        public int carrotCruiseKph = 0;
         public boolean carrotActive = false;
-        public int carrotSdiType = 0;         // >= 0: active camera (Red circle), < 0: normal limit (Blue circle)
-        public int carrotSdiSpeedLimit = 80;  // km/h
-        public int carrotSdiDistM = 2300;
-        public int carrotTbtDistM = 280;
-        public String carrotTbtRoad = "판교JC";
+        public int carrotSdiType = -1;        // >= 0: active camera (Red circle), < 0: normal limit (Blue circle)
+        public int carrotSdiSpeedLimit = 0;   // km/h (0 = none/unknown)
+        public int carrotSdiDistM = 0;
+        public int carrotTbtDistM = 0;
+        public int carrotTbtDistNextM = 0;
+        public String carrotTbtRoad = "";
         public String carrotIp = "";
-        public float leadDistM = 34.0f;
+        public float leadDistM = 0.0f;
         public float leadRelVelKph = 0.0f;
-        public boolean hasLeadCar = true;
-        public float[] pathPoly = new float[]{0.0f, 0.008f, 0.00048f, 0.0f};
+        public boolean hasLeadCar = false;
+        public float steeringAngleDeg = 0.0f;
+        public float laneConfidencePct = 0.0f;
+        public float[] pathPoly = new float[]{0.0f, 0.0f, 0.0f, 0.0f};
         public float tpmsFlPsi = 38.0f;
         public float tpmsFrPsi = 38.0f;
         public float tpmsRlPsi = 39.0f;
@@ -1446,22 +1449,24 @@ public class TurzxMonitorMain {
             drawTextSmart(c, gear, 655f, 69f, 30f, 0xFF4A8AD6, true, alignCenter,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            int egoSpd = (s.carrotSpeedKph > 0) ? s.carrotSpeedKph : (s.carrotConnected ? s.carrotSpeedKph : 78);
-            drawTextSmart(c, String.valueOf(Math.max(0, egoSpd)), 732f, 88f, 60f, 0xFFFFFFFF, true, alignCenter,
+            int egoSpd = Math.max(0, s.carrotSpeedKph);
+            drawTextSmart(c, String.valueOf(egoSpd), 732f, 88f, 60f, 0xFFFFFFFF, true, alignCenter,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            int cruiseSpd = (s.carrotCruiseKph > 0) ? s.carrotCruiseKph : 80;
-            drawTextSmart(c, String.valueOf(cruiseSpd), 800f, 90f, 32f, 0xFF44A282, true, alignLeft,
+            String cruiseStr = (s.carrotCruiseKph > 0) ? String.valueOf(s.carrotCruiseKph) : "--";
+            int cruiseColor = (s.carrotCruiseKph > 0) ? 0xFF44A282 : 0xFF8A8C92;
+            drawTextSmart(c, cruiseStr, 800f, 90f, 32f, cruiseColor, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             // SDI speed sign numbers (calibrated per mode to match Chromium circle center)
-            int signLimit = (s.carrotSdiSpeedLimit > 0) ? s.carrotSdiSpeedLimit : 80;
+            int signLimit = (s.carrotSdiSpeedLimit > 0) ? s.carrotSdiSpeedLimit : 0;
+            String signLimitStr = (signLimit > 0) ? String.valueOf(signLimit) : "--";
             float limitNumY = "section".equals(sdiMode) ? 195f : ("traffic".equals(sdiMode) ? 183f : 158f);
-            drawTextSmart(c, String.valueOf(signLimit), 680.8f, limitNumY, 36f, 0xFF131217, true, alignCenter,
+            drawTextSmart(c, signLimitStr, 680.8f, limitNumY, 36f, 0xFF131217, true, alignCenter,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            if (!"none".equals(sdiMode)) {
-                int sdiDist = (s.carrotSdiDistM > 0) ? s.carrotSdiDistM : 2300;
+            if (!"none".equals(sdiMode) && s.carrotSdiDistM > 0) {
+                int sdiDist = s.carrotSdiDistM;
                 String sdiDistStr = (sdiDist >= 1000)
                         ? String.format(Locale.US, "%.1f km", sdiDist / 1000.0)
                         : (sdiDist + " m");
@@ -1470,20 +1475,25 @@ public class TurzxMonitorMain {
                         pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
             }
             if ("section".equals(sdiMode)) {
-                int avgSpd = (egoSpd > 10) ? egoSpd : signLimit;
-                drawTextSmart(c, String.valueOf(avgSpd), 785f, 204f, 40f, 0xFF44A282, true, alignCenter,
+                int avgSpd = (egoSpd > 0) ? egoSpd : signLimit;
+                String avgStr = (avgSpd > 0) ? String.valueOf(avgSpd) : "--";
+                drawTextSmart(c, avgStr, 785f, 204f, 40f, 0xFF44A282, true, alignCenter,
                         pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
             }
 
             // TBT compact stamp on top-right
-            int tbtDist = (s.carrotTbtDistM > 0) ? s.carrotTbtDistM : 280;
-            String tbtDistStr = (tbtDist >= 1000)
-                    ? String.format(Locale.US, "%.1fkm", tbtDist / 1000.0)
-                    : (tbtDist + "m");
+            String tbtDistStr;
+            if (s.carrotTbtDistM > 0) {
+                tbtDistStr = (s.carrotTbtDistM >= 1000)
+                        ? String.format(Locale.US, "%.1fkm", s.carrotTbtDistM / 1000.0)
+                        : (s.carrotTbtDistM + "m");
+            } else {
+                tbtDistStr = "--m";
+            }
             drawTextSmart(c, tbtDistStr, 1034.2f, 72f, 40f, 0xFFFFFFFF, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            String roadName = (s.carrotTbtRoad != null && !s.carrotTbtRoad.isEmpty()) ? s.carrotTbtRoad : "판교JC";
+            String roadName = (s.carrotTbtRoad != null && !s.carrotTbtRoad.isEmpty()) ? s.carrotTbtRoad : "주행 중";
             if (roadName.contains("·")) {
                 String[] parts = roadName.split("·");
                 roadName = parts[parts.length - 1].trim();
@@ -1491,16 +1501,35 @@ public class TurzxMonitorMain {
             drawTextSmart(c, truncateText(roadName, 6), 984.2f, 115f, 24f, 0xFFBDBDC0, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            drawTextSmart(c, "+450m", 1154f, 114f, 24f, 0xFF4A8AD6, true, alignRight,
+            String nextTbtStr;
+            if (s.carrotTbtDistNextM > 0) {
+                nextTbtStr = (s.carrotTbtDistNextM >= 1000)
+                        ? String.format(Locale.US, "+%.1fkm", s.carrotTbtDistNextM / 1000.0)
+                        : ("+" + s.carrotTbtDistNextM + "m");
+            } else {
+                nextTbtStr = s.carrotConnected ? "COMMA" : "CAN";
+            }
+            drawTextSmart(c, nextTbtStr, 1154f, 114f, 24f, 0xFF4A8AD6, true, alignRight,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // Bottom corner chips: "차선 98%" & "앞차 42m · +2.4°"
-            drawTextSmart(c, s.carrotActive ? "99%" : "98%", 706f, 423f, 24f, 0xFFBDBDC0, false, alignLeft,
+            // Bottom corner chips: "차선" & "앞차 · 조향각"
+            String laneChipStr;
+            if (s.laneConfidencePct > 0f) {
+                laneChipStr = String.format(Locale.US, "%.0f%%", s.laneConfidencePct);
+            } else if (s.carrotConnected) {
+                laneChipStr = s.carrotActive ? "ON" : "대기";
+            } else {
+                laneChipStr = "--%";
+            }
+            drawTextSmart(c, laneChipStr, 706f, 423f, 24f, 0xFFBDBDC0, false, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            float leadM = (s.hasLeadCar && s.leadDistM > 0f) ? s.leadDistM : 42f;
-            float steerDeg = (s.pathPoly != null && s.pathPoly.length > 2) ? (s.pathPoly[2] * 5000f) : 2.4f;
-            String leadText = String.format(Locale.US, "%.0fm", leadM);
+            String leadText = (s.hasLeadCar && s.leadDistM > 0.5f)
+                    ? String.format(Locale.US, "%.0fm", s.leadDistM)
+                    : "--m";
+            float steerDeg = (Math.abs(s.steeringAngleDeg) > 0.05f)
+                    ? s.steeringAngleDeg
+                    : ((s.pathPoly != null && s.pathPoly.length > 2) ? (-s.pathPoly[2] * 40000f) : 0.0f);
             String steerText = String.format(Locale.US, " · %+.1f°", steerDeg);
             float wLead = drawTextSmart(c, leadText, 1017.2f, 421f, 24f, 0xFFFFFFFF, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
@@ -1525,16 +1554,18 @@ public class TurzxMonitorMain {
             boolean hasRealMedia = s.mediaTitle != null
                     && !s.mediaTitle.isEmpty()
                     && !"미디어 재생 대기 중".equals(s.mediaTitle);
-            String mTitle = hasRealMedia ? s.mediaTitle : "Supernova";
+            String mTitle = (s.mediaTitle != null && !s.mediaTitle.isEmpty()) ? s.mediaTitle : "미디어 재생 대기 중";
             String mSub;
             if (hasRealMedia) {
                 mSub = (s.mediaArtist != null && !s.mediaArtist.isEmpty()) ? s.mediaArtist : "";
                 if (s.mediaAlbum != null && !s.mediaAlbum.isEmpty() && !s.mediaAlbum.equals(s.mediaArtist)) {
                     mSub = mSub.isEmpty() ? s.mediaAlbum : (mSub + " · " + s.mediaAlbum);
                 }
-                if (mSub.isEmpty()) mSub = "Bluetooth Audio";
+                if (mSub.isEmpty()) {
+                    mSub = (s.mediaSource != null && !s.mediaSource.isEmpty()) ? s.mediaSource : "Bluetooth Audio";
+                }
             } else {
-                mSub = "aespa · Armageddon";
+                mSub = (s.mediaSource != null && !s.mediaSource.isEmpty()) ? s.mediaSource : "Bluetooth · USB · Radio";
             }
 
             drawTextSmart(c, truncateText(mTitle, 16), 1436f, 81f, 48f, 0xFFFFFFFF, true, alignLeft,
@@ -1542,9 +1573,9 @@ public class TurzxMonitorMain {
             drawTextSmart(c, truncateText(mSub, 24), 1436f, 131f, 30f, 0xFFBDBDC0, false, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            int curSec = (s.mediaDurationSec > 0 || s.mediaPositionSec > 0) ? s.mediaPositionSec : 84;
-            int durSec = (s.mediaDurationSec > 0) ? s.mediaDurationSec : 178;
-            float mediaPct = (durSec > 0) ? Math.min(100f, (curSec * 100f) / durSec) : 47.2f;
+            int curSec = hasRealMedia ? Math.max(0, s.mediaPositionSec) : 0;
+            int durSec = hasRealMedia ? Math.max(0, s.mediaDurationSec) : 0;
+            float mediaPct = (durSec > 0) ? Math.min(100f, (curSec * 100f) / durSec) : 0f;
             drawBarFillOnly(c, rf, pFill, setRf, drawRoundRect, setColor,
                     1436f, 154.5f, 388.9f, 10f, mediaPct, 0xFFFFFFFF);
 
@@ -1740,16 +1771,19 @@ public class TurzxMonitorMain {
             float fy = 950f;
             float camH = 1.35f;
 
-            float leadDistM = (s.hasLeadCar && s.leadDistM > 0f) ? s.leadDistM : 34.0f;
+            boolean hasRealLead = s.hasLeadCar && s.leadDistM > 0.5f;
+            float leadDistM = hasRealLead ? s.leadDistM : 65.0f;
             float visualLeadX = 6.2f + (float) Math.pow(Math.max(6.0, leadDistM), 0.62) * 1.05f;
 
-            float curveC2 = 0.00048f;
-            float curveC1 = 0.008f;
-            if (s.pathPoly != null && s.pathPoly.length >= 3) {
-                if (Math.abs(s.pathPoly[1]) > 0.00001f || Math.abs(s.pathPoly[2]) > 0.00001f) {
-                    curveC1 = Math.max(-0.04f, Math.min(0.04f, s.pathPoly[1]));
-                    curveC2 = Math.max(-0.0025f, Math.min(0.0025f, s.pathPoly[2]));
-                }
+            float curveC2 = 0.0f;
+            float curveC1 = 0.0f;
+            if (s.pathPoly != null && s.pathPoly.length >= 3
+                    && (Math.abs(s.pathPoly[1]) > 0.00001f || Math.abs(s.pathPoly[2]) > 0.00001f)) {
+                curveC1 = Math.max(-0.04f, Math.min(0.04f, s.pathPoly[1]));
+                curveC2 = Math.max(-0.0025f, Math.min(0.0025f, s.pathPoly[2]));
+            } else if (Math.abs(s.steeringAngleDeg) > 0.05f) {
+                curveC1 = Math.max(-0.04f, Math.min(0.04f, -s.steeringAngleDeg * 0.0006f));
+                curveC2 = Math.max(-0.0025f, Math.min(0.0025f, -s.steeringAngleDeg * 0.000025f));
             }
 
             // Subtle radial horizon glow around vanishing point
@@ -1864,8 +1898,8 @@ public class TurzxMonitorMain {
             float pathMaxX = Math.max(6.8f, visualLeadX - 0.6f);
             float pathHalfW = 0.76f;
             int pathSteps = 34;
-            boolean isCloseLead = leadDistM <= 18f;
-            boolean isCriticalLead = leadDistM <= 12f;
+            boolean isCloseLead = hasRealLead && leadDistM <= 18f;
+            boolean isCriticalLead = hasRealLead && leadDistM <= 12f;
             int carpR = isCriticalLead ? 229 : (isCloseLead ? 217 : 68);
             int carpG = isCriticalLead ? 86 : (isCloseLead ? 164 : 162);
             int carpB = isCriticalLead ? 111 : (isCloseLead ? 65 : 130);
@@ -1987,171 +2021,135 @@ public class TurzxMonitorMain {
                     xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
                     1.82f, 0.068f, 120, 188, 255, 0.96f, false, roadPhase);
 
-            // 7b. Surround Traffic: 3D Ghost Vehicle in Right Adjacent Lane
-            float ghostX = 16.5f;
-            float ghostLat = roadCenterLat(ghostX, curveC1, curveC2) + 3.6f;
-            float gcx = projU(ox, u0, fx, ghostX, ghostLat);
-            float gby = projV(oy, v0, fy, camH, ghostX, 0f);
-            float gLeft = projU(ox, u0, fx, ghostX, ghostLat - 0.88f);
-            float gRight = projU(ox, u0, fx, ghostX, ghostLat + 0.88f);
-            float gW = Math.abs(gRight - gLeft);
-            float gH = gW * 0.66f;
-            if (gW > 20f) {
-                float rx = gW * 0.52f;
-                float ry = Math.max(3f, gH * 0.12f);
-                setRf.invoke(rf, gcx - rx, gby + 2f - ry, gcx + rx, gby + 2f + ry);
-                setColor.invoke(pFill, Integer.valueOf(0x73000000));
+            // 8. 3D-Projected Lead Vehicle Model + CarrotPilot Radar Lock (only when real lead vehicle is detected)
+            if (hasRealLead) {
+                float leadX = visualLeadX;
+                float leadLat = roadCenterLat(leadX, curveC1, curveC2);
+                float cx = projU(ox, u0, fx, leadX, leadLat);
+                float by = projV(oy, v0, fy, camH, leadX, 0f);
+                float pLeftEdge = projU(ox, u0, fx, leadX, leadLat - 0.96f);
+                float pRightEdge = projU(ox, u0, fx, leadX, leadLat + 0.96f);
+                float rawCarW = Math.abs(pRightEdge - pLeftEdge);
+                float carW = Math.max(72f, Math.min(146f, rawCarW));
+                float carH = carW * 0.68f;
+
+                // (a) Ground Occlusion Shadow
+                float sRx = carW * 0.56f;
+                float sRy = Math.max(5f, carH * 0.14f);
+                setRf.invoke(rf, cx - sRx, by + 2f - sRy, cx + sRx, by + 2f + sRy);
+                setColor.invoke(pFill, Integer.valueOf(0xB8000000));
                 drawOval.invoke(c, rf, pFill);
 
+                // (b) Left & Right Rear Tires
+                float tireW = Math.max(9f, carW * 0.17f);
+                float tireH = Math.max(11f, carH * 0.28f);
+                drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                        cx - carW * 0.46f, by - tireH, cx - carW * 0.46f + tireW, by, 2.5f, 0xFF090A0F, 0xFF2F3340, 1.2f);
+                drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                        cx + carW * 0.46f - tireW, by - tireH, cx + carW * 0.46f, by, 2.5f, 0xFF090A0F, 0xFF2F3340, 1.2f);
+
+                // (c) Main Lower Vehicle Body
+                float bodyTopY = by - carH * 0.62f;
+                float roofTopY = by - carH * 0.96f;
+                Object bodyGrad = lgMultiCtor.newInstance(
+                        cx, roofTopY, cx, by,
+                        new int[]{0xFF2D3240, 0xFF1F232E, 0xFF12141C},
+                        new float[]{0f, 0.45f, 1f},
+                        clampMode);
+                setShaderM.invoke(pShader, bodyGrad);
                 resetP.invoke(path);
-                moveTo.invoke(path, gcx - gW * 0.48f, gby - 3f);
-                lineTo.invoke(path, gcx - gW * 0.48f, gby - gH * 0.58f);
-                lineTo.invoke(path, gcx - gW * 0.34f, gby - gH * 0.94f);
-                lineTo.invoke(path, gcx + gW * 0.34f, gby - gH * 0.94f);
-                lineTo.invoke(path, gcx + gW * 0.48f, gby - gH * 0.58f);
-                lineTo.invoke(path, gcx + gW * 0.48f, gby - 3f);
+                moveTo.invoke(path, cx - carW * 0.48f, by - tireH * 0.42f);
+                lineTo.invoke(path, cx - carW * 0.49f, bodyTopY);
+                lineTo.invoke(path, cx - carW * 0.34f, roofTopY);
+                lineTo.invoke(path, cx + carW * 0.34f, roofTopY);
+                lineTo.invoke(path, cx + carW * 0.49f, bodyTopY);
+                lineTo.invoke(path, cx + carW * 0.48f, by - tireH * 0.42f);
                 closeP.invoke(path);
-                setColor.invoke(pFill, Integer.valueOf(0x9E222732));
-                drawPath.invoke(c, path, pFill);
-                setColor.invoke(pStroke, Integer.valueOf(0x618A94A6));
-                setStrokeW.invoke(pStroke, 1.2f);
+                drawPath.invoke(c, path, pShader);
+                setColor.invoke(pStroke, Integer.valueOf(0xFF525868));
+                setStrokeW.invoke(pStroke, 1.6f);
                 drawPath.invoke(c, path, pStroke);
 
-                setColor.invoke(pFill, Integer.valueOf(0x7AE5566F));
-                float tlY = gby - gH * 0.52f;
-                float tlH = Math.max(2f, gH * 0.08f);
-                drawRect.invoke(c, gcx - gW * 0.42f, tlY, gcx - gW * 0.20f, tlY + tlH, pFill);
-                drawRect.invoke(c, gcx + gW * 0.20f, tlY, gcx + gW * 0.42f, tlY + tlH, pFill);
+                // (d) Rear Windshield Glass
+                Object glassGrad = lgTwoCtor.newInstance(
+                        cx, roofTopY, cx, bodyTopY, Integer.valueOf(0xFF1E293B), Integer.valueOf(0xFF0F1117), clampMode);
+                setShaderM.invoke(pShader, glassGrad);
+                resetP.invoke(path);
+                moveTo.invoke(path, cx - carW * 0.38f, bodyTopY - 1f);
+                lineTo.invoke(path, cx - carW * 0.29f, roofTopY + carH * 0.07f);
+                lineTo.invoke(path, cx + carW * 0.29f, roofTopY + carH * 0.07f);
+                lineTo.invoke(path, cx + carW * 0.38f, bodyTopY - 1f);
+                closeP.invoke(path);
+                drawPath.invoke(c, path, pShader);
+                setColor.invoke(pStroke, Integer.valueOf(0xFF383D4A));
+                setStrokeW.invoke(pStroke, 1.0f);
+                drawPath.invoke(c, path, pStroke);
+
+                // (e) Lower Rear Metallic Diffuser
+                drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                        cx - carW * 0.38f, by - carH * 0.28f, cx + carW * 0.38f, by - carH * 0.14f,
+                        2f, 0xFF161821, 0xFF2E323D, 1.0f);
+
+                // (f) Full-Width Parametric LED Tail Lightbar + Soft Brake Glow
+                float lampY = bodyTopY + carH * 0.04f;
+                float lampH = Math.max(4.5f, carH * 0.095f);
+                Object tailGlow = rgMultiCtor.newInstance(
+                        cx, lampY + lampH * 0.5f, carW * 0.54f,
+                        new int[]{0x73E5566F, 0x00E5566F},
+                        new float[]{0.15f, 1.0f},
+                        clampMode);
+                setShaderM.invoke(pShader, tailGlow);
+                drawRect.invoke(c, cx - carW * 0.55f, lampY - lampH * 1.5f, cx + carW * 0.55f, lampY + lampH * 2.5f, pShader);
+
+                setColor.invoke(pFill, Integer.valueOf(0xFFE5566F));
+                setRf.invoke(rf, cx - carW * 0.45f, lampY, cx + carW * 0.45f, lampY + lampH);
+                drawRoundRect.invoke(c, rf, 2f, 2f, pFill);
+
+                setColor.invoke(pFill, Integer.valueOf(0xFFFFB3C0));
+                float coreH = Math.max(2f, lampH - 2f);
+                drawRect.invoke(c, cx - carW * 0.43f, lampY + 1f, cx - carW * 0.21f, lampY + 1f + coreH, pFill);
+                drawRect.invoke(c, cx + carW * 0.21f, lampY + 1f, cx + carW * 0.43f, lampY + 1f + coreH, pFill);
+
+                // (g) Radar Lock Chevron & Target Brackets
+                int radarColor = (leadDistM <= 20f) ? 0xFFE5566F : 0xFFD9A441;
+                float bx0 = cx - carW * 0.55f;
+                float bx1 = cx + carW * 0.55f;
+                float by0 = roofTopY - 5f;
+                float by1 = by + 3f;
+                float brk = Math.max(7f, carW * 0.11f);
+
+                setColor.invoke(pStroke, Integer.valueOf(radarColor));
+                setStrokeW.invoke(pStroke, 2.0f);
+                drawLine.invoke(c, bx0, by0 + brk, bx0, by0, pStroke);
+                drawLine.invoke(c, bx0, by0, bx0 + brk, by0, pStroke);
+                drawLine.invoke(c, bx1 - brk, by0, bx1, by0, pStroke);
+                drawLine.invoke(c, bx1, by0, bx1, by0 + brk, pStroke);
+                drawLine.invoke(c, bx0, by1 - brk, bx0, by1, pStroke);
+                drawLine.invoke(c, bx0, by1, bx0 + brk, by1, pStroke);
+                drawLine.invoke(c, bx1 - brk, by1, bx1, by1, pStroke);
+                drawLine.invoke(c, bx1, by1, bx1, by1 - brk, pStroke);
+
+                float chevY = by + 8f;
+                resetP.invoke(path);
+                moveTo.invoke(path, cx, chevY);
+                lineTo.invoke(path, cx - 12f, chevY + 10f);
+                lineTo.invoke(path, cx - 5f, chevY + 10f);
+                lineTo.invoke(path, cx, chevY + 5f);
+                lineTo.invoke(path, cx + 5f, chevY + 10f);
+                lineTo.invoke(path, cx + 12f, chevY + 10f);
+                closeP.invoke(path);
+                setColor.invoke(pFill, Integer.valueOf(radarColor));
+                drawPath.invoke(c, path, pFill);
+
+                float tagW = 62f;
+                float tagH = 24f;
+                float tagX = cx - tagW * 0.5f;
+                float tagY = Math.max(oy + 8f, by0 - tagH - 5f);
+                drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
+                        tagX, tagY, tagX + tagW, tagY + tagH, 5f, 0xEB131217, radarColor, 1.6f);
+                drawTextSmart(c, String.format(Locale.US, "%.0fm", s.leadDistM), cx, tagY + 17.5f, 16f, 0xFFFFFFFF, true, alignCenter,
+                        pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
             }
-
-            // 8. 3D-Projected Lead Vehicle Model + CarrotPilot Radar Lock
-            float leadX = visualLeadX;
-            float leadLat = roadCenterLat(leadX, curveC1, curveC2);
-            float cx = projU(ox, u0, fx, leadX, leadLat);
-            float by = projV(oy, v0, fy, camH, leadX, 0f);
-            float pLeftEdge = projU(ox, u0, fx, leadX, leadLat - 0.96f);
-            float pRightEdge = projU(ox, u0, fx, leadX, leadLat + 0.96f);
-            float rawCarW = Math.abs(pRightEdge - pLeftEdge);
-            float carW = Math.max(72f, Math.min(146f, rawCarW));
-            float carH = carW * 0.68f;
-
-            // (a) Ground Occlusion Shadow
-            float sRx = carW * 0.56f;
-            float sRy = Math.max(5f, carH * 0.14f);
-            setRf.invoke(rf, cx - sRx, by + 2f - sRy, cx + sRx, by + 2f + sRy);
-            setColor.invoke(pFill, Integer.valueOf(0xB8000000));
-            drawOval.invoke(c, rf, pFill);
-
-            // (b) Left & Right Rear Tires
-            float tireW = Math.max(9f, carW * 0.17f);
-            float tireH = Math.max(11f, carH * 0.28f);
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    cx - carW * 0.46f, by - tireH, cx - carW * 0.46f + tireW, by, 2.5f, 0xFF090A0F, 0xFF2F3340, 1.2f);
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    cx + carW * 0.46f - tireW, by - tireH, cx + carW * 0.46f, by, 2.5f, 0xFF090A0F, 0xFF2F3340, 1.2f);
-
-            // (c) Main Lower Vehicle Body
-            float bodyTopY = by - carH * 0.62f;
-            float roofTopY = by - carH * 0.96f;
-            Object bodyGrad = lgMultiCtor.newInstance(
-                    cx, roofTopY, cx, by,
-                    new int[]{0xFF2D3240, 0xFF1F232E, 0xFF12141C},
-                    new float[]{0f, 0.45f, 1f},
-                    clampMode);
-            setShaderM.invoke(pShader, bodyGrad);
-            resetP.invoke(path);
-            moveTo.invoke(path, cx - carW * 0.48f, by - tireH * 0.42f);
-            lineTo.invoke(path, cx - carW * 0.49f, bodyTopY);
-            lineTo.invoke(path, cx - carW * 0.34f, roofTopY);
-            lineTo.invoke(path, cx + carW * 0.34f, roofTopY);
-            lineTo.invoke(path, cx + carW * 0.49f, bodyTopY);
-            lineTo.invoke(path, cx + carW * 0.48f, by - tireH * 0.42f);
-            closeP.invoke(path);
-            drawPath.invoke(c, path, pShader);
-            setColor.invoke(pStroke, Integer.valueOf(0xFF525868));
-            setStrokeW.invoke(pStroke, 1.6f);
-            drawPath.invoke(c, path, pStroke);
-
-            // (d) Rear Windshield Glass
-            Object glassGrad = lgTwoCtor.newInstance(
-                    cx, roofTopY, cx, bodyTopY, Integer.valueOf(0xFF1E293B), Integer.valueOf(0xFF0F1117), clampMode);
-            setShaderM.invoke(pShader, glassGrad);
-            resetP.invoke(path);
-            moveTo.invoke(path, cx - carW * 0.38f, bodyTopY - 1f);
-            lineTo.invoke(path, cx - carW * 0.29f, roofTopY + carH * 0.07f);
-            lineTo.invoke(path, cx + carW * 0.29f, roofTopY + carH * 0.07f);
-            lineTo.invoke(path, cx + carW * 0.38f, bodyTopY - 1f);
-            closeP.invoke(path);
-            drawPath.invoke(c, path, pShader);
-            setColor.invoke(pStroke, Integer.valueOf(0xFF383D4A));
-            setStrokeW.invoke(pStroke, 1.0f);
-            drawPath.invoke(c, path, pStroke);
-
-            // (e) Lower Rear Metallic Diffuser
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    cx - carW * 0.38f, by - carH * 0.28f, cx + carW * 0.38f, by - carH * 0.14f,
-                    2f, 0xFF161821, 0xFF2E323D, 1.0f);
-
-            // (f) Full-Width Parametric LED Tail Lightbar + Soft Brake Glow
-            float lampY = bodyTopY + carH * 0.04f;
-            float lampH = Math.max(4.5f, carH * 0.095f);
-            Object tailGlow = rgMultiCtor.newInstance(
-                    cx, lampY + lampH * 0.5f, carW * 0.54f,
-                    new int[]{0x73E5566F, 0x00E5566F},
-                    new float[]{0.15f, 1.0f},
-                    clampMode);
-            setShaderM.invoke(pShader, tailGlow);
-            drawRect.invoke(c, cx - carW * 0.55f, lampY - lampH * 1.5f, cx + carW * 0.55f, lampY + lampH * 2.5f, pShader);
-
-            setColor.invoke(pFill, Integer.valueOf(0xFFE5566F));
-            setRf.invoke(rf, cx - carW * 0.45f, lampY, cx + carW * 0.45f, lampY + lampH);
-            drawRoundRect.invoke(c, rf, 2f, 2f, pFill);
-
-            setColor.invoke(pFill, Integer.valueOf(0xFFFFB3C0));
-            float coreH = Math.max(2f, lampH - 2f);
-            drawRect.invoke(c, cx - carW * 0.43f, lampY + 1f, cx - carW * 0.21f, lampY + 1f + coreH, pFill);
-            drawRect.invoke(c, cx + carW * 0.21f, lampY + 1f, cx + carW * 0.43f, lampY + 1f + coreH, pFill);
-
-            // (g) Radar Lock Chevron & Target Brackets
-            int radarColor = (leadDistM <= 20f) ? 0xFFE5566F : 0xFFD9A441;
-            float bx0 = cx - carW * 0.55f;
-            float bx1 = cx + carW * 0.55f;
-            float by0 = roofTopY - 5f;
-            float by1 = by + 3f;
-            float brk = Math.max(7f, carW * 0.11f);
-
-            setColor.invoke(pStroke, Integer.valueOf(radarColor));
-            setStrokeW.invoke(pStroke, 2.0f);
-            drawLine.invoke(c, bx0, by0 + brk, bx0, by0, pStroke);
-            drawLine.invoke(c, bx0, by0, bx0 + brk, by0, pStroke);
-            drawLine.invoke(c, bx1 - brk, by0, bx1, by0, pStroke);
-            drawLine.invoke(c, bx1, by0, bx1, by0 + brk, pStroke);
-            drawLine.invoke(c, bx0, by1 - brk, bx0, by1, pStroke);
-            drawLine.invoke(c, bx0, by1, bx0 + brk, by1, pStroke);
-            drawLine.invoke(c, bx1 - brk, by1, bx1, by1, pStroke);
-            drawLine.invoke(c, bx1, by1, bx1, by1 - brk, pStroke);
-
-            float chevY = by + 8f;
-            resetP.invoke(path);
-            moveTo.invoke(path, cx, chevY);
-            lineTo.invoke(path, cx - 12f, chevY + 10f);
-            lineTo.invoke(path, cx - 5f, chevY + 10f);
-            lineTo.invoke(path, cx, chevY + 5f);
-            lineTo.invoke(path, cx + 5f, chevY + 10f);
-            lineTo.invoke(path, cx + 12f, chevY + 10f);
-            closeP.invoke(path);
-            setColor.invoke(pFill, Integer.valueOf(radarColor));
-            drawPath.invoke(c, path, pFill);
-
-            float tagW = 62f;
-            float tagH = 24f;
-            float tagX = cx - tagW * 0.5f;
-            float tagY = Math.max(oy + 8f, by0 - tagH - 5f);
-            drawCard(c, rf, pFill, pStroke, setRf, drawRoundRect, setColor, setStrokeW,
-                    tagX, tagY, tagX + tagW, tagY + tagH, 5f, 0xEB131217, radarColor, 1.6f);
-            float dispLead = (s.hasLeadCar && s.leadDistM > 0f && s.carrotConnected) ? s.leadDistM : 42f;
-            drawTextSmart(c, String.format(Locale.US, "%.0fm", dispLead), cx, tagY + 17.5f, 16f, 0xFFFFFFFF, true, alignCenter,
-                    pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             restoreToCountM.invoke(c, Integer.valueOf(saveCount));
         }
@@ -2459,10 +2457,21 @@ public class TurzxMonitorMain {
         }
     }
 
-    public static final class MediaBroadcastReceiverBridge extends android.content.BroadcastReceiver {
+    public static final class MediaIntentReceiverBridge extends android.content.IIntentReceiver.Stub {
         @Override
-        public void onReceive(android.content.Context context, android.content.Intent intent) {
-            TelemetryCollector.onMediaWidgetBroadcast(intent);
+        public void performReceive(
+                android.content.Intent intent,
+                int resultCode,
+                String data,
+                android.os.Bundle extras,
+                boolean ordered,
+                boolean sticky,
+                int sendingUser
+        ) {
+            TelemetryCollector.onMediaWidgetBroadcast(intent, extras);
+            if (ordered && !sticky) {
+                TelemetryCollector.finishOrderedBroadcastReceiver(this, resultCode, data, extras);
+            }
         }
     }
 
@@ -2489,6 +2498,7 @@ public class TurzxMonitorMain {
         private static volatile Method tmGetAccelPdlMethod = null;
         private static volatile Method tmGetGearPosMethod = null;
         private static volatile Method tmGetTempCMethod = null;
+        private static volatile Method tmGetSasAngleMethod = null;
 
         private static volatile Object datcService = null;
         private static volatile Method datcGetClimateInfoMethod = null;
@@ -2499,6 +2509,7 @@ public class TurzxMonitorMain {
         private static volatile String lastRawDatcTempCallback = "none";
 
         private static volatile Object bcmService = null;
+        private static volatile Method bcmGetSpeedKmhMethod = null;
         private static volatile boolean bcmListenerRegistered = false;
         private static volatile String lastRawBcmHeatingCallback = "none";
 
@@ -2545,6 +2556,7 @@ public class TurzxMonitorMain {
                 "com.hkmc.audio.mymusic.widgetupdate",
                 "com.hkmc.radio.widgetupdate",
                 "com.hkmc.radio.dab.widgetupdate",
+                "com.hkmc.av.app.radioservice.statuschanged",
                 "com.hkmc.video.dmb.widgetupdate",
                 "com.hkmc.video.usb.widgetupdate",
                 "com.hkmc.nature_sound.widgetupdate",
@@ -2565,7 +2577,10 @@ public class TurzxMonitorMain {
                 "com.hkmc.default.widgetupdate",
                 "appwidgetupdate",
                 "com.android.music.metachanged",
-                "com.android.music.playstatechanged"
+                "com.android.music.playstatechanged",
+                "com.broadcom.bt.avrcp.profile.action.PLAY_INFO",
+                "com.broadcom.bt.avrcp.profile.action.CURRENT_PLAY_POSITION",
+                "com.broadcom.bt.avrcp.profile.action.ACTION_CURRENT_PLAY_INFO_CBCOUNT_ERROR"
         };
 
         public static void markNativeBinderHscanRx() {
@@ -2630,22 +2645,55 @@ public class TurzxMonitorMain {
         }
 
         public static void onMediaWidgetBroadcast(Object intentObj) {
-            if (intentObj == null) return;
+            onMediaWidgetBroadcast(intentObj, null);
+        }
+
+        public static void onMediaWidgetBroadcast(Object intentObj, Object explicitExtrasObj) {
+            if (intentObj == null && explicitExtrasObj == null) return;
             try {
-                Class<?> ic = intentObj.getClass();
                 String action = "";
-                try {
-                    Object a = ic.getMethod("getAction").invoke(intentObj);
-                    if (a != null) action = String.valueOf(a);
-                } catch (Throwable ignored) {
-                }
-                Object extrasObj = null;
-                try {
-                    extrasObj = ic.getMethod("getExtras").invoke(intentObj);
-                } catch (Throwable ignored) {
+                Object extrasObj = explicitExtrasObj;
+                if (intentObj != null) {
+                    Class<?> ic = intentObj.getClass();
+                    try {
+                        Object a = ic.getMethod("getAction").invoke(intentObj);
+                        if (a != null) action = String.valueOf(a);
+                    } catch (Throwable ignored) {
+                    }
+                    if (extrasObj == null) {
+                        try {
+                            extrasObj = ic.getMethod("getExtras").invoke(intentObj);
+                        } catch (Throwable ignored) {
+                        }
+                    }
                 }
                 synchronized (liveSnapshot) {
                     applyMediaWidgetBroadcastToSnapshot(action, extrasObj, liveSnapshot);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        public static void finishOrderedBroadcastReceiver(
+                android.os.IBinder who,
+                int resultCode,
+                String resultData,
+                Object resultExtras
+        ) {
+            try {
+                Class<?> amnCls = Class.forName("android.app.ActivityManagerNative");
+                Object am = amnCls.getMethod("getDefault").invoke(null);
+                if (am == null) return;
+                Class<?> iBinderCls = Class.forName("android.os.IBinder");
+                Class<?> bundleCls = Class.forName("android.os.Bundle");
+                try {
+                    Method finM = am.getClass().getMethod(
+                            "finishReceiver", iBinderCls, int.class, String.class, bundleCls, boolean.class, int.class);
+                    finM.invoke(am, who, Integer.valueOf(resultCode), resultData, resultExtras, Boolean.FALSE, Integer.valueOf(0));
+                } catch (NoSuchMethodException nsme) {
+                    Method finM = am.getClass().getMethod(
+                            "finishReceiver", iBinderCls, int.class, String.class, bundleCls, boolean.class);
+                    finM.invoke(am, who, Integer.valueOf(resultCode), resultData, resultExtras, Boolean.FALSE);
                 }
             } catch (Throwable ignored) {
             }
@@ -2697,24 +2745,25 @@ public class TurzxMonitorMain {
                 } catch (Throwable ignored) {
                 }
 
-                boolean isTimeOnly = action != null && action.endsWith(".timeupdate");
+                boolean isTimeOnly = action != null
+                        && (action.endsWith(".timeupdate") || action.endsWith(".CURRENT_PLAY_POSITION"));
                 if (!isTimeOnly) {
                     String title = readBundleStringAny(bundleObj, getStr, getObj,
-                            "filename", "title", "track", "channel_name", "station_name",
+                            "filename", "CURRENT_TITLE", "title", "track", "channel_name", "station_name",
                             "service_name", "content_name", "program_name", "frequency", "freq");
                     String artist = readBundleStringAny(bundleObj, getStr, getObj,
-                            "artist_name", "artist", "bluetooth_device_name", "pty_name", "band", "folder_name");
+                            "artist_name", "CURRENT_ARTIST", "artist", "bluetooth_device_name", "pty_name", "band", "folder_name");
                     String album = readBundleStringAny(bundleObj, getStr, getObj,
-                            "album_name", "album", "bluetooth_device_name");
+                            "album_name", "CURRENT_ALBUM", "album", "bluetooth_device_name");
 
-                    if (!title.isEmpty()) {
+                    if (!title.isEmpty() && !"Not Provided".equalsIgnoreCase(title)) {
                         target.mediaTitle = title;
                         target.mediaPlaying = true;
                     }
-                    if (!artist.isEmpty()) {
+                    if (!artist.isEmpty() && !"Not Provided".equalsIgnoreCase(artist)) {
                         target.mediaArtist = artist;
                     }
-                    if (!album.isEmpty()) {
+                    if (!album.isEmpty() && !"Not Provided".equalsIgnoreCase(album)) {
                         target.mediaAlbum = album;
                     }
 
@@ -2735,6 +2784,8 @@ public class TurzxMonitorMain {
                         try {
                             if (getObj.invoke(bundleObj, "playing") instanceof Boolean) {
                                 target.mediaPlaying = ((Boolean) getBool.invoke(bundleObj, "playing", Boolean.FALSE)).booleanValue();
+                            } else if (getObj.invoke(bundleObj, "PLAYING") instanceof Boolean) {
+                                target.mediaPlaying = ((Boolean) getBool.invoke(bundleObj, "PLAYING", Boolean.FALSE)).booleanValue();
                             }
                         } catch (Throwable ignored) {
                         }
@@ -2756,14 +2807,16 @@ public class TurzxMonitorMain {
                     }
                 }
 
-                long totMs = readBundleLongAny(bundleObj, getLong, getObj, "audio_total_time", "duration", "total_time");
+                long totMs = readBundleLongAny(bundleObj, getLong, getObj,
+                        "audio_total_time", "LENGTH", "duration", "total_time");
                 if (totMs > 0L && totMs < 36000000L) {
-                    target.mediaDurationSec = (int) (totMs > 36000L ? (totMs / 1000L) : totMs);
+                    target.mediaDurationSec = (int) (totMs >= 500L ? (totMs / 1000L) : totMs);
                 }
 
-                long curMs = readBundleLongAny(bundleObj, getLong, getObj, "audio_current_time", "position", "current_time", "play_time");
+                long curMs = readBundleLongAny(bundleObj, getLong, getObj,
+                        "audio_current_time", "POSITION", "position", "current_time", "play_time");
                 if (curMs >= 0L && curMs < 36000000L) {
-                    target.mediaPositionSec = (int) (curMs > 36000L || totMs > 36000L ? (curMs / 1000L) : curMs);
+                    target.mediaPositionSec = (int) (curMs >= 500L || totMs >= 500L ? (curMs / 1000L) : curMs);
                     lastMediaPosUpdateMs = System.currentTimeMillis();
                 }
                 return true;
@@ -2772,13 +2825,48 @@ public class TurzxMonitorMain {
             }
         }
 
-        private static void requestMediaWidgetUpdate(Object sysContext) {
-            if (sysContext == null) return;
+        private static void requestMediaWidgetUpdate() {
             try {
                 Class<?> intentCls = Class.forName("android.content.Intent");
                 Object reqIntent = intentCls.getConstructor(String.class).newInstance("com.hkmc.request.widgetupdate");
-                sysContext.getClass().getMethod("sendBroadcast", intentCls).invoke(sysContext, reqIntent);
-                lastMediaWidgetReqMs = System.currentTimeMillis();
+                Class<?> amnCls = Class.forName("android.app.ActivityManagerNative");
+                Object am = amnCls.getMethod("getDefault").invoke(null);
+                if (am != null) {
+                    Class<?> iAppThreadCls = Class.forName("android.app.IApplicationThread");
+                    Class<?> iirCls = Class.forName("android.content.IIntentReceiver");
+                    Class<?> bundleCls = Class.forName("android.os.Bundle");
+                    Method bcM = am.getClass().getMethod(
+                            "broadcastIntent",
+                            iAppThreadCls,
+                            intentCls,
+                            String.class,
+                            iirCls,
+                            int.class,
+                            String.class,
+                            bundleCls,
+                            String.class,
+                            int.class,
+                            boolean.class,
+                            boolean.class,
+                            int.class
+                    );
+                    bcM.invoke(
+                            am,
+                            null,
+                            reqIntent,
+                            null,
+                            null,
+                            Integer.valueOf(0),
+                            null,
+                            null,
+                            null,
+                            Integer.valueOf(-1),
+                            Boolean.FALSE,
+                            Boolean.FALSE,
+                            Integer.valueOf(0)
+                    );
+                    lastMediaWidgetReqMs = System.currentTimeMillis();
+                }
             } catch (Throwable ignored) {
             }
         }
@@ -2990,9 +3078,9 @@ public class TurzxMonitorMain {
                 pollMediaNowPlayingLocked();
                 pollCarrotBridgeAndArpLocked();
 
-                if (sysContext != null && "미디어 재생 대기 중".equals(liveSnapshot.mediaTitle)
+                if ("미디어 재생 대기 중".equals(liveSnapshot.mediaTitle)
                         && (System.currentTimeMillis() - lastMediaWidgetReqMs > 15000L)) {
-                    requestMediaWidgetUpdate(sysContext);
+                    requestMediaWidgetUpdate();
                 }
 
                 if (liveSnapshot.carrotConnected && (System.currentTimeMillis() - lastCarrotRxMs > 8000L)) {
@@ -3072,7 +3160,7 @@ public class TurzxMonitorMain {
                     }
                 }
 
-                if (!mediaBroadcastRegistered && sysContext != null) {
+                if (!mediaBroadcastRegistered) {
                     try {
                         Class<?> filterCls = Class.forName("android.content.IntentFilter");
                         Object filter = filterCls.getConstructor().newInstance();
@@ -3080,13 +3168,30 @@ public class TurzxMonitorMain {
                         for (int i = 0; i < MEDIA_WIDGET_ACTIONS.length; i++) {
                             addAct.invoke(filter, MEDIA_WIDGET_ACTIONS[i]);
                         }
-                        Class<?> brCls = Class.forName("android.content.BroadcastReceiver");
-                        Object receiver = new MediaBroadcastReceiverBridge();
+                        Object receiver = new MediaIntentReceiverBridge();
                         mediaReceiverObj = receiver;
-                        sysContext.getClass().getMethod("registerReceiver", brCls, filterCls).invoke(sysContext, receiver, filter);
+                        Class<?> amnCls = Class.forName("android.app.ActivityManagerNative");
+                        Object am = amnCls.getMethod("getDefault").invoke(null);
+                        Class<?> appThreadCls = Class.forName("android.app.IApplicationThread");
+                        Class<?> iirCls = Class.forName("android.content.IIntentReceiver");
+                        Object stickyIntent = null;
+                        try {
+                            Method regM = am.getClass().getMethod(
+                                    "registerReceiver",
+                                    appThreadCls, String.class, iirCls, filterCls, String.class, int.class);
+                            stickyIntent = regM.invoke(am, null, "android", receiver, filter, null, Integer.valueOf(0));
+                        } catch (NoSuchMethodException nsme) {
+                            Method regM = am.getClass().getMethod(
+                                    "registerReceiver",
+                                    appThreadCls, String.class, iirCls, filterCls, String.class);
+                            stickyIntent = regM.invoke(am, null, "android", receiver, filter, null);
+                        }
                         mediaBroadcastRegistered = true;
-                        DebugManager.logEvent("MEDIA", "Registered MediaBroadcastReceiverBridge (" + MEDIA_WIDGET_ACTIONS.length + " actions) & sent com.hkmc.request.widgetupdate");
-                        requestMediaWidgetUpdate(sysContext);
+                        if (stickyIntent != null) {
+                            onMediaWidgetBroadcast(stickyIntent, null);
+                        }
+                        DebugManager.logEvent("MEDIA", "Registered MediaIntentReceiverBridge via IActivityManager (" + MEDIA_WIDGET_ACTIONS.length + " actions) & sent widgetupdate");
+                        requestMediaWidgetUpdate();
                     } catch (Throwable t) {
                         DebugManager.logError("MEDIA", "registerReceiver", t);
                     }
@@ -3137,6 +3242,7 @@ public class TurzxMonitorMain {
                                 try { tmGetAccelPdlMethod = sc.getMethod("getAccelPdlVal"); } catch (Throwable ignored) {}
                                 try { tmGetGearPosMethod = sc.getMethod("getGearPosition"); } catch (Throwable ignored) {}
                                 try { tmGetTempCMethod = sc.getMethod("getTemperatureC"); } catch (Throwable ignored) {}
+                                try { tmGetSasAngleMethod = sc.getMethod("getSasAngleVal"); } catch (Throwable ignored) {}
                             }
                         }
                     } catch (Throwable ignored) {
@@ -3182,22 +3288,25 @@ public class TurzxMonitorMain {
                         if (b != null) {
                             Class<?> stubCls = Class.forName("com.hkmc.bcm.IBCMService$Stub");
                             bcmService = stubCls.getMethod("asInterface", iBinderCls).invoke(null, b);
-                            if (bcmService != null && !bcmListenerRegistered) {
-                                try {
-                                    Class<?> bcmIfc = Class.forName("com.hkmc.bcm.IBCMListener");
-                                    Object listener = new BcmListenerBridge();
-                                    Object binderObj = Class.forName("android.os.Binder").getConstructor().newInstance();
-                                    Class<?> sc = bcmService.getClass();
+                            if (bcmService != null) {
+                                Class<?> sc = bcmService.getClass();
+                                try { bcmGetSpeedKmhMethod = sc.getMethod("getSpeed_KMHUnit"); } catch (Throwable ignored) {}
+                                if (!bcmListenerRegistered) {
                                     try {
-                                        sc.getMethod("registerBCMListener", bcmIfc, iBinderCls)
-                                                .invoke(bcmService, listener, binderObj);
-                                    } catch (NoSuchMethodException nsme) {
-                                        sc.getMethod("registerBCMListener", bcmIfc)
-                                                .invoke(bcmService, listener);
+                                        Class<?> bcmIfc = Class.forName("com.hkmc.bcm.IBCMListener");
+                                        Object listener = new BcmListenerBridge();
+                                        Object binderObj = Class.forName("android.os.Binder").getConstructor().newInstance();
+                                        try {
+                                            sc.getMethod("registerBCMListener", bcmIfc, iBinderCls)
+                                                    .invoke(bcmService, listener, binderObj);
+                                        } catch (NoSuchMethodException nsme) {
+                                            sc.getMethod("registerBCMListener", bcmIfc)
+                                                    .invoke(bcmService, listener);
+                                        }
+                                        bcmListenerRegistered = true;
+                                        DebugManager.logEvent("BCM", "Registered IBCMListener on com.hkmc.micom.bcm (C_DefoggerRly + getSpeed_KMHUnit)");
+                                    } catch (Throwable ignored) {
                                     }
-                                    bcmListenerRegistered = true;
-                                    DebugManager.logEvent("BCM", "Registered IBCMListener on com.hkmc.micom.bcm (C_DefoggerRly)");
-                                } catch (Throwable ignored) {
                                 }
                             }
                         }
@@ -3564,6 +3673,26 @@ public class TurzxMonitorMain {
                         liveSnapshot.hvacHeat = true;
                     }
                 }
+
+                if (tmGetSasAngleMethod != null) {
+                    try {
+                        float sas = ((Float) tmGetSasAngleMethod.invoke(svc)).floatValue();
+                        if (!Float.isNaN(sas) && Math.abs(sas) < 720.0f && !liveSnapshot.carrotConnected) {
+                            liveSnapshot.steeringAngleDeg = sas;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                if (bcmService != null && bcmGetSpeedKmhMethod != null) {
+                    try {
+                        float spdKmh = ((Float) bcmGetSpeedKmhMethod.invoke(bcmService)).floatValue();
+                        if (!Float.isNaN(spdKmh) && spdKmh >= 0.0f && spdKmh <= 260.0f && !liveSnapshot.carrotConnected) {
+                            liveSnapshot.carrotSpeedKph = Math.round(spdKmh);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
             } catch (Throwable ignored) {
             }
         }
@@ -3839,8 +3968,9 @@ public class TurzxMonitorMain {
         }
 
         /**
-         * Connects to Comma 3X (ajouatom/openpilot carrot-wip) ws://<comma_ip>:7000/ws/raw
-         * and decodes binary CVS1 frames (speed, cruise, lead distance, TPMS, and 3D lane polynomials).
+         * Connects to Comma 3X (ajouatom/openpilot carrot-wip)
+         * ws://<comma_ip>:7000/ws/compact_state?services=carState,controlsState,carrotMan,radarState,selfdriveState,longitudinalPlan,modelV2
+         * and decodes binary CVB1/CVS1 frames (speed, cruise, steering, lead distance, TPMS, and 3D lane polynomials).
          */
         private static void runCarrotCvs1WsClientLoop() {
             while (true) {
@@ -3872,7 +4002,7 @@ public class TurzxMonitorMain {
 
                     OutputStream os = wsSock.getOutputStream();
                     InputStream is = wsSock.getInputStream();
-                    String handshake = "GET /ws/raw HTTP/1.1\r\n"
+                    String handshake = "GET /ws/compact_state?services=carState,controlsState,carrotMan,radarState,selfdriveState,longitudinalPlan,modelV2 HTTP/1.1\r\n"
                             + "Host: " + ip + ":" + CARROT_WS_PORT + "\r\n"
                             + "Upgrade: websocket\r\n"
                             + "Connection: Upgrade\r\n"
@@ -3881,15 +4011,25 @@ public class TurzxMonitorMain {
                     os.write(handshake.getBytes(UTF8));
                     os.flush();
 
-                    // Read HTTP 101 response headers
+                    // Read HTTP 101 response headers and verify status code 101
+                    StringBuilder hdrBuf = new StringBuilder(256);
                     int matchState = 0;
                     while (matchState < 4) {
                         int b = is.read();
                         if (b < 0) throw new RuntimeException("EOF during WS handshake");
+                        if (hdrBuf.length() < 512) hdrBuf.append((char) (b & 0xFF));
                         if ((matchState == 0 || matchState == 2) && b == '\r') matchState++;
                         else if ((matchState == 1 || matchState == 3) && b == '\n') matchState++;
                         else matchState = 0;
                     }
+                    String hdrStr = hdrBuf.toString();
+                    int firstCrLf = hdrStr.indexOf("\r\n");
+                    String statusLine = firstCrLf > 0 ? hdrStr.substring(0, firstCrLf) : hdrStr;
+                    if (!statusLine.contains("101")) {
+                        throw new RuntimeException("WS upgrade rejected: " + statusLine);
+                    }
+                    wsSock.setSoTimeout(15000);
+                    DebugManager.logEvent("CARROT_WS", "Connected to ws://" + ip + ":" + CARROT_WS_PORT + "/ws/compact_state");
 
                     // Read WebSocket frames
                     while (true) {
@@ -3926,6 +4066,27 @@ public class TurzxMonitorMain {
                                     lastCarrotRxMs = System.currentTimeMillis();
                                 }
                             }
+                        } else if (opcode == 1 && payload.length >= 2) { // Text JSON frame
+                            String txt = new String(payload, UTF8);
+                            synchronized (liveSnapshot) {
+                                if (parseCarrotManJson(txt, liveSnapshot, true)) {
+                                    lastCarrotRxMs = System.currentTimeMillis();
+                                }
+                            }
+                        } else if (opcode == 9) { // Ping -> reply with client-masked Pong (RFC 6455)
+                            int pongLen = Math.min(payload.length, 125);
+                            byte[] pongFrame = new byte[6 + pongLen];
+                            pongFrame[0] = (byte) 0x8A; // FIN + Pong (0xA)
+                            pongFrame[1] = (byte) (0x80 | pongLen); // MASK bit set
+                            pongFrame[2] = 0x12;
+                            pongFrame[3] = 0x34;
+                            pongFrame[4] = 0x56;
+                            pongFrame[5] = 0x78;
+                            for (int i = 0; i < pongLen; i++) {
+                                pongFrame[6 + i] = (byte) (payload[i] ^ pongFrame[2 + (i & 3)]);
+                            }
+                            os.write(pongFrame);
+                            os.flush();
                         } else if (opcode == 8) { // Close
                             break;
                         }
@@ -4082,11 +4243,14 @@ public class TurzxMonitorMain {
             c.carrotSdiSpeedLimit = liveSnapshot.carrotSdiSpeedLimit;
             c.carrotSdiDistM = liveSnapshot.carrotSdiDistM;
             c.carrotTbtDistM = liveSnapshot.carrotTbtDistM;
+            c.carrotTbtDistNextM = liveSnapshot.carrotTbtDistNextM;
             c.carrotTbtRoad = liveSnapshot.carrotTbtRoad;
             c.carrotIp = liveSnapshot.carrotIp;
             c.leadDistM = liveSnapshot.leadDistM;
             c.leadRelVelKph = liveSnapshot.leadRelVelKph;
             c.hasLeadCar = liveSnapshot.hasLeadCar;
+            c.steeringAngleDeg = liveSnapshot.steeringAngleDeg;
+            c.laneConfidencePct = liveSnapshot.laneConfidencePct;
             c.tpmsFlPsi = liveSnapshot.tpmsFlPsi;
             c.tpmsFrPsi = liveSnapshot.tpmsFrPsi;
             c.tpmsRlPsi = liveSnapshot.tpmsRlPsi;
@@ -5537,10 +5701,11 @@ public class TurzxMonitorMain {
                 if (!Float.isNaN(rrPsi) && rrPsi >= 15.0f && rrPsi <= 65.0f) target.tpmsRrPsi = rrPsi;
 
                 if (!Float.isNaN(steerDeg) && Math.abs(steerDeg) < 600.0f) {
+                    target.steeringAngleDeg = steerDeg;
                     if (target.pathPoly == null || target.pathPoly.length < 4) {
                         target.pathPoly = new float[4];
                     }
-                    target.pathPoly[2] = steerDeg * 0.000015f;
+                    target.pathPoly[2] = -steerDeg * 0.000025f;
                 }
                 target.carrotConnected = true;
                 target.carrotActive = (carrotCruise > 0) || (target.carrotCruiseKph > 0);
@@ -5593,6 +5758,73 @@ public class TurzxMonitorMain {
                         }
                     }
                     p += sLen;
+                }
+                target.carrotConnected = true;
+                return true;
+            }
+            case 9: { // modelV2 (3D trajectory position.x / position.y and laneLineProbs)
+                int end = base + len;
+                int p = base + 16; // after 8B header + frameId(u32) + frameIdExtra(u32)
+                if (p + 2 > end) return false;
+                int nx = bb.getShort(p) & 0xFFFF;
+                p += 2;
+                if (nx <= 0 || nx > 64 || p + nx * 2 + 2 > end) return false;
+                int xStart = p;
+                p += nx * 2;
+                int ny = bb.getShort(p) & 0xFFFF;
+                p += 2;
+                if (ny <= 0 || ny > 64 || p + ny * 2 > end) return false;
+                int yStart = p;
+                p += ny * 2;
+
+                int n = Math.min(nx, ny);
+                if (n >= 6) {
+                    int k1 = Math.max(1, n / 3);
+                    int k2 = Math.max(k1 + 1, (n * 2) / 3);
+                    float x1 = (bb.getShort(xStart + k1 * 2) & 0xFFFF) * 0.01f;
+                    float x2 = (bb.getShort(xStart + k2 * 2) & 0xFFFF) * 0.01f;
+                    float y0 = bb.getShort(yStart) * 0.001f;
+                    float dy1 = (bb.getShort(yStart + k1 * 2) * 0.001f) - y0;
+                    float dy2 = (bb.getShort(yStart + k2 * 2) * 0.001f) - y0;
+                    if (x1 > 2.0f && x2 > x1 + 2.0f) {
+                        float c2 = ((dy2 / x2) - (dy1 / x1)) / (x2 - x1);
+                        float c1 = (dy1 / x1) - c2 * x1;
+                        if (!Float.isNaN(c1) && !Float.isNaN(c2) && Math.abs(c1) < 1.0f && Math.abs(c2) < 0.05f) {
+                            if (target.pathPoly == null || target.pathPoly.length < 4) {
+                                target.pathPoly = new float[4];
+                            }
+                            target.pathPoly[0] = y0;
+                            target.pathPoly[1] = c1;
+                            target.pathPoly[2] = c2;
+                        }
+                    }
+                }
+                // Advance past position.z (i16_mm_list), velocity.x (i16_cm_list), and laneLines to read laneLineProbs
+                for (int skipIdx = 0; skipIdx < 2 && p + 2 <= end; skipIdx++) {
+                    int cnt = bb.getShort(p) & 0xFFFF;
+                    p += 2 + cnt * 2;
+                }
+                if (p + 2 <= end) {
+                    int lineCnt = bb.getShort(p) & 0xFFFF;
+                    p += 2;
+                    for (int li = 0; li < lineCnt && li < 8 && p + 2 <= end; li++) {
+                        for (int axis = 0; axis < 3 && p + 2 <= end; axis++) {
+                            int pts = bb.getShort(p) & 0xFFFF;
+                            p += 2 + pts * 2;
+                        }
+                    }
+                    if (p + 2 <= end) {
+                        int probCnt = bb.getShort(p) & 0xFFFF;
+                        p += 2;
+                        if (probCnt >= 3 && p + probCnt * 4 <= end) {
+                            float pLeft = bb.getFloat(p + 4);
+                            float pRight = bb.getFloat(p + 8);
+                            float bestProb = Math.max(pLeft, pRight);
+                            if (!Float.isNaN(bestProb) && bestProb >= 0.0f && bestProb <= 1.0f) {
+                                target.laneConfidencePct = Math.round(bestProb * 100.0f);
+                            }
+                        }
+                    }
                 }
                 target.carrotConnected = true;
                 return true;
@@ -5967,6 +6199,11 @@ public class TurzxMonitorMain {
         Integer vEgo = extractJsonInt(json, "v_ego_kph");
         if (vEgo == null) vEgo = extractJsonInt(json, "vEgo");
         if (vEgo != null) { target.carrotSpeedKph = vEgo.intValue(); matched = true; }
+        Integer nPosSpd = extractJsonInt(json, "nPosSpeed");
+        if (vEgo == null && nPosSpd != null && nPosSpd.intValue() >= 0 && nPosSpd.intValue() <= 260 && !target.carrotConnected) {
+            target.carrotSpeedKph = nPosSpd.intValue();
+            matched = true;
+        }
         Integer vCruise = extractJsonInt(json, "v_cruise_kph");
         if (vCruise == null) vCruise = extractJsonInt(json, "vCruise");
         if (vCruise != null) { target.carrotCruiseKph = vCruise.intValue(); matched = true; }
@@ -6001,7 +6238,7 @@ public class TurzxMonitorMain {
             }
             if (sdiDist != null && sdiDist.intValue() >= 0) { target.carrotSdiDistM = sdiDist.intValue(); matched = true; }
         } else if (nSdiType != null || nRoadLim != null) {
-            int roadLim = (nRoadLim != null && nRoadLim.intValue() > 0 && nRoadLim.intValue() <= 140) ? nRoadLim.intValue() : 80;
+            int roadLim = (nRoadLim != null && nRoadLim.intValue() > 0 && nRoadLim.intValue() <= 140) ? nRoadLim.intValue() : 0;
             boolean isSection = (nSdiType != null && nSdiType.intValue() == 4) || (nBlockType != null && nBlockType.intValue() > 0);
             int camLim = (nSdiLim != null && nSdiLim.intValue() > 0 && nSdiLim.intValue() <= 135) ? nSdiLim.intValue() : 0;
             int camDist = (nSdiDist != null && nSdiDist.intValue() > 0 && nSdiDist.intValue() < 1023) ? nSdiDist.intValue() : 0;
@@ -6030,7 +6267,16 @@ public class TurzxMonitorMain {
         Integer tbtDist = extractJsonInt(json, "tbt_dist");
         if (tbtDist == null) tbtDist = extractJsonInt(json, "xDistToTurn");
         if (tbtDist == null) tbtDist = extractJsonInt(json, "nTBTDist");
-        if (tbtDist != null && tbtDist.intValue() > 0) { target.carrotTbtDistM = tbtDist.intValue(); matched = true; }
+        if (tbtDist != null && tbtDist.intValue() >= 0) {
+            target.carrotTbtDistM = tbtDist.intValue();
+            matched = true;
+        }
+        Integer tbtNext = extractJsonInt(json, "tbt_dist_next");
+        if (tbtNext == null) tbtNext = extractJsonInt(json, "nTBTDistNext");
+        if (tbtNext != null && tbtNext.intValue() >= 0) {
+            target.carrotTbtDistNextM = tbtNext.intValue();
+            matched = true;
+        }
         String road = extractJsonString(json, "tbt_road");
         if (road == null || road.isEmpty()) road = extractJsonString(json, "szTBTMainText");
         if (road == null || road.isEmpty()) road = extractJsonString(json, "szPosRoadName");
@@ -6121,6 +6367,10 @@ public class TurzxMonitorMain {
         sb.append(",\"sdiSpeedLimit\":").append(ev.carrotSdiSpeedLimit);
         sb.append(",\"sdiDistM\":").append(ev.carrotSdiDistM);
         sb.append(",\"tbtDistM\":").append(ev.carrotTbtDistM);
+        sb.append(",\"tbtDistNextM\":").append(ev.carrotTbtDistNextM);
+        sb.append(",\"tbtRoad\":\"").append(escapeJson(ev.carrotTbtRoad)).append("\"");
+        sb.append(String.format(Locale.US, ",\"steerDeg\":%.1f,\"leadDistM\":%.1f,\"hasLead\":%b",
+                ev.steeringAngleDeg, ev.leadDistM, ev.hasLeadCar));
         sb.append(",\"ip\":\"").append(ev.carrotIp != null ? ev.carrotIp : "").append("\"");
         sb.append("}");
         sb.append(",\"media\":{");
@@ -6390,7 +6640,7 @@ public class TurzxMonitorMain {
         if (action == null || action.isEmpty()) return "";
         String a = action.toLowerCase(Locale.US);
         if (a.contains(".timeupdate")) return "";
-        if (a.contains("btaudio")) return "Bluetooth Audio";
+        if (a.contains("btaudio") || a.contains("avrcp")) return "Bluetooth Audio";
         if (a.contains("dipoaudio")) return "Apple CarPlay";
         if (a.contains("gpmaudio")) return "Android Auto";
         if (a.contains("audio.usb")) return "USB Music";
@@ -7215,6 +7465,27 @@ public class TurzxMonitorMain {
                     && "aespa".equals(snap.mediaArtist) && snap.mediaPlaying
                     && snap.mediaDurationSec == 183 && snap.mediaPositionSec == 42,
                     "Expected BTAudio widgetupdate fields applied");
+
+            // Verify Broadcom AVRCP (PLAY_INFO + CURRENT_PLAY_POSITION) via MediaIntentReceiverBridge (IIntentReceiver.Stub)
+            MediaIntentReceiverBridge iirBridge = new MediaIntentReceiverBridge();
+            android.content.Intent avrcpPlayInfo = new android.content.Intent("com.broadcom.bt.avrcp.profile.action.PLAY_INFO");
+            avrcpPlayInfo.putExtra("CURRENT_TITLE", "APT.");
+            avrcpPlayInfo.putExtra("CURRENT_ARTIST", "ROSE & Bruno Mars");
+            avrcpPlayInfo.putExtra("CURRENT_ALBUM", "rosie");
+            avrcpPlayInfo.putExtra("PLAYING", true);
+            iirBridge.performReceive(avrcpPlayInfo, 0, null, avrcpPlayInfo.getExtras(), false, false, 0);
+            android.content.Intent avrcpPos = new android.content.Intent("com.broadcom.bt.avrcp.profile.action.CURRENT_PLAY_POSITION");
+            avrcpPos.putExtra("POSITION", 65000L);
+            avrcpPos.putExtra("LENGTH", 170000L);
+            iirBridge.performReceive(avrcpPos, 0, null, avrcpPos.getExtras(), false, false, 0);
+            TelemetrySnapshot avrcpSnap = TelemetryCollector.getLatestSnapshot();
+            assertTrue("Bluetooth Audio".equals(avrcpSnap.mediaSource)
+                    && "APT.".equals(avrcpSnap.mediaTitle)
+                    && "ROSE & Bruno Mars".equals(avrcpSnap.mediaArtist)
+                    && avrcpSnap.mediaPlaying
+                    && avrcpSnap.mediaPositionSec == 65
+                    && avrcpSnap.mediaDurationSec == 170,
+                    "Expected MediaIntentReceiverBridge AVRCP PLAY_INFO + CURRENT_PLAY_POSITION decoded accurately");
 
             String clusterBtLine = "I/ClusterService( 1120): updateClusterWithArtistInfo : mode = 9, title = Supernova, artist = aespa";
             int parsedMode = parseClusterMediaLogLine(clusterBtLine, snap);

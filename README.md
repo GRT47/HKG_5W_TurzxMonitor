@@ -10,7 +10,7 @@
   - **2×2 EV 핵심 지표**: 고전압 배터리 `SoC(%) / SOH(%) / 가용 에너지(kWh)`, 주행가능거리 `DTE(km) / 공조 OFF 변화량(+km) / 평균 전비(km/kWh)`, 실시간 소비전력(`kW` 및 모터·공조·전장·배터리케어 서브시스템), 배터리 온도(`°C`) 및 셀 밸런싱 편차(`ΔmV`, `12V` 보조배터리 전압).
   - **4륜 TPMS 타이어 공기압 카드**: `FL / FR / RL / RR (psi)` 및 차량 상면 실루엣.
 - **2열 (중앙 `CarrotNavi + 3D Comma ADAS HUD`, 폭 25% 슬림화)**:
-  - **Comma 3X (`ajouatom/openpilot` `carrot-wip`) 연동**: UDP (`:7705` / `:7706`) 및 `ws://<comma_ip>:7000/ws/raw` (`CVS1` / `CVB1` 바이너리 프로토콜) 수신.
+  - **Comma 3X (`ajouatom/openpilot` `carrot-wip`) & `HKG_5W_CarrotNavi` 연동**: UDP (`:7705` / `:7706`), `/data/local/tmp/carrotbridge_status.json`, 및 `ws://<comma_ip>:7000/ws/compact_state` (`CVB1` / `CVS1` 바이너리 프로토콜) 수신. 헤드유닛 단독 주행 시에도 `IBCMService.getSpeed_KMHUnit()` 및 `ITM_HSCANService.getSasAngleVal()`을 통해 실시간 차속·조향각을 반영합니다.
   - **3D 퍼스펙티브 주행 경로(`d_poly`), 좌/우 차선(`l_poly`, `r_poly`), 선행 차량 거리 박스(`m`)** 렌더링.
   - **SDI 과속단속 원형 표지판**:
     - **단속 카메라 구간 활성 시**: **빨간색 원형 테두리(`#EF4444`)** + 제한속도 및 남은 거리 표시.
