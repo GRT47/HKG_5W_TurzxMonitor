@@ -72,7 +72,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.3.3";
+    public static final String MONITOR_VERSION = "1.3.4";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -157,6 +157,10 @@ public class TurzxMonitorMain {
     public static final int DATC_FLAG_TEMP_DR_C_LEGACY = 28;
     public static final int DATC_FLAG_TEMP_PS_C = 29;
     public static final int DATC_FLAG_TEMP_OUTSIDE_C = 32;
+    // Genuine HKMC_Navi_ExSL (com.mnsoft.navi.b.i.getVehicleIntakeStatus) & DATCService.getClimateInfo(5) / sendIntentForClimate(3, 12, val):
+    // Queries DatcBypassStatus.getIntakeStatus() (0 = INTAKE_REC_OFF / Fresh Air, 1 = INTAKE_REC_ON / Recirculation)
+    public static final int DATC_CLIMATE_INFO_INTAKE_STATUS = 5;
+    public static final int DATC_OSD_FLAG_INTAKE_STATUS = 12;
 
     public static final class MonitorConfig {
         public boolean overlayEnabled = true;
@@ -227,7 +231,7 @@ public class TurzxMonitorMain {
         public boolean hvacFrontDefog = false;
         public boolean hvacRearDefog = false;
         public boolean hvacSteerHeat = false;
-        public boolean hvacRecirc = true;
+        public boolean hvacRecirc = false;
         public boolean hvacAds = true;
         public int hvacBlowerStep = 3;      // 0..8
         public int hvacBlowerMode = 2;      // 1=VENT, 2=B/L, 3=FLOOR, 4=MIX, 5=DEF
@@ -2507,6 +2511,7 @@ public class TurzxMonitorMain {
         private static volatile long lastDatcCallbackMs = 0L;
         private static volatile Object lastRawDatcStatusObj = null;
         private static volatile String lastRawDatcTempCallback = "none";
+        private static volatile String lastRawDatcIntakeInfo = "none";
 
         private static volatile Object bcmService = null;
         private static volatile Method bcmGetSpeedKmhMethod = null;
@@ -2580,7 +2585,8 @@ public class TurzxMonitorMain {
                 "com.android.music.playstatechanged",
                 "com.broadcom.bt.avrcp.profile.action.PLAY_INFO",
                 "com.broadcom.bt.avrcp.profile.action.CURRENT_PLAY_POSITION",
-                "com.broadcom.bt.avrcp.profile.action.ACTION_CURRENT_PLAY_INFO_CBCOUNT_ERROR"
+                "com.broadcom.bt.avrcp.profile.action.ACTION_CURRENT_PLAY_INFO_CBCOUNT_ERROR",
+                "com.hkmc.intent.action.CLIMATE_CHANGE"
         };
 
         public static void markNativeBinderHscanRx() {
@@ -2599,6 +2605,11 @@ public class TurzxMonitorMain {
             synchronized (liveSnapshot) {
                 if (applyDatcStatusObject(statusObj, liveSnapshot)) {
                     lastDatcCallbackMs = System.currentTimeMillis();
+                }
+                int intakeInfo = readDatcClimateInfoInt(datcService, DATC_CLIMATE_INFO_INTAKE_STATUS, -1);
+                if (intakeInfo == 0 || intakeInfo == 1) {
+                    liveSnapshot.hvacRecirc = (intakeInfo == 1);
+                    lastRawDatcIntakeInfo = "getClimateInfo(5)=" + intakeInfo;
                 }
             }
         }
@@ -2702,6 +2713,34 @@ public class TurzxMonitorMain {
         public static boolean applyMediaWidgetBroadcastToSnapshot(String action, Object bundleObj, TelemetrySnapshot target) {
             if (target == null) return false;
             try {
+                if ("com.hkmc.intent.action.CLIMATE_CHANGE".equals(action)) {
+                    if (bundleObj == null) return false;
+                    Class<?> bc = bundleObj.getClass();
+                    int osdFlag = -1;
+                    int val = -1;
+                    try {
+                        Method getInt = bc.getMethod("getInt", String.class, int.class);
+                        osdFlag = ((Integer) getInt.invoke(bundleObj, "OSD_FLAG", Integer.valueOf(-1))).intValue();
+                        val = ((Integer) getInt.invoke(bundleObj, "VALUE", Integer.valueOf(-1))).intValue();
+                    } catch (Throwable t1) {
+                        try {
+                            Method getObj = bc.getMethod("get", String.class);
+                            Object oFlag = getObj.invoke(bundleObj, "OSD_FLAG");
+                            Object oVal = getObj.invoke(bundleObj, "VALUE");
+                            if (oFlag instanceof Number) osdFlag = ((Number) oFlag).intValue();
+                            if (oVal instanceof Number) val = ((Number) oVal).intValue();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    if (osdFlag == DATC_OSD_FLAG_INTAKE_STATUS && (val == 0 || val == 1)) {
+                        target.hvacRecirc = (val == 1);
+                        target.hasClimateData = true;
+                        lastRawDatcIntakeInfo = "CLIMATE_CHANGE(OSD_FLAG=12, VALUE=" + val + ")";
+                        return true;
+                    }
+                    return false;
+                }
+
                 String src = mapWidgetBroadcastActionToSource(action);
                 if (!src.isEmpty()) {
                     target.mediaSource = src;
@@ -3700,6 +3739,14 @@ public class TurzxMonitorMain {
         private static void pollDatcServiceLocked() {
             Object svc = datcService;
             if (svc != null) {
+                // On DE22EV, DatcStatus.mIntake (mIntakeDisp) is 3 (BaseDisp.INVALID), whereas actual recirculation
+                // state is stored in DatcBypassStatus.mIntakeStatus and exposed via IDATCService.getClimateInfo(5)
+                // (0 = INTAKE_REC_OFF / Fresh Air, 1 = INTAKE_REC_ON / Recirculation).
+                int intakeInfo = readDatcClimateInfoInt(svc, DATC_CLIMATE_INFO_INTAKE_STATUS, -1);
+                if (intakeInfo == 0 || intakeInfo == 1) {
+                    liveSnapshot.hvacRecirc = (intakeInfo == 1);
+                    lastRawDatcIntakeInfo = "getClimateInfo(5)=" + intakeInfo;
+                }
                 if (lastRawDatcStatusObj == null) {
                     if (!applyDatcStatusObject(svc, liveSnapshot)) {
                         datcService = null;
@@ -3890,7 +3937,7 @@ public class TurzxMonitorMain {
                 try {
                     proc = Runtime.getRuntime().exec(new String[]{
                             "/system/bin/logcat", "-b", "main", "-b", "system", "-v", "brief",
-                            "TM_HSCANPacketRunner:I", "ClusterService:I", "BCMService:I", "*:S"
+                            "TM_HSCANPacketRunner:I", "ClusterService:I", "BCMService:I", "DATCService:V", "*:S"
                     });
                     br = new BufferedReader(new InputStreamReader(proc.getInputStream(), UTF8), 4096);
                     String line;
@@ -3898,6 +3945,12 @@ public class TurzxMonitorMain {
                         if (line.contains("BCMService") || line.contains("RES_DEFOGGER_STATE") || line.contains("C_DefoggerRly")) {
                             synchronized (liveSnapshot) {
                                 parseBcmDefoggerLogLine(line, liveSnapshot);
+                            }
+                        } else if (line.contains("DATCService") || line.contains("DATC_Intake") || line.contains("Flag : 12value")) {
+                            synchronized (liveSnapshot) {
+                                if (parseDatcIntakeLogLine(line, liveSnapshot)) {
+                                    lastRawDatcIntakeInfo = "logcat:" + line.trim();
+                                }
                             }
                         } else if (line.contains("ClusterService")) {
                             synchronized (liveSnapshot) {
@@ -4950,6 +5003,7 @@ public class TurzxMonitorMain {
                 // 3C. Raw IDATCService flag scan (0..80) + DatcStatus reflection dump
                 sb.append("\n--- [3C] Raw DATC Climate Scan (com.hkmc.micom.datc) ---\n");
                 sb.append("  lastRawDatcTempCb   : ").append(TelemetryCollector.lastRawDatcTempCallback).append("\n");
+                sb.append("  lastRawDatcIntake   : ").append(TelemetryCollector.lastRawDatcIntakeInfo).append("\n");
                 if (TelemetryCollector.lastRawDatcStatusObj != null) {
                     appendObjectFieldsDump(sb, "  DatcStatus fields   : ", TelemetryCollector.lastRawDatcStatusObj);
                     appendZeroArgMethodDump(sb, "  DatcStatus getters  : ", TelemetryCollector.lastRawDatcStatusObj);
@@ -6494,6 +6548,16 @@ public class TurzxMonitorMain {
         return defVal;
     }
 
+    public static int readDatcClimateInfoInt(Object svc, int flag, int defVal) {
+        if (svc == null) return defVal;
+        try {
+            Object v = svc.getClass().getMethod("getClimateInfo", int.class).invoke(svc, Integer.valueOf(flag));
+            if (v instanceof Number) return ((Number) v).intValue();
+        } catch (Throwable ignored) {
+        }
+        return defVal;
+    }
+
     public static boolean applyDatcStatusObject(Object statusObj, TelemetrySnapshot target) {
         if (statusObj == null || target == null) return false;
         try {
@@ -6517,7 +6581,18 @@ public class TurzxMonitorMain {
             int autoDefogBlink = readObjIntAny(statusObj, -1,
                     "getAutoDefogBlink", "mAutoDefogBlink", "autoDefogBlink");
             int intake = readObjIntAny(statusObj, -1,
-                    "getIntake", "getAirIntakeStatus", "getIntakeMode", "mIntake", "intake");
+                    "getIntake", "getIntakeStatus", "getAirIntakeStatus", "getIntakeMode", "mIntake", "mIntakeStatus", "intake");
+            if (intake != 0 && intake != 1) {
+                int intakeStatus = readObjIntAny(statusObj, -1, "getIntakeStatus", "mIntakeStatus");
+                if (intakeStatus == 0 || intakeStatus == 1) {
+                    intake = intakeStatus;
+                } else {
+                    int climateInfoIntake = readDatcClimateInfoInt(statusObj, DATC_CLIMATE_INFO_INTAKE_STATUS, -1);
+                    if (climateInfoIntake == 0 || climateInfoIntake == 1) {
+                        intake = climateInfoIntake;
+                    }
+                }
+            }
             int sync = readObjIntAny(statusObj, -1,
                     "getSyncDisp", "getSyncStatus", "getSync", "mSyncDisp", "sync");
             int dual = readObjIntAny(statusObj, -1,
@@ -6603,6 +6678,12 @@ public class TurzxMonitorMain {
             } else if (mode >= 0 && mode != 15) {
                 target.hvacFrontDefog = isDefMode;
             }
+            if (intake != 0 && intake != 1) {
+                int climateInfoIntake = readDatcClimateInfoInt(statusObj, DATC_CLIMATE_INFO_INTAKE_STATUS, -1);
+                if (climateInfoIntake == 0 || climateInfoIntake == 1) {
+                    intake = climateInfoIntake;
+                }
+            }
             if (intake == 0 || intake == 1) target.hvacRecirc = (intake == 1);
             if (drvOnly == 0 || drvOnly == 1) target.hvacDriverOnly = (drvOnly == 1);
             if (ads == 0 || ads == 1) target.hvacAds = (ads == 1);
@@ -6687,6 +6768,55 @@ public class TurzxMonitorMain {
             } else if (tail.startsWith("0")) {
                 target.hvacRearDefog = false;
                 return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Parses genuine DATCService intake status logcat lines (verified against automotive-service.odex):
+     * - D/DATCService: [DATC] onEvent::key = DATC_IntakeStatus, data = 00 (or 01)
+     * - D/DATCService: [DATC] onEvent::key = DATC_IntakeDisp, data = 00 (or 01; ignores 02/03 INVALID)
+     * - V/DATCService: BROADCASTED - Intent { act=com.hkmc.intent.action.CLIMATE_CHANGE ... }Flag : 12value0 (or value1)
+     */
+    public static boolean parseDatcIntakeLogLine(String line, TelemetrySnapshot target) {
+        if (line == null || target == null) return false;
+        String[] keys = new String[]{"DATC_IntakeStatus", "DATC_IntakeDisp"};
+        for (int i = 0; i < keys.length; i++) {
+            int idx = line.indexOf(keys[i]);
+            if (idx >= 0) {
+                int dataIdx = line.indexOf("data", idx);
+                if (dataIdx >= 0) {
+                    int eqIdx = line.indexOf('=', dataIdx);
+                    String tail = (eqIdx >= 0 ? line.substring(eqIdx + 1) : line.substring(dataIdx + 4)).trim();
+                    if (tail.startsWith(":")) tail = tail.substring(1).trim();
+                    if (tail.startsWith("01") || (tail.startsWith("1") && (tail.length() == 1 || !Character.isDigit(tail.charAt(1))))) {
+                        target.hvacRecirc = true;
+                        target.hasClimateData = true;
+                        return true;
+                    } else if (tail.startsWith("00") || (tail.startsWith("0") && (tail.length() == 1 || !Character.isDigit(tail.charAt(1))))) {
+                        target.hvacRecirc = false;
+                        target.hasClimateData = true;
+                        return true;
+                    }
+                }
+            }
+        }
+        int flagIdx = line.indexOf("Flag : 12value");
+        if (flagIdx < 0) flagIdx = line.indexOf("Flag: 12value");
+        if (flagIdx >= 0) {
+            int valPos = line.indexOf("value", flagIdx) + 5;
+            if (valPos < line.length()) {
+                char c = line.charAt(valPos);
+                if (c == '1') {
+                    target.hvacRecirc = true;
+                    target.hasClimateData = true;
+                    return true;
+                } else if (c == '0') {
+                    target.hvacRecirc = false;
+                    target.hasClimateData = true;
+                    return true;
+                }
             }
         }
         return false;
@@ -7450,6 +7580,38 @@ public class TurzxMonitorMain {
             assertTrue(bcmSnap.hvacSteerHeat && bcmSnap.hvacRearDefog,
                     "Expected BcmListenerBridge.onRemoteTeleHeatingStatusChanged(1, 1) to set steerHeat & rearDefog");
             bcmBridge.onRemoteTeleHeatingStatusChanged(0, 0);
+
+            // Verify DE22EV intake/recirculation status (mIntake=3 INVALID on DatcStatus, resolved via CLIMATE_CHANGE OSD_FLAG=12 & DATCService logcat)
+            TelemetrySnapshot intakeSnap = new TelemetrySnapshot();
+            assertTrue(!intakeSnap.hvacRecirc, "Expected hvacRecirc default to false (Fresh Air) when unknown");
+            com.hkmc.datc.DatcStatus dsDe22 = new com.hkmc.datc.DatcStatus();
+            dsDe22.mOpStatus = 1;
+            dsDe22.mMainBlowerLevel = 4;
+            dsDe22.mDrMode = 3;
+            dsDe22.mIntake = 3; // BaseDisp.INVALID = 3 on DE22EV
+            assertTrue(applyDatcStatusObject(dsDe22, intakeSnap) && !intakeSnap.hvacRecirc,
+                    "Expected mIntake=3 (BaseDisp.INVALID) not to falsely turn on hvacRecirc");
+            assertTrue(parseDatcIntakeLogLine("D/DATCService( 1042): [DATC] onEvent::key = DATC_IntakeStatus, data = 01", intakeSnap)
+                    && intakeSnap.hvacRecirc,
+                    "Expected DATC_IntakeStatus data=01 to set hvacRecirc=true");
+            assertTrue(parseDatcIntakeLogLine("D/DATCService( 1042): [DATC] onEvent::key = DATC_IntakeStatus, data = 00", intakeSnap)
+                    && !intakeSnap.hvacRecirc,
+                    "Expected DATC_IntakeStatus data=00 to set hvacRecirc=false");
+            assertTrue(parseDatcIntakeLogLine("V/DATCService( 1042): BROADCASTED - Intent { act=com.hkmc.intent.action.CLIMATE_CHANGE }Flag : 12value1", intakeSnap)
+                    && intakeSnap.hvacRecirc,
+                    "Expected Flag : 12value1 log line to set hvacRecirc=true");
+            android.content.Intent climateRecircOff = new android.content.Intent("com.hkmc.intent.action.CLIMATE_CHANGE");
+            climateRecircOff.putExtra("OSD_FLAG", 12);
+            climateRecircOff.putExtra("VALUE", 0);
+            assertTrue(TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(climateRecircOff.getAction(), climateRecircOff.getExtras(), intakeSnap)
+                    && !intakeSnap.hvacRecirc,
+                    "Expected CLIMATE_CHANGE OSD_FLAG=12 VALUE=0 to set hvacRecirc=false");
+            android.content.Intent climateRecircOn = new android.content.Intent("com.hkmc.intent.action.CLIMATE_CHANGE");
+            climateRecircOn.putExtra("OSD_FLAG", 12);
+            climateRecircOn.putExtra("VALUE", 1);
+            assertTrue(TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(climateRecircOn.getAction(), climateRecircOn.getExtras(), intakeSnap)
+                    && intakeSnap.hvacRecirc,
+                    "Expected CLIMATE_CHANGE OSD_FLAG=12 VALUE=1 to set hvacRecirc=true");
 
             // Verify AvWidgetMainView media broadcast receiver (com.hkmc.audio.btaudio.widgetupdate + timeupdate)
             android.content.Intent btIntent = new android.content.Intent("com.hkmc.audio.btaudio.widgetupdate");
