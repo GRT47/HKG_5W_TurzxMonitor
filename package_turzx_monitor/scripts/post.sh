@@ -33,7 +33,14 @@ done
 mkdir -p /data/nemesis/pids 2>/dev/null
 rm -f /data/nemesis/pids/hkg.turzxmonitor+turzx-daemon.fails 2>/dev/null
 if [ -f "/data/nemesis/services.db" ] && grep -q "hkg.turzxmonitor.*|background" /data/nemesis/services.db 2>/dev/null; then
-    sed 's/\(hkg\.turzxmonitor[^|]*|[^|]*|[^|]*|[^|]*|\)background/\1restart/g' /data/nemesis/services.db > /data/nemesis/services.db.tmp 2>/dev/null && mv -f /data/nemesis/services.db.tmp /data/nemesis/services.db 2>/dev/null
+    sed 's/\(hkg\.turzxmonitor[^|]*|[^|]*|[^|]*|[^|]*|\)background/\1restart/g' /data/nemesis/services.db > /data/nemesis/services.db.tmp 2>/dev/null
+    if [ -s "/data/nemesis/services.db.tmp" ]; then
+        sync
+        mv -f /data/nemesis/services.db.tmp /data/nemesis/services.db 2>/dev/null
+        sync
+    else
+        rm -f /data/nemesis/services.db.tmp 2>/dev/null
+    fi
 fi
 
 # Show control/preview overlay immediately after installation

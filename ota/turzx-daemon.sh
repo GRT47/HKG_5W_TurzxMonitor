@@ -21,11 +21,19 @@ LOG_FILE="/data/local/tmp/hkg_turzxmonitor.log"
 DEBUG_FILE="/data/local/tmp/hkg_turzxmonitor_debug.txt"
 MONITOR_PID=""
 SYNC_TICK=0
+CRASH_STREAK=0
 
 mkdir -p /data/nemesis/pids 2>/dev/null
-rm -f "$NEMESIS_FAILS_FILE" 2>/dev/null
+rm -f "$NEMESIS_FAILS_FILE" "$INSTALL_DIR/bin/"*.tmp "$INSTALL_DIR/svc/"*.tmp "$INSTALL_DIR/config/"*.tmp 2>/dev/null
 if [ -f "/data/nemesis/services.db" ] && grep -q "hkg.turzxmonitor.*|background" /data/nemesis/services.db 2>/dev/null; then
-    sed 's/\(hkg\.turzxmonitor[^|]*|[^|]*|[^|]*|[^|]*|\)background/\1restart/g' /data/nemesis/services.db > /data/nemesis/services.db.tmp 2>/dev/null && mv -f /data/nemesis/services.db.tmp /data/nemesis/services.db 2>/dev/null
+    sed 's/\(hkg\.turzxmonitor[^|]*|[^|]*|[^|]*|[^|]*|\)background/\1restart/g' /data/nemesis/services.db > /data/nemesis/services.db.tmp 2>/dev/null
+    if [ -s "/data/nemesis/services.db.tmp" ]; then
+        sync
+        mv -f /data/nemesis/services.db.tmp /data/nemesis/services.db 2>/dev/null
+        sync
+    else
+        rm -f /data/nemesis/services.db.tmp 2>/dev/null
+    fi
 fi
 
 if [ -f "$SVC_PID_FILE" ]; then
@@ -65,6 +73,23 @@ start_monitor_java() {
         fi
     fi
     kill_monitor_java
+    JAR_FILE="$INSTALL_DIR/bin/turzxmonitor.jar"
+    JAR_BAK="$INSTALL_DIR/bin/turzxmonitor.jar.bak"
+    jar_sz=0
+    if [ -f "$JAR_FILE" ]; then
+        jar_sz="$(wc -c < "$JAR_FILE" 2>/dev/null)"
+    fi
+    if [ -z "$jar_sz" ] || [ "$jar_sz" -lt 32768 ] 2>/dev/null; then
+        if [ -f "$JAR_BAK" ]; then
+            log_info "Detected truncated/missing turzxmonitor.jar (size=$jar_sz); restoring from turzxmonitor.jar.bak"
+            cp -f "$JAR_BAK" "$JAR_FILE" 2>/dev/null
+            chmod 644 "$JAR_FILE" 2>/dev/null
+            rm -f /data/dalvik-cache/*turzxmonitor.jar* /data/local/tmp/dalvik-cache/*turzxmonitor.jar* 2>/dev/null
+            sync
+        fi
+    else
+        cp -f "$JAR_FILE" "$JAR_BAK" 2>/dev/null
+    fi
     LOG_FILE="/data/local/tmp/hkg_turzxmonitor.log"
     if [ -f "$LOG_FILE" ]; then
         log_sz="$(wc -c < "$LOG_FILE" 2>/dev/null)"
@@ -143,7 +168,19 @@ while true; do
         exec /system/bin/sh "$INSTALL_DIR/svc/turzx-daemon.sh"
     fi
     if [ -z "$MONITOR_PID" ] || ! kill -0 "$MONITOR_PID" 2>/dev/null; then
+        CRASH_STREAK=$((CRASH_STREAK + 1))
+        if [ "$CRASH_STREAK" -ge 1 ]; then
+            rm -f /data/dalvik-cache/*turzxmonitor.jar* /data/local/tmp/dalvik-cache/*turzxmonitor.jar* 2>/dev/null
+        fi
+        if [ "$CRASH_STREAK" -ge 2 ] && [ -f "$INSTALL_DIR/bin/turzxmonitor.jar.bak" ]; then
+            log_info "Java daemon exited repeatedly ($CRASH_STREAK); rolling back turzxmonitor.jar from .bak"
+            cp -f "$INSTALL_DIR/bin/turzxmonitor.jar.bak" "$INSTALL_DIR/bin/turzxmonitor.jar" 2>/dev/null
+            chmod 644 "$INSTALL_DIR/bin/turzxmonitor.jar" 2>/dev/null
+            sync
+        fi
         start_monitor_java
+    else
+        CRASH_STREAK=0
     fi
     SYNC_TICK=$((SYNC_TICK + 1))
     if [ "$SYNC_TICK" -ge 6 ]; then

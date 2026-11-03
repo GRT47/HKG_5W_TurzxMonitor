@@ -72,7 +72,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.3.5";
+    public static final String MONITOR_VERSION = "1.3.6";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -5776,16 +5776,16 @@ public class TurzxMonitorMain {
                 }
 
                 writeBytesAtomic(localVerFile, verBytes);
-                otaStatusText = "v" + rVer + " 적용 완료 · 재시작 중";
-                TurzxOverlayController.showBannerMessage("✅ v" + rVer + " 업데이트 완료! 재시작합니다...", 5000L);
-                DebugManager.logEvent("OTA", "Successfully updated to v" + rVer + "; triggering hot restart");
-
                 if (daemonChanged) {
                     try {
                         writeBytesAtomic(new File(OTA_RELOAD_TRIGGER_PATH), ("v" + rVer + "\n").getBytes(UTF8));
                     } catch (Throwable ignored) {
                     }
                 }
+                clearDalvikCacheAndSync();
+                otaStatusText = "v" + rVer + " 적용 완료 · 재시작 중";
+                TurzxOverlayController.showBannerMessage("✅ v" + rVer + " 업데이트 완료! 재시작합니다...", 5000L);
+                DebugManager.logEvent("OTA", "Successfully updated to v" + rVer + "; triggering hot restart");
 
                 Thread restartThread = new Thread(new Runnable() {
                     @Override
@@ -5810,6 +5810,26 @@ public class TurzxMonitorMain {
                 if (myGen == otaRunGen) {
                     otaUpdating = false;
                 }
+            }
+        }
+
+        private static void clearDalvikCacheAndSync() {
+            try {
+                String[] cacheDirs = new String[]{"/data/dalvik-cache", "/data/local/tmp/dalvik-cache"};
+                for (int d = 0; d < cacheDirs.length; d++) {
+                    File dir = new File(cacheDirs[d]);
+                    File[] files = dir.listFiles();
+                    if (files == null) continue;
+                    for (int i = 0; i < files.length; i++) {
+                        String n = files[i].getName();
+                        if (n.contains("turzxmonitor.jar")) {
+                            files[i].delete();
+                        }
+                    }
+                }
+                Process p = Runtime.getRuntime().exec(new String[]{"/system/bin/sync"});
+                p.waitFor();
+            } catch (Throwable ignored) {
             }
         }
 
@@ -7997,8 +8017,33 @@ public class TurzxMonitorMain {
     }
 
     private static void writeBytesAtomic(File target, byte[] data) throws Exception {
+        if (target == null || data == null || data.length == 0) {
+            throw new IllegalArgumentException("Refusing to write empty data to " + target);
+        }
         File parent = target.getParentFile();
         if (parent != null && !parent.exists()) parent.mkdirs();
+
+        // Keep a power-loss-safe .bak copy of critical executable/archive files before replacing
+        String name = target.getName();
+        if ((name.endsWith(".jar") || name.endsWith(".sh")) && target.isFile() && target.length() > 128L) {
+            try {
+                File bak = new File(target.getAbsolutePath() + ".bak");
+                byte[] prevBytes = readFileBytesQuick(target);
+                if (prevBytes.length > 128) {
+                    File bakTmp = new File(target.getAbsolutePath() + ".bak.tmp");
+                    FileOutputStream bfos = new FileOutputStream(bakTmp);
+                    try {
+                        bfos.write(prevBytes);
+                        bfos.getFD().sync();
+                    } finally {
+                        bfos.close();
+                    }
+                    bakTmp.renameTo(bak);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
         File tmp = new File(target.getAbsolutePath() + ".tmp");
         FileOutputStream fos = new FileOutputStream(tmp);
         try {
@@ -8006,6 +8051,10 @@ public class TurzxMonitorMain {
             fos.getFD().sync();
         } finally {
             fos.close();
+        }
+        if (tmp.length() != data.length) {
+            tmp.delete();
+            throw new IllegalStateException("Short write on " + tmp + ": expected " + data.length + ", got " + tmp.length());
         }
         if (!tmp.renameTo(target)) {
             FileOutputStream direct = new FileOutputStream(target);
