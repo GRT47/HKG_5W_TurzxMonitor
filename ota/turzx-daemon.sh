@@ -13,6 +13,8 @@ fi
 mkdir -p /data/dalvik-cache 2>/dev/null
 
 SVC_PID_FILE="/data/local/tmp/hkg_turzxmonitor_svc.pid"
+NEMESIS_PID_FILE="/data/nemesis/pids/hkg.turzxmonitor+turzx-daemon"
+NEMESIS_FAILS_FILE="/data/nemesis/pids/hkg.turzxmonitor+turzx-daemon.fails"
 JAVA_PID_FILE="/data/local/tmp/hkg_turzxmonitor_java.pid"
 OTA_RELOAD_FILE="/data/local/tmp/hkg_turzxmonitor_ota_reload"
 LOG_FILE="/data/local/tmp/hkg_turzxmonitor.log"
@@ -20,13 +22,21 @@ DEBUG_FILE="/data/local/tmp/hkg_turzxmonitor_debug.txt"
 MONITOR_PID=""
 SYNC_TICK=0
 
+mkdir -p /data/nemesis/pids 2>/dev/null
+rm -f "$NEMESIS_FAILS_FILE" 2>/dev/null
+if [ -f "/data/nemesis/services.db" ] && grep -q "hkg.turzxmonitor.*|background" /data/nemesis/services.db 2>/dev/null; then
+    sed 's/\(hkg\.turzxmonitor[^|]*|[^|]*|[^|]*|[^|]*|\)background/\1restart/g' /data/nemesis/services.db > /data/nemesis/services.db.tmp 2>/dev/null && mv -f /data/nemesis/services.db.tmp /data/nemesis/services.db 2>/dev/null
+fi
+
 if [ -f "$SVC_PID_FILE" ]; then
     old_svc_pid="$(cat "$SVC_PID_FILE" 2>/dev/null)"
     if [ -n "$old_svc_pid" ] && [ "$old_svc_pid" != "$$" ] && kill -0 "$old_svc_pid" 2>/dev/null; then
+        echo "$old_svc_pid" > "$NEMESIS_PID_FILE" 2>/dev/null
         exit 0
     fi
 fi
 echo "$$" > "$SVC_PID_FILE" 2>/dev/null
+echo "$$" > "$NEMESIS_PID_FILE" 2>/dev/null
 
 log_info() {
     echo "[TurzxMonitor] $*"
@@ -100,11 +110,12 @@ sync_logs_to_usb() {
 on_stop() {
     log_info "Service stopped via NEMESIS Manager"
     sync_logs_to_usb
-    rm -f "$SVC_PID_FILE" "$JAVA_PID_FILE" 2>/dev/null
+    rm -f "$SVC_PID_FILE" "$NEMESIS_PID_FILE" "$JAVA_PID_FILE" 2>/dev/null
     kill_monitor_java
     exit 0
 }
 trap 'on_stop' TERM INT
+trap '' HUP
 
 log_info "Service started (pid=$$)"
 
@@ -120,6 +131,9 @@ start_monitor_java
 sync_logs_to_usb
 
 while true; do
+    echo "$$" > "$SVC_PID_FILE" 2>/dev/null
+    echo "$$" > "$NEMESIS_PID_FILE" 2>/dev/null
+    rm -f "$NEMESIS_FAILS_FILE" 2>/dev/null
     chmod 666 /dev/bus/usb/*/* 2>/dev/null
     if [ -f "$OTA_RELOAD_FILE" ]; then
         rm -f "$OTA_RELOAD_FILE" 2>/dev/null

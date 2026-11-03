@@ -72,7 +72,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.3.4";
+    public static final String MONITOR_VERSION = "1.3.5";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -355,6 +355,15 @@ public class TurzxMonitorMain {
     private static void runDaemon(final String installDir) {
         System.out.println("[TurzxMonitor] Starting TURZX 9.2 Cluster HUD daemon v" + MONITOR_VERSION + " (dir=" + installDir + ")");
         DebugManager.logEvent("DAEMON", "Started daemon v" + MONITOR_VERSION + " at " + installDir);
+        try {
+            Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    TurzxUsbDriver.blankDisplayAndClose();
+                }
+            }, "TurzxShutdownBlank"));
+        } catch (Throwable ignored) {
+        }
         TurzxOverlayController.init(installDir);
         TurzxUsbDriver.startUsbPusherLoop(installDir);
         OtaUpdateManager.startAutoUpdateWorker(installDir);
@@ -608,19 +617,21 @@ public class TurzxMonitorMain {
             while (true) {
                 try {
                     MonitorConfig cfg = TurzxOverlayController.getConfig();
-                    boolean lcdOff = "1".equals(getSystemProperty("tcc.hwc.lcd.disable", "0"))
-                            || "false".equalsIgnoreCase(getSystemProperty("sys.boot.show_screen", "true"));
-                    if (lcdOff) {
-                        if (connected) {
-                            sendBrightnessCommand(0);
-                            closeUsbConnection();
-                        }
-                        Thread.sleep(1500L);
-                        continue;
-                    }
-
                     long frameStartMs = System.currentTimeMillis();
                     TelemetrySnapshot snap = TelemetryCollector.pollSnapshot(TurzxOverlayController.getSysContext());
+
+                    boolean screenOff = "1".equals(getSystemProperty("tcc.hwc.lcd.disable", "0"))
+                            || "false".equalsIgnoreCase(getSystemProperty("sys.boot.show_screen", "true"))
+                            || TelemetryCollector.isVehicleScreenOff();
+                    if (screenOff) {
+                        if (connected) {
+                            DebugManager.logEvent("USB", "Vehicle ignition/screen OFF detected -> blanking TURZX panel and setting brightness=0");
+                            blankDisplayAndClose();
+                        }
+                        statusText = "시동 OFF · 화면 절전 대기 중";
+                        Thread.sleep(350L);
+                        continue;
+                    }
 
                     // Always render the 1920x462 HUD frame so both USB display and HTTP /frame.jpg + preview work
                     byte[][] jpegs = TurzxFrameRenderer.renderHudJpegPair(snap, cfg.usbRotation, cfg.usbJpegQuality);
@@ -817,6 +828,24 @@ public class TurzxMonitorMain {
                 statusText = "USB 초기화 오류: " + t.getClass().getSimpleName();
                 return false;
             }
+        }
+
+        public static synchronized void blankDisplayAndClose() {
+            if (!connected && usbDevConn == null) return;
+            try {
+                byte[] blackJpeg = TurzxFrameRenderer.renderSolidBlackPanelJpeg();
+                if (blackJpeg != null && blackJpeg.length > 0) {
+                    sendJpegFrame(blackJpeg);
+                }
+            } catch (Throwable ignored) {
+            }
+            try {
+                sendBrightnessCommand(0);
+                sendBrightnessCommand(0);
+            } catch (Throwable ignored) {
+            }
+            lastAppliedBrightness = -1;
+            closeUsbConnection();
         }
 
         private static synchronized void closeUsbConnection() {
@@ -1174,6 +1203,38 @@ public class TurzxMonitorMain {
                 byte[] panelBytes = baosPanel.toByteArray();
 
                 return new byte[][]{landBytes, panelBytes};
+            } catch (Throwable t) {
+                return null;
+            }
+        }
+
+        private static volatile byte[] cachedSolidBlackPanelJpeg = null;
+
+        public static synchronized byte[] renderSolidBlackPanelJpeg() {
+            if (cachedSolidBlackPanelJpeg != null && cachedSolidBlackPanelJpeg.length > 0) {
+                return cachedSolidBlackPanelJpeg;
+            }
+            try {
+                Class<?> bmpCls = Class.forName("android.graphics.Bitmap");
+                Class<?> bmpCfgCls = Class.forName("android.graphics.Bitmap$Config");
+                Class<?> fmtCls = Class.forName("android.graphics.Bitmap$CompressFormat");
+                Class<?> canvasCls = Class.forName("android.graphics.Canvas");
+                Object argb8888 = bmpCfgCls.getField("ARGB_8888").get(null);
+                Object jpegFmt = fmtCls.getField("JPEG").get(null);
+                Method createBmp = bmpCls.getMethod("createBitmap", int.class, int.class, bmpCfgCls);
+                Method compressM = bmpCls.getMethod("compress", fmtCls, int.class, OutputStream.class);
+
+                Object blkBmp = createBmp.invoke(null, Integer.valueOf(PANEL_JPEG_WIDTH), Integer.valueOf(PANEL_JPEG_HEIGHT), argb8888);
+                Object blkCanvas = canvasCls.getConstructor(bmpCls).newInstance(blkBmp);
+                canvasCls.getMethod("drawColor", int.class).invoke(blkCanvas, Integer.valueOf(0xFF000000));
+                ByteArrayOutputStream baos = new ByteArrayOutputStream(16384);
+                compressM.invoke(blkBmp, jpegFmt, Integer.valueOf(85), baos);
+                try {
+                    bmpCls.getMethod("recycle").invoke(blkBmp);
+                } catch (Throwable ignored) {
+                }
+                cachedSolidBlackPanelJpeg = baos.toByteArray();
+                return cachedSolidBlackPanelJpeg;
             } catch (Throwable t) {
                 return null;
             }
@@ -2340,6 +2401,7 @@ public class TurzxMonitorMain {
 
         @Override
         public void onIG3StatusChanged(boolean ig3) {
+            TelemetryCollector.onDatcIg3StatusCallback(ig3);
         }
 
         @Override
@@ -2362,7 +2424,9 @@ public class TurzxMonitorMain {
     }
 
     public static final class BcmListenerBridge extends com.hkmc.bcm.IBCMListener.Stub {
-        @Override public void onACCChanged(int a) {}
+        @Override public void onACCChanged(int a) {
+            TelemetryCollector.onBcmAccChangedCallback(a);
+        }
         @Override public void onAMPCallSystemStatusChanged(int a) {}
         @Override public void onAccInputCheckChanged(int a) {}
         @Override public void onAirbagStatusChanged(int a) {}
@@ -2389,7 +2453,9 @@ public class TurzxMonitorMain {
         @Override public void onEngineStatusChanged(boolean a) {}
         @Override public void onFuelWarnStatusChanged(boolean a) {}
         @Override public void onGearStatusInfoChanged(int a, int b) {}
-        @Override public void onIgnitionChanged(int a) {}
+        @Override public void onIgnitionChanged(int a) {
+            TelemetryCollector.onBcmIgnitionChangedCallback(a);
+        }
         @Override public void onLampStatusChanged(int a, int b, int c, int d) {}
         @Override public void onModemInfoChanged(byte[] data) {}
         @Override public void onPanic(int a) {}
@@ -2507,6 +2573,8 @@ public class TurzxMonitorMain {
         private static volatile Object datcService = null;
         private static volatile Method datcGetClimateInfoMethod = null;
         private static volatile Method datcGetVrStatusMethod = null;
+        private static volatile Method datcIsIgn3Method = null;
+        private static volatile Boolean lastDatcIg3State = null;
         private static volatile boolean datcListenerRegistered = false;
         private static volatile long lastDatcCallbackMs = 0L;
         private static volatile Object lastRawDatcStatusObj = null;
@@ -2517,6 +2585,21 @@ public class TurzxMonitorMain {
         private static volatile Method bcmGetSpeedKmhMethod = null;
         private static volatile boolean bcmListenerRegistered = false;
         private static volatile String lastRawBcmHeatingCallback = "none";
+        private static volatile int lastBcmIgnCallbackState = -1;
+        private static volatile int lastBcmAccCallbackState = -1;
+
+        private static volatile Object powerService = null;
+        private static volatile Method powerGetStatusMethod = null;
+        private static volatile Method powerIsPrepOffMethod = null;
+        private static volatile Method powerIsDispOffMethod = null;
+        private static volatile Object blackScreenService = null;
+        private static volatile Method blackIsKeepScreenOffMethod = null;
+        private static volatile Object modeService = null;
+        private static volatile Method modeGetCurrentMethod = null;
+        private static volatile int lastPowerStatus = 0;
+        private static volatile boolean vehicleScreenOff = false;
+        private static volatile String lastRawPowerStateInfo = "none";
+        private static volatile String lastRawMediaLogInfo = "none";
 
         private static volatile boolean rcDisplayRegistered = false;
         private static volatile Object rcDisplayBridgeObj = null;
@@ -2586,8 +2669,58 @@ public class TurzxMonitorMain {
                 "com.broadcom.bt.avrcp.profile.action.PLAY_INFO",
                 "com.broadcom.bt.avrcp.profile.action.CURRENT_PLAY_POSITION",
                 "com.broadcom.bt.avrcp.profile.action.ACTION_CURRENT_PLAY_INFO_CBCOUNT_ERROR",
-                "com.hkmc.intent.action.CLIMATE_CHANGE"
+                "com.hkmc.intent.action.CLIMATE_CHANGE",
+                "com.hkmc.intent.action.ACTION_ACC_STATUS_CHANGED"
         };
+
+        public static boolean isVehicleScreenOff() {
+            return vehicleScreenOff;
+        }
+
+        public static void onDatcIg3StatusCallback(boolean ig3) {
+            lastDatcIg3State = Boolean.valueOf(ig3);
+            if (ig3) {
+                lastBcmIgnCallbackState = 1;
+                lastBcmAccCallbackState = 1;
+            }
+            refreshVehicleScreenOffFast();
+            if (vehicleScreenOff) {
+                TurzxUsbDriver.blankDisplayAndClose();
+            }
+        }
+
+        public static void onBcmIgnitionChangedCallback(int ign) {
+            if (ign == 0 || ign == 1) {
+                lastBcmIgnCallbackState = ign;
+                if (ign == 0) {
+                    lastDatcIg3State = Boolean.FALSE;
+                }
+                refreshVehicleScreenOffFast();
+                if (vehicleScreenOff) {
+                    TurzxUsbDriver.blankDisplayAndClose();
+                }
+            }
+        }
+
+        public static void onBcmAccChangedCallback(int acc) {
+            if (acc == 0 || acc == 1) {
+                lastBcmAccCallbackState = acc;
+                refreshVehicleScreenOffFast();
+                if (vehicleScreenOff) {
+                    TurzxUsbDriver.blankDisplayAndClose();
+                }
+            }
+        }
+
+        private static void refreshVehicleScreenOffFast() {
+            boolean charging;
+            synchronized (liveSnapshot) {
+                charging = liveSnapshot.charging;
+            }
+            vehicleScreenOff = evaluateVehicleScreenOffState(
+                    lastPowerStatus, false, false, false,
+                    lastDatcIg3State, lastBcmIgnCallbackState, lastBcmAccCallbackState, charging);
+        }
 
         public static void markNativeBinderHscanRx() {
             lastNativeBinderHscanRxMs = System.currentTimeMillis();
@@ -2713,6 +2846,35 @@ public class TurzxMonitorMain {
         public static boolean applyMediaWidgetBroadcastToSnapshot(String action, Object bundleObj, TelemetrySnapshot target) {
             if (target == null) return false;
             try {
+                if ("com.hkmc.intent.action.ACTION_ACC_STATUS_CHANGED".equals(action)) {
+                    if (bundleObj == null) return false;
+                    Class<?> bc = bundleObj.getClass();
+                    int accStatus = -1;
+                    try {
+                        Method getInt = bc.getMethod("getInt", String.class, int.class);
+                        accStatus = ((Integer) getInt.invoke(bundleObj, "EXTRA_ACC_STATUS", Integer.valueOf(-1))).intValue();
+                    } catch (Throwable t1) {
+                        try {
+                            Method getObj = bc.getMethod("get", String.class);
+                            Object oAcc = getObj.invoke(bundleObj, "EXTRA_ACC_STATUS");
+                            if (oAcc instanceof Number) accStatus = ((Number) oAcc).intValue();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    if (accStatus >= 0) {
+                        lastPowerStatus = accStatus;
+                        if (accStatus == 0) {
+                            lastBcmAccCallbackState = 1;
+                        }
+                        refreshVehicleScreenOffFast();
+                        if (vehicleScreenOff) {
+                            TurzxUsbDriver.blankDisplayAndClose();
+                        }
+                        return true;
+                    }
+                    return false;
+                }
+
                 if ("com.hkmc.intent.action.CLIMATE_CHANGE".equals(action)) {
                     if (bundleObj == null) return false;
                     Class<?> bc = bundleObj.getClass();
@@ -3111,6 +3273,7 @@ public class TurzxMonitorMain {
                 }
 
                 pollHevServiceLocked();
+                pollPowerAndIgnLocked();
                 pollTmHscanServiceLocked();
                 pollDatcServiceLocked();
                 pollGearLocked();
@@ -3298,6 +3461,7 @@ public class TurzxMonitorMain {
                                 Class<?> sc = datcService.getClass();
                                 try { datcGetClimateInfoMethod = sc.getMethod("getClimateInfo", int.class); } catch (Throwable ignored) {}
                                 try { datcGetVrStatusMethod = sc.getMethod("getVRClimateStatus", int.class); } catch (Throwable ignored) {}
+                                try { datcIsIgn3Method = sc.getMethod("isIGN3Status"); } catch (Throwable ignored) {}
                                 if (!datcListenerRegistered) {
                                     try {
                                         Class<?> datcIfc = Class.forName("com.hkmc.datc.IDATCListener");
@@ -3423,6 +3587,51 @@ public class TurzxMonitorMain {
                             systemService = stubCls.getMethod("asInterface", iBinderCls).invoke(null, b);
                             if (systemService != null) {
                                 try { sysGetGearPMethod = systemService.getClass().getMethod("getGearPStatus"); } catch (Throwable ignored) {}
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                if (powerService == null) {
+                    try {
+                        Object b = getSvc.invoke(null, "com.hkmc.micom.power");
+                        if (b != null) {
+                            Class<?> stubCls = Class.forName("com.hkmc.power.IMicomPowerService$Stub");
+                            powerService = stubCls.getMethod("asInterface", iBinderCls).invoke(null, b);
+                            if (powerService != null) {
+                                Class<?> sc = powerService.getClass();
+                                try { powerGetStatusMethod = sc.getMethod("getPowerStatus"); } catch (Throwable ignored) {}
+                                try { powerIsPrepOffMethod = sc.getMethod("isPreparingSystemOff"); } catch (Throwable ignored) {}
+                                try { powerIsDispOffMethod = sc.getMethod("isDisplayOffMode"); } catch (Throwable ignored) {}
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                if (blackScreenService == null) {
+                    try {
+                        Object b = getSvc.invoke(null, "com.hkmc.micom.blackscreen");
+                        if (b != null) {
+                            Class<?> stubCls = Class.forName("com.hkmc.power.IBlackScreenService$Stub");
+                            blackScreenService = stubCls.getMethod("asInterface", iBinderCls).invoke(null, b);
+                            if (blackScreenService != null) {
+                                try { blackIsKeepScreenOffMethod = blackScreenService.getClass().getMethod("isKeepScreenOff"); } catch (Throwable ignored) {}
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                if (modeService == null) {
+                    try {
+                        Object b = getSvc.invoke(null, "com.hkmc.micom.mode");
+                        if (b != null) {
+                            Class<?> stubCls = Class.forName("com.hkmc.mode.IModeManager$Stub");
+                            modeService = stubCls.getMethod("asInterface", iBinderCls).invoke(null, b);
+                            if (modeService != null) {
+                                try { modeGetCurrentMethod = modeService.getClass().getMethod("getCurrentMode"); } catch (Throwable ignored) {}
                             }
                         }
                     } catch (Throwable ignored) {
@@ -3643,6 +3852,66 @@ public class TurzxMonitorMain {
             }
         }
 
+        private static void pollPowerAndIgnLocked() {
+            boolean prepOff = false;
+            boolean dispOff = false;
+            boolean keepOff = false;
+            if (powerService != null) {
+                try {
+                    if (powerGetStatusMethod != null) {
+                        int st = ((Integer) powerGetStatusMethod.invoke(powerService)).intValue();
+                        if (st >= 0) {
+                            lastPowerStatus = st;
+                        }
+                    }
+                    if (powerIsPrepOffMethod != null) {
+                        prepOff = ((Boolean) powerIsPrepOffMethod.invoke(powerService)).booleanValue();
+                    }
+                    if (powerIsDispOffMethod != null) {
+                        dispOff = ((Boolean) powerIsDispOffMethod.invoke(powerService)).booleanValue();
+                    }
+                } catch (Throwable t) {
+                    powerService = null;
+                }
+            }
+            if (blackScreenService != null && blackIsKeepScreenOffMethod != null) {
+                try {
+                    keepOff = ((Boolean) blackIsKeepScreenOffMethod.invoke(blackScreenService)).booleanValue();
+                } catch (Throwable t) {
+                    blackScreenService = null;
+                }
+            }
+            if (datcService != null && datcIsIgn3Method != null) {
+                try {
+                    Boolean ig3 = (Boolean) datcIsIgn3Method.invoke(datcService);
+                    if (ig3 != null) {
+                        lastDatcIg3State = ig3;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            if (Boolean.TRUE.equals(lastDatcIg3State) || liveSnapshot.evReady) {
+                lastBcmIgnCallbackState = 1;
+                if (lastPowerStatus == 0) {
+                    lastBcmAccCallbackState = 1;
+                }
+            }
+            vehicleScreenOff = evaluateVehicleScreenOffState(
+                    lastPowerStatus,
+                    prepOff,
+                    dispOff,
+                    keepOff,
+                    lastDatcIg3State,
+                    lastBcmIgnCallbackState,
+                    lastBcmAccCallbackState,
+                    liveSnapshot.charging
+            );
+            lastRawPowerStateInfo = String.format(Locale.US,
+                    "pwr=%d(0=ACCON,2=ADM,5=READY,7=PREOFF), prepOff=%b, dispOff=%b, keepOff=%b, ig3=%s, bcmIgn=%d, bcmAcc=%d -> screenOff=%b",
+                    lastPowerStatus, prepOff, dispOff, keepOff, String.valueOf(lastDatcIg3State),
+                    lastBcmIgnCallbackState, lastBcmAccCallbackState, vehicleScreenOff);
+        }
+
         private static double queryEvHistoryDbAvgEconomy() {
             Object db = null;
             Object cursor = null;
@@ -3801,6 +4070,24 @@ public class TurzxMonitorMain {
         }
 
         private static void pollMediaNowPlayingLocked() {
+            if (modeService != null && modeGetCurrentMethod != null) {
+                try {
+                    int mode = ((Integer) modeGetCurrentMethod.invoke(modeService)).intValue();
+                    String modeSrc = mapModeManagerModeToSourceName(mode);
+                    if (!modeSrc.isEmpty()) {
+                        liveSnapshot.mediaSource = modeSrc;
+                    }
+                } catch (Throwable t) {
+                    modeService = null;
+                }
+            }
+
+            if (pollTick % 8 == 2 && ("Radio".equals(liveSnapshot.mediaSource) || "FM".equals(liveSnapshot.mediaSource)
+                    || "AM".equals(liveSnapshot.mediaSource) || "DAB".equals(liveSnapshot.mediaSource)
+                    || "미디어 재생 대기 중".equals(liveSnapshot.mediaTitle))) {
+                pollStickyMediaIntentLocked("com.hkmc.av.app.radioservice.statuschanged");
+            }
+
             String propTitle = getSystemProperty("persist.sys.hkg.media.title", "");
             String propArtist = getSystemProperty("persist.sys.hkg.media.artist", "");
             String propAlbum = getSystemProperty("persist.sys.hkg.media.album", "");
@@ -3930,6 +4217,35 @@ public class TurzxMonitorMain {
             tHttp.start();
         }
 
+        private static void pollStickyMediaIntentLocked(String action) {
+            try {
+                Class<?> filterCls = Class.forName("android.content.IntentFilter");
+                Object filter = filterCls.getConstructor(String.class).newInstance(action);
+                Class<?> amnCls = Class.forName("android.app.ActivityManagerNative");
+                Object am = amnCls.getMethod("getDefault").invoke(null);
+                if (am == null) return;
+                Class<?> appThreadCls = Class.forName("android.app.IApplicationThread");
+                Class<?> iirCls = Class.forName("android.content.IIntentReceiver");
+                Object stickyIntent;
+                try {
+                    Method regM = am.getClass().getMethod(
+                            "registerReceiver",
+                            appThreadCls, String.class, iirCls, filterCls, String.class, int.class);
+                    stickyIntent = regM.invoke(am, null, "android", null, filter, null, Integer.valueOf(0));
+                } catch (NoSuchMethodException nsme) {
+                    Method regM = am.getClass().getMethod(
+                            "registerReceiver",
+                            appThreadCls, String.class, iirCls, filterCls, String.class);
+                    stickyIntent = regM.invoke(am, null, "android", null, filter, null);
+                }
+                if (stickyIntent != null) {
+                    Object extras = stickyIntent.getClass().getMethod("getExtras").invoke(stickyIntent);
+                    applyMediaWidgetBroadcastToSnapshot(action, extras, liveSnapshot);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
         private static void runLogcatHscanWatcherLoop() {
             while (true) {
                 Process proc = null;
@@ -3937,7 +4253,16 @@ public class TurzxMonitorMain {
                 try {
                     proc = Runtime.getRuntime().exec(new String[]{
                             "/system/bin/logcat", "-b", "main", "-b", "system", "-v", "brief",
-                            "TM_HSCANPacketRunner:I", "ClusterService:I", "BCMService:I", "DATCService:V", "*:S"
+                            "TM_HSCANPacketRunner:I",
+                            "ClusterService:D",
+                            "BCMService:I",
+                            "DATCService:V",
+                            "MobisAvrcpControllerService:D",
+                            "BTA_BT_PLAYER_MANAGER:D",
+                            "SplitScreenViewBTAudio:D",
+                            "AdvancedLauncher:I",
+                            "MicomPowerService:I",
+                            "*:S"
                     });
                     br = new BufferedReader(new InputStreamReader(proc.getInputStream(), UTF8), 4096);
                     String line;
@@ -3949,7 +4274,7 @@ public class TurzxMonitorMain {
                         } else if (line.contains("DATCService") || line.contains("DATC_Intake") || line.contains("Flag : 12value")) {
                             synchronized (liveSnapshot) {
                                 if (parseDatcIntakeLogLine(line, liveSnapshot)) {
-                                    lastRawDatcIntakeInfo = "logcat:" + line.trim();
+                                     lastRawDatcIntakeInfo = "logcat:" + line.trim();
                                 }
                             }
                         } else if (line.contains("ClusterService")) {
@@ -3957,6 +4282,15 @@ public class TurzxMonitorMain {
                                 int mode = parseClusterMediaLogLine(line, liveSnapshot);
                                 if (mode >= 0) {
                                     lastClusterMediaMode = mode;
+                                }
+                            }
+                        } else if (line.contains("MobisAvrcpControllerService")
+                                || line.contains("BTA_BT_PLAYER_MANAGER")
+                                || line.contains("SplitScreenViewBTAudio")
+                                || line.contains("AdvancedLauncher")) {
+                            synchronized (liveSnapshot) {
+                                if (parseMediaLogLine(line, liveSnapshot)) {
+                                    lastRawMediaLogInfo = line.trim();
                                 }
                             }
                         } else if (System.currentTimeMillis() - lastNativeBinderHscanRxMs > 2500L) {
@@ -4683,8 +5017,33 @@ public class TurzxMonitorMain {
         }
 
         private static void refreshOnUiThread() {
+            Object h = uiHandler;
+            if (h != null) {
+                try {
+                    h.getClass().getMethod("removeCallbacks", Runnable.class).invoke(h, REFRESH_TASK);
+                } catch (Throwable ignored) {
+                }
+            }
+            boolean screenOff = "1".equals(getSystemProperty("tcc.hwc.lcd.disable", "0"))
+                    || "false".equalsIgnoreCase(getSystemProperty("sys.boot.show_screen", "true"))
+                    || TelemetryCollector.isVehicleScreenOff();
+            if (screenOff) {
+                if (rootView != null) {
+                    try {
+                        rootView.getClass().getMethod("setVisibility", int.class).invoke(rootView, Integer.valueOf(8)); // View.GONE
+                    } catch (Throwable ignored) {
+                    }
+                }
+                postDelayedToUi(REFRESH_TASK, 600L);
+                return;
+            }
+            if (config.overlayEnabled && (!isVisible || rootView == null || statusTv == null)) {
+                showOnUiThread();
+                return;
+            }
             if (!isVisible || rootView == null || statusTv == null) return;
             try {
+                rootView.getClass().getMethod("setVisibility", int.class).invoke(rootView, Integer.valueOf(0)); // View.VISIBLE
                 TelemetrySnapshot snap = TelemetryCollector.getLatestSnapshot();
                 long now = System.currentTimeMillis();
                 String extra = "";
@@ -4963,6 +5322,9 @@ public class TurzxMonitorMain {
                         .append(" (listenerReg=").append(TelemetryCollector.hscanListenerRegistered).append(")\n");
                 sb.append("  clusterService      : ").append(TelemetryCollector.clusterService != null ? TelemetryCollector.clusterService.getClass().getName() : "null")
                         .append(" (lastMode=").append(TelemetryCollector.lastClusterMediaMode).append(")\n");
+                sb.append("  powerService        : ").append(TelemetryCollector.powerService != null ? TelemetryCollector.powerService.getClass().getName() : "null")
+                        .append(" (").append(TelemetryCollector.lastRawPowerStateInfo).append(")\n");
+                sb.append("  modeService         : ").append(TelemetryCollector.modeService != null ? TelemetryCollector.modeService.getClass().getName() : "null").append("\n");
                 sb.append("  rcDisplayRegistered : ").append(TelemetryCollector.rcDisplayRegistered).append("\n");
 
                 // 3B. Raw IHEVService flag scan (0..200) + getRealSchedInfo + NavigationCluster + tm_hscan_service
@@ -5041,6 +5403,7 @@ public class TurzxMonitorMain {
                 sb.append("\n--- [3D] Raw Media & Broadcast Scan (AudioService / ClusterService / AvWidgetMainView) ---\n");
                 sb.append("  mediaBroadcastReg   : ").append(TelemetryCollector.mediaBroadcastRegistered).append("\n");
                 sb.append("  lastMediaWidgetDump : ").append(TelemetryCollector.lastRawMediaBroadcastDump).append("\n");
+                sb.append("  lastMediaLogLine    : ").append(TelemetryCollector.lastRawMediaLogInfo).append("\n");
                 sb.append("  lastRcClient        : ").append(TelemetryCollector.lastRawRcClientInfo).append("\n");
                 sb.append("  lastRcPlaybackState : ").append(TelemetryCollector.lastRawRcStateInfo).append("\n");
                 sb.append("  lastRcBundle        : ").append(TelemetryCollector.lastRawRcBundleDump).append("\n");
@@ -6822,13 +7185,250 @@ public class TurzxMonitorMain {
         return false;
     }
 
+    public static boolean evaluateVehicleScreenOffState(
+            int powerStatus,
+            boolean preparingSystemOff,
+            boolean displayOffMode,
+            boolean keepScreenOff,
+            Boolean datcIg3,
+            int bcmIgnCallback,
+            int bcmAccCallback,
+            boolean charging
+    ) {
+        if (preparingSystemOff || displayOffMode || keepScreenOff) {
+            return true;
+        }
+        // Genuine MicomPowerConstants$AccStatus (verified in automotive.odex & dumpsys_broadcasts.txt):
+        // 0 = ACCON (normal driving / ACC ON)
+        // 1 = LOGICON (ACC OFF, logic power only)
+        // 2 = ADM (Accessory Delayed Mode — entered the instant the driver presses Start/Stop to turn OFF the vehicle!)
+        // 5 = SYSTEMREADY, 6 = DELAYMODE, 7 = PRESYSTEMOFF, 255 = OFF
+        if (powerStatus > 0) {
+            return true;
+        }
+        if (!charging) {
+            if (Boolean.FALSE.equals(datcIg3)) {
+                return true;
+            }
+            if (bcmIgnCallback == 0 || bcmAccCallback == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static String mapModeManagerModeToSourceName(int mode) {
+        // Genuine com.hkmc.mode.ModeConstants$ModeType (verified against automotive.odex):
+        switch (mode) {
+            case 2:
+            case 3:
+            case 56: return "FM";
+            case 4:
+            case 57: return "AM";
+            case 5:
+            case 58: return "Radio";
+            case 14: return "DAB";
+            case 22:
+            case 23:
+            case 61:
+            case 62: return "DMB";
+            case 33:
+            case 49:
+            case 71: return "USB Music";
+            case 34:
+            case 50:
+            case 72: return "USB Video";
+            case 52:
+            case 74: return "iPod";
+            case 53: return "AUX";
+            case 54: return "Bluetooth Audio";
+            case 55: return "My Music";
+            case 115:
+            case 117: return "Apple CarPlay";
+            case 116:
+            case 118: return "Android Auto";
+            case 129: return "자연의 소리";
+            case 130: return "Music Streaming";
+            case 131: return "Genie";
+            case 132: return "Melon";
+            case 133: return "QQ Music";
+            case 134: return "VIBE";
+            default: return "";
+        }
+    }
+
+    /**
+     * Parses genuine Gen5W media logcat lines (verified against automotive-service.odex & DE22EV logcat_main.txt):
+     * - D/MobisAvrcpControllerService: [BTAD] mSongTitle:<title>, mArtistName:<artist>, mAlbum:<album>, mPlayingTime:<ms>
+     * - D/MobisAvrcpControllerService: [BTAD] title: <title>, artist:<artist>, album:<album>, playingTime:<ms>
+     * - D/BTA_BT_PLAYER_MANAGER: title name: <title> artist name: <artist>
+     * - D/BTA_BT_PLAYER_MANAGER: updateSplitBtAudio : <bool> ,title:<title> ,tune:<tune>
+     * - I/SplitScreenViewBTAudio: onBtAudioStatusUpdate ...Artist name.. <artist>song name.. <title>play status.. <0|1>tune key..
+     * - D/SplitScreenViewBTAudio: onBtAudioStatusUpdate BND: <title>
+     * - D/SplitScreenViewBTAudio: onBtAudioStatusUpdate FRQ: <artist>
+     * - I/AdvancedLauncher: mModeManager.getCurrentMode() : <modeStr>
+     */
+    public static boolean parseMediaLogLine(String line, TelemetrySnapshot target) {
+        if (line == null || target == null) return false;
+        try {
+            if (line.contains("MobisAvrcpControllerService") && line.contains("[BTAD]")) {
+                String title = "";
+                String artist = "";
+                String album = "";
+                long playMs = -1L;
+                if (line.contains("mSongTitle:")) {
+                    title = extractClusterKeyBetween(line, "mSongTitle:", ", mArtistName:");
+                    artist = extractClusterKeyBetween(line, "mArtistName:", ", mAlbum:");
+                    album = extractClusterKeyBetween(line, "mAlbum:", ", mPlayingTime:");
+                    playMs = extractClusterKeyInt(line, "mPlayingTime:", -1);
+                } else if (line.contains("title:")) {
+                    title = extractClusterKeyBetween(line, "title:", ", artist:");
+                    artist = extractClusterKeyBetween(line, "artist:", ", album:");
+                    album = extractClusterKeyBetween(line, "album:", ", playingTime:");
+                    playMs = extractClusterKeyInt(line, "playingTime:", -1);
+                }
+                boolean updated = false;
+                if (title != null && !title.isEmpty() && !"Not Provided".equalsIgnoreCase(title) && !"null".equalsIgnoreCase(title)) {
+                    target.mediaSource = "Bluetooth Audio";
+                    target.mediaTitle = title;
+                    target.mediaPlaying = true;
+                    updated = true;
+                }
+                if (artist != null && !artist.isEmpty() && !"Not Provided".equalsIgnoreCase(artist) && !"null".equalsIgnoreCase(artist)) {
+                    target.mediaArtist = artist;
+                    updated = true;
+                }
+                if (album != null && !album.isEmpty() && !"Not Provided".equalsIgnoreCase(album) && !"null".equalsIgnoreCase(album)) {
+                    target.mediaAlbum = album;
+                    updated = true;
+                }
+                if (playMs >= 0L && playMs < 36000000L) {
+                    target.mediaPositionSec = (int) (playMs / 1000L);
+                    TelemetryCollector.lastMediaPosUpdateMs = System.currentTimeMillis();
+                    updated = true;
+                }
+                return updated;
+            }
+
+            if (line.contains("BTA_BT_PLAYER_MANAGER")) {
+                if (line.contains("title name:") && line.contains("artist name:")) {
+                    String title = extractClusterKeyBetween(line, "title name:", "artist name:");
+                    String artist = extractClusterKeyTail(line, "artist name:");
+                    boolean updated = false;
+                    if (title != null && !title.isEmpty() && !"Not Provided".equalsIgnoreCase(title)) {
+                        target.mediaSource = "Bluetooth Audio";
+                        target.mediaTitle = title;
+                        target.mediaPlaying = true;
+                        updated = true;
+                    }
+                    if (artist != null && !artist.isEmpty() && !"Not Provided".equalsIgnoreCase(artist)) {
+                        target.mediaArtist = artist;
+                        updated = true;
+                    }
+                    return updated;
+                }
+                if (line.contains("updateSplitBtAudio") && line.contains(",title:")) {
+                    String title = extractClusterKeyBetween(line, ",title:", ",tune:");
+                    if (title != null && !title.isEmpty() && !"Not Provided".equalsIgnoreCase(title)) {
+                        target.mediaSource = "Bluetooth Audio";
+                        target.mediaTitle = title;
+                        target.mediaPlaying = true;
+                        return true;
+                    }
+                }
+            }
+
+            if (line.contains("SplitScreenViewBTAudio")) {
+                if (line.contains("Artist name..") && line.contains("song name..")) {
+                    String artist = extractClusterKeyBetween(line, "Artist name..", "song name..");
+                    String title = extractClusterKeyBetween(line, "song name..", "play status..");
+                    int playSt = extractClusterKeyInt(line, "play status..", -1);
+                    boolean updated = false;
+                    if (title != null && !title.isEmpty() && !"Not Provided".equalsIgnoreCase(title)) {
+                        target.mediaSource = "Bluetooth Audio";
+                        target.mediaTitle = title;
+                        target.mediaPlaying = (playSt != 0);
+                        updated = true;
+                    }
+                    if (artist != null && !artist.isEmpty() && !"Not Provided".equalsIgnoreCase(artist)) {
+                        target.mediaArtist = artist;
+                        updated = true;
+                    }
+                    return updated;
+                }
+                if (line.contains("onBtAudioStatusUpdate BND:")) {
+                    String title = extractClusterKeyTail(line, "onBtAudioStatusUpdate BND:");
+                    if (title != null && !title.isEmpty() && !"Not Provided".equalsIgnoreCase(title)) {
+                        target.mediaSource = "Bluetooth Audio";
+                        target.mediaTitle = title;
+                        target.mediaPlaying = true;
+                        return true;
+                    }
+                }
+                if (line.contains("onBtAudioStatusUpdate FRQ:")) {
+                    String artist = extractClusterKeyTail(line, "onBtAudioStatusUpdate FRQ:");
+                    if (artist != null && !artist.isEmpty() && !"Not Provided".equalsIgnoreCase(artist)) {
+                        target.mediaArtist = artist;
+                        return true;
+                    }
+                }
+            }
+
+            if (line.contains("AdvancedLauncher") && line.contains("mModeManager.getCurrentMode() :")) {
+                String mStr = extractClusterKeyTail(line, "mModeManager.getCurrentMode() :").toUpperCase(Locale.US);
+                if (mStr.contains("BLUETOOTH")) {
+                    target.mediaSource = "Bluetooth Audio";
+                    return true;
+                } else if (mStr.contains("CARPLAY") || mStr.contains("DIPO")) {
+                    target.mediaSource = "Apple CarPlay";
+                    return true;
+                } else if (mStr.contains("ANDROID") || mStr.contains("GPM")) {
+                    target.mediaSource = "Android Auto";
+                    return true;
+                } else if (mStr.contains("USB")) {
+                    target.mediaSource = "USB Music";
+                    return true;
+                } else if (mStr.contains("FM") || mStr.contains("AM") || mStr.contains("RADIO")) {
+                    target.mediaSource = "Radio";
+                    return true;
+                } else if (mStr.contains("DMB")) {
+                    target.mediaSource = "DMB";
+                    return true;
+                } else if (mStr.contains("MELON")) {
+                    target.mediaSource = "Melon";
+                    return true;
+                } else if (mStr.contains("GENIE")) {
+                    target.mediaSource = "Genie";
+                    return true;
+                } else if (mStr.contains("NATURE")) {
+                    target.mediaSource = "자연의 소리";
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static String stripClusterTrailingFields(String val) {
+        if (val == null) return "";
+        String s = val.trim();
+        String[] stops = new String[]{", user input =", ", length is", ", tune =", ", folder ="};
+        for (int i = 0; i < stops.length; i++) {
+            int idx = s.indexOf(stops[i]);
+            if (idx >= 0) {
+                s = s.substring(0, idx).trim();
+            }
+        }
+        return s;
+    }
+
     public static int parseClusterMediaLogLine(String line, TelemetrySnapshot target) {
         if (line == null || target == null || !line.contains("ClusterService")) return -1;
         try {
-            if (line.contains("updateClusterWithArtistInfo") || line.contains("updateClusterInfoWithArtistForMusicStreaming")) {
-                int mode = extractClusterKeyInt(line, "mode =", -1);
-                String title = extractClusterKeyBetween(line, "title =", ", artist =");
-                String artist = extractClusterKeyTail(line, "artist =");
+            if (line.contains("updateFileNameWithArtist::")) {
+                String title = stripClusterTrailingFields(extractClusterKeyBetween(line, "filename is", ", length is"));
+                String artist = stripClusterTrailingFields(extractClusterKeyBetween(line, "artistName is", ", length is"));
                 if (title != null && !title.isEmpty()) {
                     target.mediaTitle = title;
                     target.mediaPlaying = true;
@@ -6836,14 +7436,60 @@ public class TurzxMonitorMain {
                 if (artist != null && !artist.isEmpty()) {
                     target.mediaArtist = artist;
                 }
+                return TelemetryCollector.lastClusterMediaMode;
+            } else if (line.contains("updateFileNameWithFolder::")) {
+                String title = stripClusterTrailingFields(extractClusterKeyBetween(line, "filename is", ", length is"));
+                String folder = stripClusterTrailingFields(extractClusterKeyBetween(line, "folder is", ", length is"));
+                if (title != null && !title.isEmpty()) {
+                    target.mediaTitle = title;
+                    target.mediaPlaying = true;
+                }
+                if (folder != null && !folder.isEmpty()) {
+                    target.mediaArtist = folder;
+                }
+                return TelemetryCollector.lastClusterMediaMode;
+            } else if (line.contains("updateFilename::")) {
+                String title = stripClusterTrailingFields(extractClusterKeyBetween(line, "filename is", ", length is"));
+                if (title != null && !title.isEmpty()) {
+                    target.mediaTitle = title;
+                    target.mediaPlaying = true;
+                }
+                return TelemetryCollector.lastClusterMediaMode;
+            } else if (line.contains("updateClusterWithArtistInfo") || line.contains("updateClusterInfoWithArtistForMusicStreaming")) {
+                int mode = extractClusterKeyInt(line, "mode =", -1);
+                int sec = extractClusterKeyInt(line, "seconds =", -1);
+                String title = line.contains("titleCluster =")
+                        ? extractClusterKeyBetween(line, "titleCluster =", ", artist =")
+                        : extractClusterKeyBetween(line, "title =", ", artist =");
+                String artist = stripClusterTrailingFields(extractClusterKeyTail(line, "artist ="));
+                title = stripClusterTrailingFields(title);
+                if (title != null && !title.isEmpty()) {
+                    target.mediaTitle = title;
+                    target.mediaPlaying = true;
+                }
+                if (artist != null && !artist.isEmpty()) {
+                    target.mediaArtist = artist;
+                }
+                if (sec >= 0 && sec < 36000) {
+                    target.mediaPositionSec = sec;
+                    TelemetryCollector.lastMediaPosUpdateMs = System.currentTimeMillis();
+                }
                 if (mode >= 0) {
                     target.mediaSource = mapClusterModeToSourceName(mode);
                 }
                 return mode;
             } else if (line.contains("updateClusterWithFolderInfo")) {
                 int mode = extractClusterKeyInt(line, "mode =", -1);
-                String folder = extractClusterKeyBetween(line, "folder =", ", file =");
-                String file = extractClusterKeyTail(line, "file =");
+                int sec = extractClusterKeyInt(line, "seconds =", -1);
+                String file;
+                String folder;
+                if (line.contains("title =") && line.contains(", folder =")) {
+                    file = stripClusterTrailingFields(extractClusterKeyBetween(line, "title =", ", folder ="));
+                    folder = stripClusterTrailingFields(extractClusterKeyTail(line, "folder ="));
+                } else {
+                    folder = stripClusterTrailingFields(extractClusterKeyBetween(line, "folder =", ", file ="));
+                    file = stripClusterTrailingFields(extractClusterKeyTail(line, "file ="));
+                }
                 if (file != null && !file.isEmpty()) {
                     target.mediaTitle = file;
                     target.mediaPlaying = true;
@@ -6851,37 +7497,70 @@ public class TurzxMonitorMain {
                 if (folder != null && !folder.isEmpty()) {
                     target.mediaArtist = folder;
                 }
-                if (mode >= 0) {
-                    target.mediaSource = mapClusterModeToSourceName(mode);
-                }
-                return mode;
-            } else if (line.contains("updateClusterInfo") && line.contains("info1 =")) {
-                int mode = extractClusterKeyInt(line, "mode =", -1);
-                String info1 = extractClusterKeyBetween(line, "info1 =", ", info2 =");
-                String info2 = extractClusterKeyTail(line, "info2 =");
-                if (info1 != null && !info1.isEmpty()) {
-                    target.mediaTitle = info1;
-                    target.mediaPlaying = true;
-                }
-                if (info2 != null && !info2.isEmpty()) {
-                    target.mediaArtist = info2;
+                if (sec >= 0 && sec < 36000) {
+                    target.mediaPositionSec = sec;
+                    TelemetryCollector.lastMediaPosUpdateMs = System.currentTimeMillis();
                 }
                 if (mode >= 0) {
                     target.mediaSource = mapClusterModeToSourceName(mode);
                 }
                 return mode;
-            } else if (line.contains("updateClusterRadioInfo") && line.contains("freq =")) {
+            } else if (line.contains("updateClusterInfo")) {
                 int mode = extractClusterKeyInt(line, "mode =", -1);
-                String freq = extractClusterKeyTail(line, "freq =");
-                int comma = (freq != null) ? freq.indexOf(',') : -1;
-                if (comma > 0) freq = freq.substring(0, comma).trim();
-                if (freq != null && !freq.isEmpty()) {
-                    String srcName = mapClusterModeToSourceName(mode);
+                int sec = extractClusterKeyInt(line, "seconds =", -1);
+                if (line.contains("info1 =")) {
+                    String info1 = stripClusterTrailingFields(extractClusterKeyBetween(line, "info1 =", ", info2 ="));
+                    String info2 = stripClusterTrailingFields(extractClusterKeyTail(line, "info2 ="));
+                    if (info1 != null && !info1.isEmpty()) {
+                        target.mediaTitle = info1;
+                        target.mediaPlaying = true;
+                    }
+                    if (info2 != null && !info2.isEmpty()) {
+                        target.mediaArtist = info2;
+                    }
+                } else if (line.contains("title =")) {
+                    String title = stripClusterTrailingFields(extractClusterKeyTail(line, "title ="));
+                    if (title != null && !title.isEmpty()) {
+                        target.mediaTitle = title;
+                        target.mediaPlaying = true;
+                    }
+                }
+                if (sec >= 0 && sec < 36000) {
+                    target.mediaPositionSec = sec;
+                    TelemetryCollector.lastMediaPosUpdateMs = System.currentTimeMillis();
+                }
+                if (mode >= 0) {
+                    target.mediaSource = mapClusterModeToSourceName(mode);
+                }
+                return mode;
+            } else if (line.contains("updateClusterRadioInfo")) {
+                int mode = extractClusterKeyInt(line, "mode =", -1);
+                String srcName = mapClusterModeToSourceName(mode);
+                if (line.contains("freq =")) {
+                    String freq = extractClusterKeyTail(line, "freq =");
+                    int comma = (freq != null) ? freq.indexOf(',') : -1;
+                    if (comma > 0) freq = freq.substring(0, comma).trim();
+                    if (freq != null && !freq.isEmpty()) {
+                        target.mediaSource = srcName;
+                        target.mediaTitle = srcName + " " + freq;
+                        target.mediaArtist = "라디오 방송 수신 중";
+                        target.mediaAlbum = "";
+                        target.mediaPlaying = true;
+                    }
+                } else if (line.contains("station =")) {
+                    String ch = stripClusterTrailingFields(extractClusterKeyBetween(line, "channel =", ", station ="));
+                    String st = stripClusterTrailingFields(extractClusterKeyTail(line, "station ="));
                     target.mediaSource = srcName;
-                    target.mediaTitle = srcName + " " + freq;
-                    target.mediaArtist = "라디오 방송 수신 중";
+                    target.mediaTitle = (st != null && !st.isEmpty()) ? st : (srcName + " " + ch);
+                    target.mediaArtist = (ch != null && !ch.isEmpty() && !"0".equals(ch)) ? (srcName + " " + ch) : "라디오 방송 수신 중";
                     target.mediaAlbum = "";
                     target.mediaPlaying = true;
+                }
+                return mode;
+            } else if (line.contains("setCurrentMode =")) {
+                int mode = extractClusterKeyInt(line, "setCurrentMode =", -1);
+                if (mode >= 0) {
+                    target.mediaSource = mapClusterModeToSourceName(mode);
                 }
                 return mode;
             }
@@ -7654,6 +8333,50 @@ public class TurzxMonitorMain {
             assertTrue(parsedMode == 9 && "Supernova".equals(snap.mediaTitle) && "aespa".equals(snap.mediaArtist)
                     && "Bluetooth Audio".equals(snap.mediaSource) && snap.mediaPlaying,
                     "Expected ClusterService BT Audio log line parsed");
+
+            // Verify genuine automotive-service.odex ClusterService D-level logs & MobisAvrcpControllerService / BTA_BT_PLAYER_MANAGER / SplitScreenViewBTAudio logs
+            String clusterDLine1 = "D/ClusterService( 1042): updateFileNameWithArtist::filename is Rebel Heart, length is 11,  artistName is IVE, length is 3";
+            parseClusterMediaLogLine(clusterDLine1, snap);
+            assertTrue("Rebel Heart".equals(snap.mediaTitle) && "IVE".equals(snap.mediaArtist) && snap.mediaPlaying,
+                    "Expected ClusterService updateFileNameWithArtist:: parsed");
+            String clusterDLine2 = "D/ClusterService( 1042): updateClusterWithArtistInfo::mode = 9,seconds = 128, title = HOME SWEET HOME, artist = G-DRAGON, user input = false";
+            assertTrue(parseClusterMediaLogLine(clusterDLine2, snap) == 9
+                    && "HOME SWEET HOME".equals(snap.mediaTitle) && "G-DRAGON".equals(snap.mediaArtist)
+                    && snap.mediaPositionSec == 128,
+                    "Expected ClusterService updateClusterWithArtistInfo:: with seconds & user input parsed");
+            String btadLine1 = "D/MobisAvrcpControllerService( 1310): [BTAD] mSongTitle:Drowning, mArtistName:WOODZ, mAlbum:OO-LI, mPlayingTime:94000";
+            assertTrue(parseMediaLogLine(btadLine1, snap)
+                    && "Bluetooth Audio".equals(snap.mediaSource)
+                    && "Drowning".equals(snap.mediaTitle)
+                    && "WOODZ".equals(snap.mediaArtist)
+                    && "OO-LI".equals(snap.mediaAlbum)
+                    && snap.mediaPositionSec == 94,
+                    "Expected MobisAvrcpControllerService [BTAD] mSongTitle log parsed");
+            String btaLine = "D/BTA_BT_PLAYER_MANAGER( 1310): title name: HAPPY artist name: DAY6";
+            assertTrue(parseMediaLogLine(btaLine, snap)
+                    && "HAPPY".equals(snap.mediaTitle) && "DAY6".equals(snap.mediaArtist),
+                    "Expected BTA_BT_PLAYER_MANAGER title/artist log parsed");
+            String splitBtLine = "I/SplitScreenViewBTAudio( 1480): onBtAudioStatusUpdate ...Artist name.. QWERsong name.. 내 이름 맑음play status.. 1tune key.. falsedevice name.. Galaxy S24";
+            assertTrue(parseMediaLogLine(splitBtLine, snap)
+                    && "내 이름 맑음".equals(snap.mediaTitle) && "QWER".equals(snap.mediaArtist) && snap.mediaPlaying,
+                    "Expected SplitScreenViewBTAudio onBtAudioStatusUpdate log parsed");
+            assertTrue("Bluetooth Audio".equals(mapModeManagerModeToSourceName(54))
+                    && "Apple CarPlay".equals(mapModeManagerModeToSourceName(115))
+                    && "Android Auto".equals(mapModeManagerModeToSourceName(116))
+                    && "USB Music".equals(mapModeManagerModeToSourceName(33)),
+                    "Expected ModeConstants$ModeType mapping");
+
+            // Verify immediate ignition-off / ACC-off / ADM (powerStatus=2) / IG3-off screen blanking logic
+            assertTrue(!evaluateVehicleScreenOffState(0, false, false, false, Boolean.TRUE, 1, 1, false),
+                    "Expected screen ON when ACCON (0) and IG3=true");
+            assertTrue(evaluateVehicleScreenOffState(2, false, false, false, Boolean.TRUE, 1, 1, false),
+                    "Expected screen OFF immediately when entering ADM (powerStatus=2 on Start/Stop button off)");
+            assertTrue(evaluateVehicleScreenOffState(0, false, false, false, Boolean.FALSE, 1, 1, false),
+                    "Expected screen OFF immediately when IG3 transitions to false (not charging)");
+            assertTrue(!evaluateVehicleScreenOffState(0, false, false, false, Boolean.FALSE, 0, 1, true),
+                    "Expected screen to remain ON during active EV charging when ACCON=0");
+            assertTrue(evaluateVehicleScreenOffState(0, true, false, false, Boolean.TRUE, 1, 1, true),
+                    "Expected screen OFF when isPreparingSystemOff() is true");
 
             // Verify TP_DEVICE_FATC (0xAB) UDS 62 01 00 indoor (25.0°C) & outdoor (20.0°C) sensor decoding
             String sampleLogFatc = "I/TM_HSCANPacketRunner(  524): onEventFromMicom(Bypass CAN) : length _41[c7, c0, ab, c8, 2b, "

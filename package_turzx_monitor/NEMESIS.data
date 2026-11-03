@@ -16,5 +16,5 @@ name=hkg-turzxmonitor
 kind=sh
 path=svc/turzx-daemon.sh
 uid=root
-mode=background
+mode=restart
 

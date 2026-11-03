@@ -40,7 +40,8 @@ else
     echo "show" > "$CMD_FILE" 2>/dev/null
 fi
 
-if [ "$svc_alive" = "0" ]; then
+if [ "$svc_alive" = "0" ] || [ "$java_alive" = "0" ]; then
+    rm -f /data/nemesis/pids/hkg.turzxmonitor+turzx-daemon.fails 2>/dev/null
     /system/bin/sh "$INSTALL_DIR/svc/turzx-daemon.sh" </dev/null >>/data/local/tmp/hkg_turzxmonitor.log 2>&1 &
 fi
 
