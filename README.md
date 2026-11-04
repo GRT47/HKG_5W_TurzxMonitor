@@ -17,7 +17,7 @@
     - **단속 카메라가 없는 일반 도로 시**: **파란색 원형 표지판(`#2563EB`)** + 현재 도로 제한속도 표시.
   - **TBT 경로 안내 카드** 및 중앙 대형 현재 속도(`km/h`) · 크루즈 설정 속도(`CRUISE`) · 기어 단수(`P/R/N/D`).
 - **3열 (우측 `미디어 정보 1 : 공조 모니터 1`, 상·하 1:1 높이 분할)**:
-  - **상단 50% (`재생중인 미디어`)**: 대형 앨범 아트(`126×126`), 곡 제목, 아티스트/앨범명, 우측 축소형 재생 진행 바.
+  - **상단 50% (`재생중인 미디어`)**: 대형 라운드 앨범 아트(`172×172`, 5중 계층 수집: `BTAudio`/`CarPlay`/`Android Auto`/`USBMusic` `artwork_raw_image`·`artwork_uri` + `AvrcpControllerService` `/mnt/bt_cover_art/0` BIP 커버아트 + `IRemoteControlDisplay` 280×280 비트맵 + iTunes Search API `TLSv1.2` 커버아트 폴백 및 LRU 캐시), 곡 제목, 아티스트/앨범명, 우측 축소형 재생 진행 바.
   - **하단 50% (`공조 모니터 DATC`)**:
     - 운전석/동승석 설정 온도(`°C`), `AUTO`, `A/C`, `내기순환/외기유입`, `SYNC`, 실시간 공조 전력(`kW`).
     - **대형 시트 착좌형 3방향 풍향 화살표 (전면유리 `#FBBF24` · 상체 `#38BDF8` · 하체 `#FB923C`)** + **7단계 상승형 풍량 바 그래프(`풍량 1~7단`)**.
@@ -60,5 +60,6 @@ python package_turzx_monitor/build_package.py
    - `/`: 실시간 클러스터 HUD 웹 뷰어
    - `/status.json`: 4대 도메인 텔레메트리 + USB + OTA 상태 JSON
    - `/frame.jpg`: 실시간 렌더링된 `1920 × 462` JPEG 프레임
+   - `/albumart.jpg`: 현재 재생 곡의 원본 앨범 커버 이미지
    - `/debug.txt`: 실시간 진단 로그 리포트 조회 및 USB 저장 트리거
    - `/update`: GitHub OTA 최신 버전 확인 및 업데이트 트리거

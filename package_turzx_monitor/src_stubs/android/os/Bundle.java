@@ -23,6 +23,10 @@ public final class Bundle {
         mMap.put(key, Boolean.valueOf(value));
     }
 
+    public void putByteArray(String key, byte[] value) {
+        mMap.put(key, value);
+    }
+
     public Object get(String key) {
         return mMap.get(key);
     }

@@ -72,7 +72,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.3.7";
+    public static final String MONITOR_VERSION = "1.3.8";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -272,6 +272,8 @@ public class TurzxMonitorMain {
         public int mediaPositionSec = 0;
         public int mediaDurationSec = 0;
         public Object albumArtBitmap = null;
+        public String albumArtSource = "none";
+        public String albumArtTrackKey = "";
 
         public double getEffectiveSocPct() {
             if (displaySocPct >= 0.0) return displaySocPct;
@@ -1802,8 +1804,42 @@ public class TurzxMonitorMain {
                     int bw = ((Integer) bmpCls.getMethod("getWidth").invoke(s.albumArtBitmap)).intValue();
                     int bh = ((Integer) bmpCls.getMethod("getHeight").invoke(s.albumArtBitmap)).intValue();
                     if (bw > 0 && bh > 0) {
-                        setRf.invoke(rf, 1234f, 32f, 1406f, 204f);
-                        drawBmpRectF.invoke(c, s.albumArtBitmap, null, rf, null);
+                        float ax0 = 1234f, ay0 = 32f, ax1 = 1406f, ay1 = 204f, aRad = 18f;
+                        float dstW = ax1 - ax0;
+                        float dstH = ay1 - ay0;
+                        setRf.invoke(rf, ax0, ay0, ax1, ay1);
+                        boolean drawnRounded = false;
+                        try {
+                            Class<?> shaderCls = Class.forName("android.graphics.Shader");
+                            Class<?> tileCls = Class.forName("android.graphics.Shader$TileMode");
+                            Class<?> bsCls = Class.forName("android.graphics.BitmapShader");
+                            Class<?> matCls = Class.forName("android.graphics.Matrix");
+                            Object clamp = tileCls.getField("CLAMP").get(null);
+                            Object bs = bsCls.getConstructor(bmpCls, tileCls, tileCls)
+                                    .newInstance(s.albumArtBitmap, clamp, clamp);
+                            Object mat = matCls.getConstructor().newInstance();
+                            float scale = Math.max(dstW / (float) bw, dstH / (float) bh);
+                            float dx = ax0 + (dstW - bw * scale) * 0.5f;
+                            float dy = ay0 + (dstH - bh * scale) * 0.5f;
+                            matCls.getMethod("setScale", float.class, float.class)
+                                    .invoke(mat, Float.valueOf(scale), Float.valueOf(scale));
+                            matCls.getMethod("postTranslate", float.class, float.class)
+                                    .invoke(mat, Float.valueOf(dx), Float.valueOf(dy));
+                            shaderCls.getMethod("setLocalMatrix", matCls).invoke(bs, mat);
+                            Method setShaderM = paintCls.getMethod("setShader", shaderCls);
+                            setColor.invoke(pShader, Integer.valueOf(0xFFFFFFFF));
+                            setShaderM.invoke(pShader, bs);
+                            drawRoundRect.invoke(c, rf, Float.valueOf(aRad), Float.valueOf(aRad), pShader);
+                            setShaderM.invoke(pShader, new Object[]{null});
+                            setColor.invoke(pStroke, Integer.valueOf(0x33FFFFFF));
+                            setStrokeW.invoke(pStroke, Float.valueOf(1.5f));
+                            drawRoundRect.invoke(c, rf, Float.valueOf(aRad), Float.valueOf(aRad), pStroke);
+                            drawnRounded = true;
+                        } catch (Throwable ignoredShader) {
+                        }
+                        if (!drawnRounded) {
+                            drawBmpRectF.invoke(c, s.albumArtBitmap, null, rf, null);
+                        }
                     }
                 } catch (Throwable ignored) {
                 }
@@ -2802,6 +2838,11 @@ public class TurzxMonitorMain {
         private static volatile boolean mediaBroadcastRegistered = false;
         private static volatile Object mediaReceiverObj = null;
         private static volatile long lastMediaWidgetReqMs = 0L;
+        private static volatile long lastTrackChangeMs = 0L;
+        private static volatile long lastNativeAlbumArtRxMs = 0L;
+        private static volatile long lastDiskArtProbeMs = 0L;
+        private static volatile int trackWidgetReqCount = 0;
+        private static volatile byte[] latestAlbumArtBytes = null;
         private static volatile String lastRawMediaBroadcastDump = "none";
         private static volatile Object clusterService = null;
         private static volatile Method clusterGetLastPlaytimeMethod = null;
@@ -3154,15 +3195,9 @@ public class TurzxMonitorMain {
                     String album = readBundleStringAny(bundleObj, getStr, getObj,
                             "album_name", "CURRENT_ALBUM", "album", "bluetooth_device_name");
 
+                    onMediaTrackUpdated(target, title, artist, album);
                     if (!title.isEmpty() && !"Not Provided".equalsIgnoreCase(title)) {
-                        target.mediaTitle = title;
                         target.mediaPlaying = true;
-                    }
-                    if (!artist.isEmpty() && !"Not Provided".equalsIgnoreCase(artist)) {
-                        target.mediaArtist = artist;
-                    }
-                    if (!album.isEmpty() && !"Not Provided".equalsIgnoreCase(album)) {
-                        target.mediaAlbum = album;
                     }
 
                     if (getInt != null) {
@@ -3189,19 +3224,77 @@ public class TurzxMonitorMain {
                         }
                     }
 
-                    if (getByteArr != null) {
+                    boolean gotNativeArt = false;
+                    if (getByteArr != null && !isBtaudioPlaceholderBundle(action, bundleObj, getInt, getObj)) {
                         try {
                             byte[] rawArt = (byte[]) getByteArr.invoke(bundleObj, "artwork_raw_image");
                             if (rawArt != null && rawArt.length > 64) {
-                                Class<?> bfCls = Class.forName("android.graphics.BitmapFactory");
-                                Object bmp = bfCls.getMethod("decodeByteArray", byte[].class, int.class, int.class)
-                                        .invoke(null, rawArt, Integer.valueOf(0), Integer.valueOf(rawArt.length));
+                                Object bmp = decodeAlbumArtBytes(rawArt);
                                 if (bmp != null) {
                                     target.albumArtBitmap = bmp;
+                                    target.albumArtSource = "broadcast_bytes";
+                                    gotNativeArt = true;
+                                    if (target == liveSnapshot) {
+                                        lastNativeAlbumArtRxMs = System.currentTimeMillis();
+                                        latestAlbumArtBytes = rawArt;
+                                    }
+                                    AlbumArtResolver.putCachedArt(target.mediaTitle, target.mediaArtist, bmp);
                                 }
                             }
                         } catch (Throwable ignored) {
                         }
+                    }
+
+                    if (!gotNativeArt) {
+                        String artUri = readBundleStringAny(bundleObj, getStr, getObj,
+                                "artwork_uri", "album_art_uri", "artwork_path", "albumart_uri", "uri");
+                        if (!artUri.isEmpty() && !"null".equalsIgnoreCase(artUri)) {
+                            Object bmp = loadBitmapFromUriOrPath(artUri);
+                            if (bmp != null) {
+                                target.albumArtBitmap = bmp;
+                                target.albumArtSource = "broadcast_uri";
+                                gotNativeArt = true;
+                                if (target == liveSnapshot) {
+                                    lastNativeAlbumArtRxMs = System.currentTimeMillis();
+                                }
+                                AlbumArtResolver.putCachedArt(target.mediaTitle, target.mediaArtist, bmp);
+                            }
+                        }
+                    }
+
+                    if (!gotNativeArt && getObj != null) {
+                        String[] bmpKeys = new String[]{"albumArt", "artwork", "bitmap", "album_art"};
+                        for (int bk = 0; bk < bmpKeys.length && !gotNativeArt; bk++) {
+                            try {
+                                Object v = getObj.invoke(bundleObj, bmpKeys[bk]);
+                                if (v instanceof byte[]) {
+                                    Object bmp = decodeAlbumArtBytes((byte[]) v);
+                                    if (bmp != null) {
+                                        target.albumArtBitmap = bmp;
+                                        target.albumArtSource = "broadcast_bytes";
+                                        gotNativeArt = true;
+                                        if (target == liveSnapshot) {
+                                            lastNativeAlbumArtRxMs = System.currentTimeMillis();
+                                            latestAlbumArtBytes = (byte[]) v;
+                                        }
+                                        AlbumArtResolver.putCachedArt(target.mediaTitle, target.mediaArtist, bmp);
+                                    }
+                                } else if (v != null && v.getClass().getName().equals("android.graphics.Bitmap")) {
+                                    target.albumArtBitmap = v;
+                                    target.albumArtSource = "broadcast_bitmap";
+                                    gotNativeArt = true;
+                                    if (target == liveSnapshot) {
+                                        lastNativeAlbumArtRxMs = System.currentTimeMillis();
+                                    }
+                                    AlbumArtResolver.putCachedArt(target.mediaTitle, target.mediaArtist, v);
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    }
+
+                    if (target == liveSnapshot && target.albumArtBitmap == null) {
+                        AlbumArtResolver.requestOnlineLookupIfNeeded(target);
                     }
                 }
 
@@ -3223,10 +3316,37 @@ public class TurzxMonitorMain {
             }
         }
 
+        public static void requestMediaWidgetUpdateAsync() {
+            long now = System.currentTimeMillis();
+            if (now - lastMediaWidgetReqMs < 800L) return;
+            lastMediaWidgetReqMs = now;
+            Thread t = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    requestMediaWidgetUpdate();
+                }
+            }, "Turzx-WidgetUpdateReq");
+            t.setDaemon(true);
+            t.start();
+        }
+
         private static void requestMediaWidgetUpdate() {
             try {
                 Class<?> intentCls = Class.forName("android.content.Intent");
                 Object reqIntent = intentCls.getConstructor(String.class).newInstance("com.hkmc.request.widgetupdate");
+                try {
+                    intentCls.getMethod("putExtra", String.class, boolean.class)
+                            .invoke(reqIntent, "update", Boolean.TRUE);
+                } catch (Throwable ignored) {
+                }
+                Object sysCtx = TurzxOverlayController.getSysContext();
+                if (sysCtx != null) {
+                    try {
+                        sysCtx.getClass().getMethod("sendBroadcast", intentCls).invoke(sysCtx, reqIntent);
+                        lastMediaWidgetReqMs = System.currentTimeMillis();
+                    } catch (Throwable ignored) {
+                    }
+                }
                 Class<?> amnCls = Class.forName("android.app.ActivityManagerNative");
                 Object am = amnCls.getMethod("getDefault").invoke(null);
                 if (am != null) {
@@ -3396,18 +3516,15 @@ public class TurzxMonitorMain {
                 long durMs = readBundleLongAny(bundleObj, getLong, getObj, "9", "duration", "android.media.metadata.DURATION");
 
                 synchronized (liveSnapshot) {
+                    onMediaTrackUpdated(liveSnapshot, title, artist, album);
                     if (!title.isEmpty()) {
-                        liveSnapshot.mediaTitle = title;
                         liveSnapshot.mediaPlaying = true;
-                    }
-                    if (!artist.isEmpty()) {
-                        liveSnapshot.mediaArtist = artist;
-                    }
-                    if (album != null) {
-                        liveSnapshot.mediaAlbum = album;
                     }
                     if (durMs > 0L && durMs < 36000000L) {
                         liveSnapshot.mediaDurationSec = (int) (durMs > 36000L ? (durMs / 1000L) : durMs);
+                    }
+                    if (liveSnapshot.albumArtBitmap == null) {
+                        AlbumArtResolver.requestOnlineLookupIfNeeded(liveSnapshot);
                     }
                 }
             } catch (Throwable ignored) {
@@ -3418,6 +3535,9 @@ public class TurzxMonitorMain {
             synchronized (liveSnapshot) {
                 if (bitmapObj != null) {
                     liveSnapshot.albumArtBitmap = bitmapObj;
+                    liveSnapshot.albumArtSource = "rc_display";
+                    lastNativeAlbumArtRxMs = System.currentTimeMillis();
+                    AlbumArtResolver.putCachedArt(liveSnapshot.mediaTitle, liveSnapshot.mediaArtist, bitmapObj);
                 }
             }
         }
@@ -3477,8 +3597,22 @@ public class TurzxMonitorMain {
                 pollMediaNowPlayingLocked();
                 pollCarrotBridgeAndArpLocked();
 
-                if ("미디어 재생 대기 중".equals(liveSnapshot.mediaTitle)
-                        && (System.currentTimeMillis() - lastMediaWidgetReqMs > 15000L)) {
+                long nowMs = System.currentTimeMillis();
+                if (liveSnapshot.albumArtBitmap == null) {
+                    long reqInterval = (trackWidgetReqCount < 4) ? 2500L : 15000L;
+                    if (nowMs - lastMediaWidgetReqMs >= reqInterval) {
+                        trackWidgetReqCount++;
+                        requestMediaWidgetUpdate();
+                    }
+                    if (nowMs - lastDiskArtProbeMs >= 1500L) {
+                        lastDiskArtProbeMs = nowMs;
+                        probeOnDiskAlbumArtLocked(liveSnapshot);
+                    }
+                    if (liveSnapshot.albumArtBitmap == null) {
+                        AlbumArtResolver.requestOnlineLookupIfNeeded(liveSnapshot);
+                    }
+                } else if ("미디어 재생 대기 중".equals(liveSnapshot.mediaTitle)
+                        && (nowMs - lastMediaWidgetReqMs > 15000L)) {
                     requestMediaWidgetUpdate();
                 }
 
@@ -3733,6 +3867,11 @@ public class TurzxMonitorMain {
                                     Method regM = asc.getMethod("registerRemoteControlDisplay", rcdIfc);
                                     regM.invoke(audioSvc, bridge);
                                     rcDisplayRegistered = true;
+                                }
+                                try {
+                                    Method bmpSizeM = asc.getMethod("remoteControlDisplayUsesBitmapSize", rcdIfc, int.class, int.class);
+                                    bmpSizeM.invoke(audioSvc, bridge, Integer.valueOf(280), Integer.valueOf(280));
+                                } catch (Throwable ignored) {
                                 }
                                 if (rcDisplayRegistered) {
                                     DebugManager.logEvent("MEDIA", "Registered IRemoteControlDisplay (280x280) with AudioService");
@@ -4292,10 +4431,10 @@ public class TurzxMonitorMain {
             String propArtist = getSystemProperty("persist.sys.hkg.media.artist", "");
             String propAlbum = getSystemProperty("persist.sys.hkg.media.album", "");
             String propSource = getSystemProperty("persist.sys.hkg.media.source", "");
-            if (!propTitle.isEmpty()) liveSnapshot.mediaTitle = propTitle;
-            if (!propArtist.isEmpty()) liveSnapshot.mediaArtist = propArtist;
-            if (!propAlbum.isEmpty()) liveSnapshot.mediaAlbum = propAlbum;
             if (!propSource.isEmpty()) liveSnapshot.mediaSource = propSource;
+            if (!propTitle.isEmpty() || !propArtist.isEmpty() || !propAlbum.isEmpty()) {
+                onMediaTrackUpdated(liveSnapshot, propTitle, propArtist, propAlbum);
+            }
 
             File mediaFile = new File("/data/local/tmp/hkg_media_state.txt");
             if (mediaFile.isFile()) {
@@ -4303,9 +4442,10 @@ public class TurzxMonitorMain {
                 if (!line.isEmpty() && line.contains("|")) {
                     String[] parts = line.split("\\|");
                     if (parts.length >= 1 && !parts[0].trim().isEmpty()) liveSnapshot.mediaSource = parts[0].trim();
-                    if (parts.length >= 2 && !parts[1].trim().isEmpty()) liveSnapshot.mediaTitle = parts[1].trim();
-                    if (parts.length >= 3 && !parts[2].trim().isEmpty()) liveSnapshot.mediaArtist = parts[2].trim();
-                    if (parts.length >= 4 && !parts[3].trim().isEmpty()) liveSnapshot.mediaAlbum = parts[3].trim();
+                    String fTitle = parts.length >= 2 ? parts[1].trim() : "";
+                    String fArtist = parts.length >= 3 ? parts[2].trim() : "";
+                    String fAlbum = parts.length >= 4 ? parts[3].trim() : "";
+                    onMediaTrackUpdated(liveSnapshot, fTitle, fArtist, fAlbum);
                 }
             }
 
@@ -4458,7 +4598,9 @@ public class TurzxMonitorMain {
                             "BCMService:I",
                             "DATCService:V",
                             "MobisAvrcpControllerService:D",
+                            "AvrcpControllerService:D",
                             "BTA_BT_PLAYER_MANAGER:D",
+                            "BTA_MUSIC_SERVICE:D",
                             "SplitScreenViewBTAudio:D",
                             "AdvancedLauncher:I",
                             "MicomPowerService:I",
@@ -4485,7 +4627,9 @@ public class TurzxMonitorMain {
                                 }
                             }
                         } else if (line.contains("MobisAvrcpControllerService")
+                                || line.contains("AvrcpControllerService")
                                 || line.contains("BTA_BT_PLAYER_MANAGER")
+                                || line.contains("BTA_MUSIC_SERVICE")
                                 || line.contains("SplitScreenViewBTAudio")
                                 || line.contains("AdvancedLauncher")) {
                             synchronized (liveSnapshot) {
@@ -4724,6 +4868,13 @@ public class TurzxMonitorMain {
                             } else {
                                 writeHttpResponse(os, "404 Not Found", "text/plain; charset=utf-8", "Frame not ready".getBytes(UTF8));
                             }
+                        } else if (path.startsWith("/albumart.jpg")) {
+                            byte[] art = latestAlbumArtBytes;
+                            if (art != null && art.length > 0) {
+                                writeHttpResponse(os, "200 OK", "image/jpeg", art);
+                            } else {
+                                writeHttpResponse(os, "404 Not Found", "text/plain; charset=utf-8", "No album art".getBytes(UTF8));
+                            }
                         } else if (path.startsWith("/debug.txt") || path.startsWith("/logs")) {
                             String dir = TurzxOverlayController.getInstallDir();
                             String savedPath = DebugManager.dumpDiagnosticsToDisk(dir, getLatestSnapshot(), TurzxOverlayController.getConfig());
@@ -4853,6 +5004,8 @@ public class TurzxMonitorMain {
             c.mediaPositionSec = liveSnapshot.mediaPositionSec;
             c.mediaDurationSec = liveSnapshot.mediaDurationSec;
             c.albumArtBitmap = liveSnapshot.albumArtBitmap;
+            c.albumArtSource = liveSnapshot.albumArtSource;
+            c.albumArtTrackKey = liveSnapshot.albumArtTrackKey;
             return c;
         }
     }
@@ -6051,7 +6204,7 @@ public class TurzxMonitorMain {
             }
         }
 
-        private static List<String> resolveHostViaPublicDns(String host) {
+        public static List<String> resolveHostViaPublicDns(String host) {
             List<String> ips = new ArrayList<String>();
             try {
                 InetAddress[] sysAddrs = InetAddress.getAllByName(host);
@@ -6119,16 +6272,18 @@ public class TurzxMonitorMain {
                 }
             }
 
-            // Fastly Anycast fallback IPs for raw.githubusercontent.com
-            String[] fallbacks = new String[]{
-                    "185.199.108.133",
-                    "185.199.109.133",
-                    "185.199.110.133",
-                    "185.199.111.133"
-            };
-            for (int i = 0; i < fallbacks.length; i++) {
-                if (!ips.contains(fallbacks[i])) {
-                    ips.add(fallbacks[i]);
+            if (GITHUB_RAW_HOST.equalsIgnoreCase(host)) {
+                // Fastly Anycast fallback IPs for raw.githubusercontent.com
+                String[] fallbacks = new String[]{
+                        "185.199.108.133",
+                        "185.199.109.133",
+                        "185.199.110.133",
+                        "185.199.111.133"
+                };
+                for (int i = 0; i < fallbacks.length; i++) {
+                    if (!ips.contains(fallbacks[i])) {
+                        ips.add(fallbacks[i]);
+                    }
                 }
             }
             return ips;
@@ -7018,6 +7173,8 @@ public class TurzxMonitorMain {
         sb.append(",\"playing\":").append(ev.mediaPlaying);
         sb.append(",\"posSec\":").append(ev.mediaPositionSec);
         sb.append(",\"durSec\":").append(ev.mediaDurationSec);
+        sb.append(",\"hasAlbumArt\":").append(ev.albumArtBitmap != null);
+        sb.append(",\"albumArtSource\":\"").append(escapeJson(ev.albumArtSource)).append("\"");
         sb.append("}");
         sb.append(",\"usb\":{");
         sb.append("\"connected\":").append(TurzxUsbDriver.isConnected());
@@ -7489,6 +7646,30 @@ public class TurzxMonitorMain {
     public static boolean parseMediaLogLine(String line, TelemetrySnapshot target) {
         if (line == null || target == null) return false;
         try {
+            if (line.contains("Waiting WIDGET_UPDATE Event")) {
+                TelemetryCollector.requestMediaWidgetUpdateAsync();
+                return true;
+            }
+
+            if (line.contains("getImageResponseCallback")
+                    || line.contains("onGetImageRsp")
+                    || line.contains("/mnt/bt_cover_art/")) {
+                String artPath = extractAvrcpCoverArtPathFromLog(line);
+                if (!artPath.isEmpty()) {
+                    File artFile = new File(artPath);
+                    Object bmp = decodeAlbumArtFile(artFile);
+                    if (bmp != null) {
+                        target.albumArtBitmap = bmp;
+                        target.albumArtSource = "avrcp_file";
+                        if (target == TelemetryCollector.liveSnapshot) {
+                            TelemetryCollector.lastNativeAlbumArtRxMs = System.currentTimeMillis();
+                        }
+                        AlbumArtResolver.putCachedArt(target.mediaTitle, target.mediaArtist, bmp);
+                        return true;
+                    }
+                }
+            }
+
             if (line.contains("MobisAvrcpControllerService") && line.contains("[BTAD]")) {
                 String title = "";
                 String artist = "";
@@ -7508,22 +7689,25 @@ public class TurzxMonitorMain {
                 boolean updated = false;
                 if (title != null && !title.isEmpty() && !"Not Provided".equalsIgnoreCase(title) && !"null".equalsIgnoreCase(title)) {
                     target.mediaSource = "Bluetooth Audio";
-                    target.mediaTitle = title;
                     target.mediaPlaying = true;
                     updated = true;
                 }
                 if (artist != null && !artist.isEmpty() && !"Not Provided".equalsIgnoreCase(artist) && !"null".equalsIgnoreCase(artist)) {
-                    target.mediaArtist = artist;
                     updated = true;
                 }
                 if (album != null && !album.isEmpty() && !"Not Provided".equalsIgnoreCase(album) && !"null".equalsIgnoreCase(album)) {
-                    target.mediaAlbum = album;
                     updated = true;
+                }
+                if (updated) {
+                    onMediaTrackUpdated(target, title, artist, album);
                 }
                 if (playMs >= 0L && playMs < 36000000L) {
                     target.mediaPositionSec = (int) (playMs / 1000L);
                     TelemetryCollector.lastMediaPosUpdateMs = System.currentTimeMillis();
                     updated = true;
+                }
+                if (updated && target == TelemetryCollector.liveSnapshot && target.albumArtBitmap == null) {
+                    AlbumArtResolver.requestOnlineLookupIfNeeded(target);
                 }
                 return updated;
             }
@@ -7535,13 +7719,17 @@ public class TurzxMonitorMain {
                     boolean updated = false;
                     if (title != null && !title.isEmpty() && !"Not Provided".equalsIgnoreCase(title)) {
                         target.mediaSource = "Bluetooth Audio";
-                        target.mediaTitle = title;
                         target.mediaPlaying = true;
                         updated = true;
                     }
                     if (artist != null && !artist.isEmpty() && !"Not Provided".equalsIgnoreCase(artist)) {
-                        target.mediaArtist = artist;
                         updated = true;
+                    }
+                    if (updated) {
+                        onMediaTrackUpdated(target, title, artist, null);
+                        if (target == TelemetryCollector.liveSnapshot && target.albumArtBitmap == null) {
+                            AlbumArtResolver.requestOnlineLookupIfNeeded(target);
+                        }
                     }
                     return updated;
                 }
@@ -7549,7 +7737,7 @@ public class TurzxMonitorMain {
                     String title = extractClusterKeyBetween(line, ",title:", ",tune:");
                     if (title != null && !title.isEmpty() && !"Not Provided".equalsIgnoreCase(title)) {
                         target.mediaSource = "Bluetooth Audio";
-                        target.mediaTitle = title;
+                        onMediaTrackUpdated(target, title, null, null);
                         target.mediaPlaying = true;
                         return true;
                     }
@@ -7564,13 +7752,17 @@ public class TurzxMonitorMain {
                     boolean updated = false;
                     if (title != null && !title.isEmpty() && !"Not Provided".equalsIgnoreCase(title)) {
                         target.mediaSource = "Bluetooth Audio";
-                        target.mediaTitle = title;
                         target.mediaPlaying = (playSt != 0);
                         updated = true;
                     }
                     if (artist != null && !artist.isEmpty() && !"Not Provided".equalsIgnoreCase(artist)) {
-                        target.mediaArtist = artist;
                         updated = true;
+                    }
+                    if (updated) {
+                        onMediaTrackUpdated(target, title, artist, null);
+                        if (target == TelemetryCollector.liveSnapshot && target.albumArtBitmap == null) {
+                            AlbumArtResolver.requestOnlineLookupIfNeeded(target);
+                        }
                     }
                     return updated;
                 }
@@ -7578,7 +7770,7 @@ public class TurzxMonitorMain {
                     String title = extractClusterKeyTail(line, "onBtAudioStatusUpdate BND:");
                     if (title != null && !title.isEmpty() && !"Not Provided".equalsIgnoreCase(title)) {
                         target.mediaSource = "Bluetooth Audio";
-                        target.mediaTitle = title;
+                        onMediaTrackUpdated(target, title, null, null);
                         target.mediaPlaying = true;
                         return true;
                     }
@@ -7586,7 +7778,10 @@ public class TurzxMonitorMain {
                 if (line.contains("onBtAudioStatusUpdate FRQ:")) {
                     String artist = extractClusterKeyTail(line, "onBtAudioStatusUpdate FRQ:");
                     if (artist != null && !artist.isEmpty() && !"Not Provided".equalsIgnoreCase(artist)) {
-                        target.mediaArtist = artist;
+                        onMediaTrackUpdated(target, null, artist, null);
+                        if (target == TelemetryCollector.liveSnapshot && target.albumArtBitmap == null) {
+                            AlbumArtResolver.requestOnlineLookupIfNeeded(target);
+                        }
                         return true;
                     }
                 }
@@ -7647,29 +7842,26 @@ public class TurzxMonitorMain {
             if (line.contains("updateFileNameWithArtist::")) {
                 String title = stripClusterTrailingFields(extractClusterKeyBetween(line, "filename is", ", length is"));
                 String artist = stripClusterTrailingFields(extractClusterKeyBetween(line, "artistName is", ", length is"));
+                onMediaTrackUpdated(target, title, artist, null);
                 if (title != null && !title.isEmpty()) {
-                    target.mediaTitle = title;
                     target.mediaPlaying = true;
                 }
-                if (artist != null && !artist.isEmpty()) {
-                    target.mediaArtist = artist;
+                if (target == TelemetryCollector.liveSnapshot && target.albumArtBitmap == null) {
+                    AlbumArtResolver.requestOnlineLookupIfNeeded(target);
                 }
                 return TelemetryCollector.lastClusterMediaMode;
             } else if (line.contains("updateFileNameWithFolder::")) {
                 String title = stripClusterTrailingFields(extractClusterKeyBetween(line, "filename is", ", length is"));
                 String folder = stripClusterTrailingFields(extractClusterKeyBetween(line, "folder is", ", length is"));
+                onMediaTrackUpdated(target, title, folder, null);
                 if (title != null && !title.isEmpty()) {
-                    target.mediaTitle = title;
                     target.mediaPlaying = true;
-                }
-                if (folder != null && !folder.isEmpty()) {
-                    target.mediaArtist = folder;
                 }
                 return TelemetryCollector.lastClusterMediaMode;
             } else if (line.contains("updateFilename::")) {
                 String title = stripClusterTrailingFields(extractClusterKeyBetween(line, "filename is", ", length is"));
+                onMediaTrackUpdated(target, title, null, null);
                 if (title != null && !title.isEmpty()) {
-                    target.mediaTitle = title;
                     target.mediaPlaying = true;
                 }
                 return TelemetryCollector.lastClusterMediaMode;
@@ -7681,19 +7873,19 @@ public class TurzxMonitorMain {
                         : extractClusterKeyBetween(line, "title =", ", artist =");
                 String artist = stripClusterTrailingFields(extractClusterKeyTail(line, "artist ="));
                 title = stripClusterTrailingFields(title);
-                if (title != null && !title.isEmpty()) {
-                    target.mediaTitle = title;
-                    target.mediaPlaying = true;
+                if (mode >= 0) {
+                    target.mediaSource = mapClusterModeToSourceName(mode);
                 }
-                if (artist != null && !artist.isEmpty()) {
-                    target.mediaArtist = artist;
+                onMediaTrackUpdated(target, title, artist, null);
+                if (title != null && !title.isEmpty()) {
+                    target.mediaPlaying = true;
                 }
                 if (sec >= 0 && sec < 36000) {
                     target.mediaPositionSec = sec;
                     TelemetryCollector.lastMediaPosUpdateMs = System.currentTimeMillis();
                 }
-                if (mode >= 0) {
-                    target.mediaSource = mapClusterModeToSourceName(mode);
+                if (target == TelemetryCollector.liveSnapshot && target.albumArtBitmap == null) {
+                    AlbumArtResolver.requestOnlineLookupIfNeeded(target);
                 }
                 return mode;
             } else if (line.contains("updateClusterWithFolderInfo")) {
@@ -7708,47 +7900,41 @@ public class TurzxMonitorMain {
                     folder = stripClusterTrailingFields(extractClusterKeyBetween(line, "folder =", ", file ="));
                     file = stripClusterTrailingFields(extractClusterKeyTail(line, "file ="));
                 }
-                if (file != null && !file.isEmpty()) {
-                    target.mediaTitle = file;
-                    target.mediaPlaying = true;
+                if (mode >= 0) {
+                    target.mediaSource = mapClusterModeToSourceName(mode);
                 }
-                if (folder != null && !folder.isEmpty()) {
-                    target.mediaArtist = folder;
+                onMediaTrackUpdated(target, file, folder, null);
+                if (file != null && !file.isEmpty()) {
+                    target.mediaPlaying = true;
                 }
                 if (sec >= 0 && sec < 36000) {
                     target.mediaPositionSec = sec;
                     TelemetryCollector.lastMediaPosUpdateMs = System.currentTimeMillis();
-                }
-                if (mode >= 0) {
-                    target.mediaSource = mapClusterModeToSourceName(mode);
                 }
                 return mode;
             } else if (line.contains("updateClusterInfo")) {
                 int mode = extractClusterKeyInt(line, "mode =", -1);
                 int sec = extractClusterKeyInt(line, "seconds =", -1);
+                if (mode >= 0) {
+                    target.mediaSource = mapClusterModeToSourceName(mode);
+                }
                 if (line.contains("info1 =")) {
                     String info1 = stripClusterTrailingFields(extractClusterKeyBetween(line, "info1 =", ", info2 ="));
                     String info2 = stripClusterTrailingFields(extractClusterKeyTail(line, "info2 ="));
+                    onMediaTrackUpdated(target, info1, info2, null);
                     if (info1 != null && !info1.isEmpty()) {
-                        target.mediaTitle = info1;
                         target.mediaPlaying = true;
-                    }
-                    if (info2 != null && !info2.isEmpty()) {
-                        target.mediaArtist = info2;
                     }
                 } else if (line.contains("title =")) {
                     String title = stripClusterTrailingFields(extractClusterKeyTail(line, "title ="));
+                    onMediaTrackUpdated(target, title, null, null);
                     if (title != null && !title.isEmpty()) {
-                        target.mediaTitle = title;
                         target.mediaPlaying = true;
                     }
                 }
                 if (sec >= 0 && sec < 36000) {
                     target.mediaPositionSec = sec;
                     TelemetryCollector.lastMediaPosUpdateMs = System.currentTimeMillis();
-                }
-                if (mode >= 0) {
-                    target.mediaSource = mapClusterModeToSourceName(mode);
                 }
                 return mode;
             } else if (line.contains("updateClusterRadioInfo")) {
@@ -7764,6 +7950,9 @@ public class TurzxMonitorMain {
                         target.mediaArtist = "라디오 방송 수신 중";
                         target.mediaAlbum = "";
                         target.mediaPlaying = true;
+                        target.albumArtBitmap = null;
+                        target.albumArtSource = "none";
+                        target.albumArtTrackKey = "";
                     }
                 } else if (line.contains("station =")) {
                     String ch = stripClusterTrailingFields(extractClusterKeyBetween(line, "channel =", ", station ="));
@@ -7773,6 +7962,9 @@ public class TurzxMonitorMain {
                     target.mediaArtist = (ch != null && !ch.isEmpty() && !"0".equals(ch)) ? (srcName + " " + ch) : "라디오 방송 수신 중";
                     target.mediaAlbum = "";
                     target.mediaPlaying = true;
+                    target.albumArtBitmap = null;
+                    target.albumArtSource = "none";
+                    target.albumArtTrackKey = "";
                 }
                 return mode;
             } else if (line.contains("setCurrentMode =")) {
@@ -7829,6 +8021,617 @@ public class TurzxMonitorMain {
             case 33: return "Apple CarPlay";
             case 35: return "Android Auto";
             default: return "AVN Media";
+        }
+    }
+
+    public static String normalizeTrackToken(String s) {
+        if (s == null) return "";
+        String t = s.trim();
+        if (t.isEmpty()
+                || "null".equalsIgnoreCase(t)
+                || "Not Provided".equalsIgnoreCase(t)
+                || "Unknown".equalsIgnoreCase(t)
+                || "미디어 재생 대기 중".equals(t)) {
+            return "";
+        }
+        return t;
+    }
+
+    public static boolean isRealArtistName(String artist) {
+        String a = normalizeTrackToken(artist);
+        if (a.isEmpty()) return false;
+        if ("AVN / 블루투스 / CarPlay".equals(a)
+                || "라디오 방송 수신 중".equals(a)
+                || "Bluetooth Audio".equalsIgnoreCase(a)
+                || "Unknown Artist".equalsIgnoreCase(a)
+                || "알 수 없는 아티스트".equals(a)) {
+            return false;
+        }
+        return true;
+    }
+
+    public static boolean isLookupEligibleTrack(String source, String title) {
+        String t = normalizeTrackToken(title);
+        if (t.length() < 2) return false;
+        if (source != null) {
+            String src = source.toUpperCase(Locale.US);
+            if (src.contains("FM") || src.contains("AM") || src.contains("RADIO")
+                    || src.contains("DAB") || src.contains("DMB") || src.contains("자연")) {
+                return false;
+            }
+        }
+        if (t.startsWith("FM ") || t.startsWith("AM ") || t.endsWith("MHz") || t.endsWith("kHz")) {
+            return false;
+        }
+        return true;
+    }
+
+    public static boolean isNativeAlbumArtSource(String src) {
+        if (src == null) return false;
+        return src.startsWith("broadcast_")
+                || "rc_display".equals(src)
+                || "avrcp_file".equals(src)
+                || src.startsWith("disk_");
+    }
+
+    public static void onMediaTrackUpdated(
+            TelemetrySnapshot target,
+            String rawTitle,
+            String rawArtist,
+            String rawAlbum
+    ) {
+        if (target == null) return;
+        String newTitle = normalizeTrackToken(rawTitle);
+        String newArtist = normalizeTrackToken(rawArtist);
+        String newAlbum = normalizeTrackToken(rawAlbum);
+
+        String prevTitle = normalizeTrackToken(target.mediaTitle);
+        boolean titleChanged = !newTitle.isEmpty() && !newTitle.equalsIgnoreCase(prevTitle);
+
+        if (!newTitle.isEmpty()) {
+            target.mediaTitle = newTitle;
+        }
+        if (!newArtist.isEmpty() && (titleChanged || isRealArtistName(newArtist) || !isRealArtistName(target.mediaArtist))) {
+            target.mediaArtist = newArtist;
+        } else if (titleChanged && newArtist.isEmpty() && !prevTitle.isEmpty()) {
+            target.mediaArtist = "";
+        }
+        if (!newAlbum.isEmpty()) {
+            target.mediaAlbum = newAlbum;
+        } else if (titleChanged && !prevTitle.isEmpty()) {
+            target.mediaAlbum = "";
+        }
+
+        String trackKey = AlbumArtResolver.buildTrackCacheKey(target.mediaTitle, target.mediaArtist);
+        if (titleChanged && !prevTitle.isEmpty()) {
+            Object cached = AlbumArtResolver.getCachedArt(target.mediaTitle, target.mediaArtist);
+            if (cached != null) {
+                target.albumArtBitmap = cached;
+                target.albumArtSource = "cache";
+            } else if (target == TelemetryCollector.liveSnapshot
+                    && (System.currentTimeMillis() - TelemetryCollector.lastNativeAlbumArtRxMs) < 1200L
+                    && isNativeAlbumArtSource(target.albumArtSource)) {
+                // Keep native artwork that arrived immediately before the metadata broadcast for this track transition
+            } else {
+                target.albumArtBitmap = null;
+                target.albumArtSource = "none";
+                if (target == TelemetryCollector.liveSnapshot) {
+                    TelemetryCollector.latestAlbumArtBytes = null;
+                }
+            }
+            target.albumArtTrackKey = trackKey;
+            if (target == TelemetryCollector.liveSnapshot) {
+                TelemetryCollector.lastTrackChangeMs = System.currentTimeMillis();
+                TelemetryCollector.trackWidgetReqCount = 0;
+                if (target.albumArtBitmap == null) {
+                    probeOnDiskAlbumArtLocked(target);
+                    TelemetryCollector.requestMediaWidgetUpdateAsync();
+                }
+            }
+        } else {
+            target.albumArtTrackKey = trackKey;
+            if (target.albumArtBitmap == null && !trackKey.isEmpty()) {
+                Object cached = AlbumArtResolver.getCachedArt(target.mediaTitle, target.mediaArtist);
+                if (cached != null) {
+                    target.albumArtBitmap = cached;
+                    target.albumArtSource = "cache";
+                }
+            }
+        }
+    }
+
+    public static boolean isBtaudioPlaceholderBundle(
+            String action,
+            Object bundleObj,
+            Method getInt,
+            Method getObj
+    ) {
+        if (bundleObj == null) return false;
+        if (action != null && !action.toLowerCase(Locale.US).contains("btaudio")) {
+            return false;
+        }
+        try {
+            // Genuine com.daudio.av.app.btaudio.service.MusicService.b(Bitmap):
+            // When albumArt == null, BTAudio puts "albumart_type"=0 and "artwork_index"=mCount with a generic stock
+            // background drawable in "artwork_raw_image". When albumArt != null, it puts "albumart_type"=1 and no "artwork_index".
+            int artType = -1;
+            if (getInt != null) {
+                try {
+                    artType = ((Integer) getInt.invoke(bundleObj, "albumart_type", Integer.valueOf(-1))).intValue();
+                } catch (Throwable ignored) {
+                }
+            }
+            if (artType == -1 && getObj != null) {
+                Object o = getObj.invoke(bundleObj, "albumart_type");
+                if (o instanceof Number) {
+                    artType = ((Number) o).intValue();
+                }
+            }
+            if (artType == 0) {
+                return true;
+            }
+            if (artType != 1 && getObj != null) {
+                Object idxObj = getObj.invoke(bundleObj, "artwork_index");
+                if (idxObj != null) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    public static boolean hasValidImageMagic(byte[] b) {
+        if (b == null || b.length < 16) return false;
+        // JPEG: FF D8 FF
+        if ((b[0] & 0xFF) == 0xFF && (b[1] & 0xFF) == 0xD8 && (b[2] & 0xFF) == 0xFF) return true;
+        // PNG: 89 50 4E 47
+        if ((b[0] & 0xFF) == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) return true;
+        // GIF: 47 49 46
+        if (b[0] == 'G' && b[1] == 'I' && b[2] == 'F') return true;
+        // BMP: 42 4D
+        if (b[0] == 'B' && b[1] == 'M') return true;
+        // WebP: RIFF....WEBP
+        if (b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F'
+                && b[8] == 'W' && b[9] == 'E' && b[10] == 'B' && b[11] == 'P') return true;
+        return false;
+    }
+
+    public static Object decodeAlbumArtBytes(byte[] rawArt) {
+        if (rawArt == null || rawArt.length < 32) return null;
+        try {
+            Class<?> bfCls = Class.forName("android.graphics.BitmapFactory");
+            Object bmp = bfCls.getMethod("decodeByteArray", byte[].class, int.class, int.class)
+                    .invoke(null, rawArt, Integer.valueOf(0), Integer.valueOf(rawArt.length));
+            if (bmp != null) {
+                return bmp;
+            }
+        } catch (ClassNotFoundException cnfe) {
+            // Host JVM self-test environment without android.graphics.BitmapFactory:
+            // accept valid image byte arrays so unit tests can verify end-to-end cover art pipelines.
+            if (hasValidImageMagic(rawArt)) {
+                return rawArt;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    public static Object decodeAlbumArtFile(File f) {
+        try {
+            if (f == null || !f.isFile()) return null;
+            long len = f.length();
+            if (len < 32L || len > 8L * 1024L * 1024L) return null;
+            byte[] bytes = readFileBytesQuick(f);
+            Object bmp = decodeAlbumArtBytes(bytes);
+            if (bmp != null) {
+                TelemetryCollector.latestAlbumArtBytes = bytes;
+            }
+            return bmp;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    public static Object loadBitmapFromUriOrPath(String uriOrPath) {
+        if (uriOrPath == null) return null;
+        String s = uriOrPath.trim();
+        if (s.isEmpty() || "null".equalsIgnoreCase(s)) return null;
+        try {
+            if (s.startsWith("file://")) {
+                String path = s.substring("file://".length());
+                try {
+                    path = java.net.URLDecoder.decode(path, "UTF-8");
+                } catch (Throwable ignored) {
+                }
+                s = path;
+            }
+            if (!s.startsWith("content://") && !s.startsWith("http://") && !s.startsWith("https://")) {
+                File f = new File(s);
+                if (!f.isFile() && s.startsWith("/") && s.length() > 3 && s.charAt(2) == ':') {
+                    f = new File(s.substring(1));
+                }
+                if (!f.isFile()) return null;
+                Object directBmp = decodeAlbumArtFile(f);
+                if (directBmp != null) {
+                    return directBmp;
+                }
+                // If path points to an audio file (e.g. USBMusic / MyMusic .mp3/.flac/.m4a), extract ID3/FLAC embedded cover art
+                try {
+                    Class<?> mmrCls = Class.forName("android.media.MediaMetadataRetriever");
+                    Object mmr = mmrCls.newInstance();
+                    try {
+                        mmrCls.getMethod("setDataSource", String.class).invoke(mmr, f.getAbsolutePath());
+                        byte[] emb = (byte[]) mmrCls.getMethod("getEmbeddedPicture").invoke(mmr);
+                        if (emb != null && emb.length > 32) {
+                            Object embBmp = decodeAlbumArtBytes(emb);
+                            if (embBmp != null) {
+                                TelemetryCollector.latestAlbumArtBytes = emb;
+                                return embBmp;
+                            }
+                        }
+                    } finally {
+                        try { mmrCls.getMethod("release").invoke(mmr); } catch (Throwable ignored) {}
+                    }
+                } catch (Throwable ignored) {
+                }
+                return null;
+            }
+            if (s.startsWith("content://")) {
+                Object ctx = TurzxOverlayController.getSysContext();
+                if (ctx != null) {
+                    Object resolver = ctx.getClass().getMethod("getContentResolver").invoke(ctx);
+                    Class<?> uriCls = Class.forName("android.net.Uri");
+                    Object uriObj = uriCls.getMethod("parse", String.class).invoke(null, s);
+                    InputStream is = (InputStream) resolver.getClass()
+                            .getMethod("openInputStream", uriCls).invoke(resolver, uriObj);
+                    if (is != null) {
+                        try {
+                            ByteArrayOutputStream baos = new ByteArrayOutputStream(32768);
+                            byte[] buf = new byte[4096];
+                            int r;
+                            while ((r = is.read(buf)) > 0) {
+                                baos.write(buf, 0, r);
+                                if (baos.size() > 4 * 1024 * 1024) break;
+                            }
+                            byte[] raw = baos.toByteArray();
+                            Object bmp = decodeAlbumArtBytes(raw);
+                            if (bmp != null) {
+                                TelemetryCollector.latestAlbumArtBytes = raw;
+                                return bmp;
+                            }
+                        } finally {
+                            try { is.close(); } catch (Throwable ignored) {}
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    public static void probeOnDiskAlbumArtLocked(TelemetrySnapshot target) {
+        if (target == null || target.albumArtBitmap != null) return;
+        try {
+            long now = System.currentTimeMillis();
+            String src = target.mediaSource != null ? target.mediaSource : "";
+            if ("Apple CarPlay".equals(src)) {
+                File dipoArt = new File("/data/data/com.daudio.app.dipo/files/image");
+                if (dipoArt.isFile() && dipoArt.length() > 64L && (now - dipoArt.lastModified() < 1800000L)) {
+                    Object bmp = decodeAlbumArtFile(dipoArt);
+                    if (bmp != null) {
+                        target.albumArtBitmap = bmp;
+                        target.albumArtSource = "disk_carplay";
+                        AlbumArtResolver.putCachedArt(target.mediaTitle, target.mediaArtist, bmp);
+                        return;
+                    }
+                }
+            } else if ("Android Auto".equals(src)) {
+                File gpmArt = new File("/data/data/com.google.android.projection.sink/files/gpm_artwork");
+                if (gpmArt.isFile() && gpmArt.length() > 64L && (now - gpmArt.lastModified() < 1800000L)) {
+                    Object bmp = decodeAlbumArtFile(gpmArt);
+                    if (bmp != null) {
+                        target.albumArtBitmap = bmp;
+                        target.albumArtSource = "disk_androidauto";
+                        AlbumArtResolver.putCachedArt(target.mediaTitle, target.mediaArtist, bmp);
+                        return;
+                    }
+                }
+            }
+
+            if (src.isEmpty() || "Bluetooth Audio".equals(src) || "AVN Media".equals(src)) {
+                String[] btDirs = new String[]{"/mnt/bt_cover_art/0", "/mnt/bt_cover_art/1"};
+                File newest = null;
+                long newestMod = 0L;
+                for (int d = 0; d < btDirs.length; d++) {
+                    File dir = new File(btDirs[d]);
+                    if (!dir.isDirectory()) continue;
+                    File[] files = dir.listFiles();
+                    if (files == null) continue;
+                    for (int i = 0; i < files.length; i++) {
+                        File f = files[i];
+                        if (f != null && f.isFile() && f.length() > 64L) {
+                            long mod = f.lastModified();
+                            if (mod >= newestMod) {
+                                newestMod = mod;
+                                newest = f;
+                            }
+                        }
+                    }
+                }
+                if (newest != null) {
+                    long minValidMod = TelemetryCollector.lastTrackChangeMs > 0L
+                            ? (TelemetryCollector.lastTrackChangeMs - 5000L)
+                            : (now - 600000L);
+                    if (newestMod >= minValidMod) {
+                        Object bmp = decodeAlbumArtFile(newest);
+                        if (bmp != null) {
+                            target.albumArtBitmap = bmp;
+                            target.albumArtSource = "disk_bt_bip";
+                            AlbumArtResolver.putCachedArt(target.mediaTitle, target.mediaArtist, bmp);
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static String extractAvrcpCoverArtPathFromLog(String line) {
+        if (line == null) return "";
+        int idx = line.indexOf("path:");
+        if (idx >= 0) {
+            idx += "path:".length();
+        } else {
+            idx = line.indexOf("/mnt/bt_cover_art/");
+            if (idx < 0) return "";
+        }
+        int end = idx;
+        while (end < line.length()) {
+            char c = line.charAt(end);
+            if (c == ',' || c == ';' || c == ')' || c == ']' || c == '"' || Character.isWhitespace(c)) {
+                break;
+            }
+            end++;
+        }
+        return line.substring(idx, end).trim();
+    }
+
+    public static String extractItunesArtworkUrl(String json) {
+        if (json == null || json.isEmpty()) return "";
+        String[] keys = new String[]{"\"artworkUrl100\"", "\"artworkUrl60\""};
+        for (int k = 0; k < keys.length; k++) {
+            int idx = json.indexOf(keys[k]);
+            if (idx < 0) continue;
+            int colon = json.indexOf(':', idx + keys[k].length());
+            if (colon < 0) continue;
+            int q1 = json.indexOf('"', colon + 1);
+            if (q1 < 0) continue;
+            int q2 = json.indexOf('"', q1 + 1);
+            if (q2 < 0) continue;
+            String rawUrl = json.substring(q1 + 1, q2).replace("\\/", "/").trim();
+            if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
+                rawUrl = rawUrl.replace("100x100bb", "200x200bb").replace("60x60bb", "200x200bb");
+                return rawUrl;
+            }
+        }
+        return "";
+    }
+
+    public static final class AlbumArtResolver {
+        private static final Map<String, Object> artCache = new LinkedHashMap<String, Object>(64, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, Object> eldest) {
+                return size() > 48;
+            }
+        };
+        private static final Map<String, Long> attemptHistoryMs = new LinkedHashMap<String, Long>(128, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
+                return size() > 96;
+            }
+        };
+        private static volatile boolean workerBusy = false;
+
+        public static String buildTrackCacheKey(String title, String artist) {
+            String t = normalizeTrackToken(title).toLowerCase(Locale.US);
+            if (t.isEmpty()) return "";
+            String a = isRealArtistName(artist) ? normalizeTrackToken(artist).toLowerCase(Locale.US) : "";
+            return t + "|" + a;
+        }
+
+        public static synchronized Object getCachedArt(String title, String artist) {
+            String key = buildTrackCacheKey(title, artist);
+            if (key.isEmpty()) return null;
+            Object v = artCache.get(key);
+            if (v != null) return v;
+            String titleOnlyKey = normalizeTrackToken(title).toLowerCase(Locale.US) + "|";
+            return artCache.get(titleOnlyKey);
+        }
+
+        public static synchronized void putCachedArt(String title, String artist, Object bmp) {
+            if (bmp == null) return;
+            String key = buildTrackCacheKey(title, artist);
+            if (key.isEmpty()) return;
+            artCache.put(key, bmp);
+            String titleOnlyKey = normalizeTrackToken(title).toLowerCase(Locale.US) + "|";
+            if (!artCache.containsKey(titleOnlyKey)) {
+                artCache.put(titleOnlyKey, bmp);
+            }
+        }
+
+        public static void requestOnlineLookupIfNeeded(TelemetrySnapshot s) {
+            if (s == null || s.albumArtBitmap != null) return;
+            final String title = normalizeTrackToken(s.mediaTitle);
+            final String artist = isRealArtistName(s.mediaArtist) ? normalizeTrackToken(s.mediaArtist) : "";
+            if (!isLookupEligibleTrack(s.mediaSource, title)) return;
+
+            final String key = buildTrackCacheKey(title, artist);
+            if (key.isEmpty()) return;
+
+            Object cached = getCachedArt(title, artist);
+            if (cached != null) {
+                s.albumArtBitmap = cached;
+                s.albumArtSource = "cache";
+                s.albumArtTrackKey = key;
+                return;
+            }
+
+            long now = System.currentTimeMillis();
+            synchronized (AlbumArtResolver.class) {
+                if (workerBusy) return;
+                Long lastAttempt = attemptHistoryMs.get(key);
+                if (lastAttempt != null && (now - lastAttempt.longValue()) < 45000L) {
+                    return;
+                }
+                attemptHistoryMs.put(key, Long.valueOf(now));
+                workerBusy = true;
+            }
+
+            Thread t = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        // Give native broadcast / on-disk cover art a brief head start right after a track change
+                        long sinceChange = System.currentTimeMillis() - TelemetryCollector.lastTrackChangeMs;
+                        if (sinceChange >= 0L && sinceChange < 650L) {
+                            try { Thread.sleep(650L - sinceChange); } catch (InterruptedException ignored) {}
+                        }
+                        synchronized (TelemetryCollector.liveSnapshot) {
+                            if (TelemetryCollector.liveSnapshot.albumArtBitmap != null
+                                    && key.equals(TelemetryCollector.liveSnapshot.albumArtTrackKey)) {
+                                return;
+                            }
+                        }
+
+                        String query = artist.isEmpty() ? title : (title + " " + artist);
+                        String encoded = java.net.URLEncoder.encode(query, "UTF-8");
+                        String searchPath = "/search?term=" + encoded + "&media=music&entity=song&limit=3";
+                        byte[] jsonBytes = downloadHttpsUrlBytes("itunes.apple.com", searchPath, 65536);
+                        String artUrl = "";
+                        if (jsonBytes != null && jsonBytes.length > 20) {
+                            artUrl = extractItunesArtworkUrl(new String(jsonBytes, UTF8));
+                        }
+                        if (artUrl.isEmpty() && !artist.isEmpty()) {
+                            String fallbackEnc = java.net.URLEncoder.encode(title, "UTF-8");
+                            byte[] fbBytes = downloadHttpsUrlBytes(
+                                    "itunes.apple.com",
+                                    "/search?term=" + fallbackEnc + "&media=music&entity=song&limit=3",
+                                    65536
+                            );
+                            if (fbBytes != null && fbBytes.length > 20) {
+                                artUrl = extractItunesArtworkUrl(new String(fbBytes, UTF8));
+                            }
+                        }
+                        if (artUrl.isEmpty()) return;
+
+                        java.net.URL u = new java.net.URL(artUrl);
+                        String host = u.getHost();
+                        String pathAndQuery = u.getFile();
+                        if (pathAndQuery == null || pathAndQuery.isEmpty()) pathAndQuery = "/";
+                        byte[] imgBytes = downloadHttpsUrlBytes(host, pathAndQuery, 524288);
+                        if (imgBytes == null || imgBytes.length < 128) return;
+
+                        Object bmp = decodeAlbumArtBytes(imgBytes);
+                        if (bmp == null) return;
+
+                        putCachedArt(title, artist, bmp);
+                        synchronized (TelemetryCollector.liveSnapshot) {
+                            String curKey = buildTrackCacheKey(
+                                    TelemetryCollector.liveSnapshot.mediaTitle,
+                                    TelemetryCollector.liveSnapshot.mediaArtist
+                            );
+                            String curTitleOnly = normalizeTrackToken(TelemetryCollector.liveSnapshot.mediaTitle).toLowerCase(Locale.US);
+                            if (TelemetryCollector.liveSnapshot.albumArtBitmap == null
+                                    && (key.equals(curKey) || title.toLowerCase(Locale.US).equals(curTitleOnly))) {
+                                TelemetryCollector.liveSnapshot.albumArtBitmap = bmp;
+                                TelemetryCollector.liveSnapshot.albumArtSource = "itunes_api";
+                                TelemetryCollector.liveSnapshot.albumArtTrackKey = curKey;
+                                TelemetryCollector.latestAlbumArtBytes = imgBytes;
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    } finally {
+                        synchronized (AlbumArtResolver.class) {
+                            workerBusy = false;
+                        }
+                    }
+                }
+            }, "Turzx-AlbumArtResolver");
+            t.setDaemon(true);
+            t.start();
+        }
+
+        private static byte[] downloadHttpsUrlBytes(String host, String pathAndQuery, int maxBytes) {
+            List<String> ips = OtaUpdateManager.resolveHostViaPublicDns(host);
+            for (int i = 0; i < ips.size(); i++) {
+                String ip = ips.get(i);
+                SSLSocket sslSock = null;
+                Socket rawSock = null;
+                try {
+                    TrustManager[] trustAll = new TrustManager[]{
+                            new X509TrustManager() {
+                                @Override public void checkClientTrusted(X509Certificate[] c, String a) {}
+                                @Override public void checkServerTrusted(X509Certificate[] c, String a) {}
+                                @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+                            }
+                    };
+                    SSLContext sc = SSLContext.getInstance("TLSv1.2");
+                    sc.init(null, trustAll, new SecureRandom());
+
+                    rawSock = new Socket();
+                    rawSock.connect(new InetSocketAddress(ip, 443), 2500);
+                    rawSock.setSoTimeout(4500);
+
+                    sslSock = (SSLSocket) sc.getSocketFactory().createSocket(rawSock, host, 443, true);
+                    sslSock.setEnabledProtocols(new String[]{"TLSv1.2"});
+                    try {
+                        sslSock.getClass().getMethod("setHostname", String.class).invoke(sslSock, host);
+                    } catch (Throwable ignored) {
+                    }
+                    sslSock.startHandshake();
+
+                    OutputStream os = sslSock.getOutputStream();
+                    String req = "GET " + pathAndQuery + " HTTP/1.1\r\n"
+                            + "Host: " + host + "\r\n"
+                            + "User-Agent: HKG-TurzxMonitor/" + MONITOR_VERSION + "\r\n"
+                            + "Accept: */*\r\n"
+                            + "Connection: close\r\n\r\n";
+                    os.write(req.getBytes(UTF8));
+                    os.flush();
+
+                    InputStream is = sslSock.getInputStream();
+                    ByteArrayOutputStream rawResp = new ByteArrayOutputStream(8192);
+                    byte[] buf = new byte[4096];
+                    int r;
+                    while ((r = is.read(buf)) > 0) {
+                        rawResp.write(buf, 0, r);
+                        if (rawResp.size() > maxBytes + 8192) break;
+                    }
+                    byte[] all = rawResp.toByteArray();
+                    int hdrEnd = -1;
+                    for (int k = 0; k + 3 < all.length; k++) {
+                        if (all[k] == '\r' && all[k + 1] == '\n' && all[k + 2] == '\r' && all[k + 3] == '\n') {
+                            hdrEnd = k + 4;
+                            break;
+                        }
+                    }
+                    if (hdrEnd <= 0) continue;
+                    String hdrStr = new String(all, 0, hdrEnd, UTF8);
+                    if (!hdrStr.startsWith("HTTP/1.1 200") && !hdrStr.startsWith("HTTP/1.0 200")) {
+                        continue;
+                    }
+                    byte[] body = new byte[all.length - hdrEnd];
+                    System.arraycopy(all, hdrEnd, body, 0, body.length);
+                    return body;
+                } catch (Throwable ignored) {
+                } finally {
+                    if (sslSock != null) { try { sslSock.close(); } catch (Throwable ignored) {} }
+                    else if (rawSock != null) { try { rawSock.close(); } catch (Throwable ignored) {} }
+                }
+            }
+            return null;
         }
     }
 
@@ -8664,7 +9467,71 @@ public class TurzxMonitorMain {
             assertTrue(Math.abs(snap.getEffectiveDriveMotorKw()) < 0.001,
                     "Expected 0.0 kW drive motor power when stopped in D with MOTER_PWR_AVN=0, got " + snap.getEffectiveDriveMotorKw());
 
-            // 8. Verify Chromium 1:1 pre-rendered HUD PNG layers + Public Sans TTF fonts are bundled and readable
+            // 8. Verify 5-Layer Album Cover Art acquisition (BTAudio placeholder filter, broadcast_bytes, broadcast_uri, AVRCP BIP file log, track-change cache, iTunes JSON parser)
+            TelemetrySnapshot artSnap = new TelemetrySnapshot();
+            artSnap.mediaSource = "Bluetooth Audio";
+            artSnap.mediaTitle = "Whiplash";
+            artSnap.mediaArtist = "aespa";
+
+            // 8A. BTAudio placeholder broadcast (albumart_type=0, artwork_index=0) must be ignored
+            android.content.Intent btPlaceholderArt = new android.content.Intent("com.hkmc.audio.btaudio.widgetupdate");
+            btPlaceholderArt.putExtra("albumart_type", 0);
+            btPlaceholderArt.putExtra("artwork_index", 0);
+            btPlaceholderArt.putExtra("artwork_raw_image", clearPng);
+            TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(btPlaceholderArt.getAction(), btPlaceholderArt.getExtras(), artSnap);
+            assertTrue(artSnap.albumArtBitmap == null && "none".equals(artSnap.albumArtSource),
+                    "Expected BTAudio stock placeholder (albumart_type=0, artwork_index=0) to be filtered out");
+
+            // 8B. Real BTAudio album art broadcast (albumart_type=1, no artwork_index) must set albumArtBitmap
+            android.content.Intent btRealArt = new android.content.Intent("com.hkmc.audio.btaudio.widgetupdate");
+            btRealArt.putExtra("albumart_type", 1);
+            btRealArt.putExtra("artwork_raw_image", clearPng);
+            TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(btRealArt.getAction(), btRealArt.getExtras(), artSnap);
+            assertTrue(artSnap.albumArtBitmap != null && "broadcast_bytes".equals(artSnap.albumArtSource),
+                    "Expected real BTAudio album art (albumart_type=1) to populate albumArtBitmap");
+
+            // 8C. Switching to a new uncached track clears the old track's album art; switching back restores from LRU cache
+            onMediaTrackUpdated(artSnap, "Uncached New Song", "New Artist", "New Album");
+            assertTrue(artSnap.albumArtBitmap == null && "none".equals(artSnap.albumArtSource),
+                    "Expected track change to uncached song to clear previous track's albumArtBitmap");
+            onMediaTrackUpdated(artSnap, "Whiplash", "aespa", "Whiplash - The 5th Mini Album");
+            assertTrue(artSnap.albumArtBitmap != null && "cache".equals(artSnap.albumArtSource),
+                    "Expected switching back to Whiplash to restore albumArtBitmap from AlbumArtResolver LRU cache");
+
+            // 8D. USBMusic / CarPlay / Android Auto artwork_uri & AvrcpControllerService /mnt/bt_cover_art logcat path
+            File tmpArtFile = File.createTempFile("turzx_art_test", ".png");
+            tmpArtFile.deleteOnExit();
+            writeBytesAtomic(tmpArtFile, clearPng);
+
+            TelemetrySnapshot uriSnap = new TelemetrySnapshot();
+            android.content.Intent usbArtIntent = new android.content.Intent("com.hkmc.audio.usb.widgetupdate");
+            usbArtIntent.putExtra("filename", "내 이름 맑음");
+            usbArtIntent.putExtra("artist_name", "QWER");
+            usbArtIntent.putExtra("artwork_uri", "file://" + tmpArtFile.getAbsolutePath());
+            TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(usbArtIntent.getAction(), usbArtIntent.getExtras(), uriSnap);
+            assertTrue(uriSnap.albumArtBitmap != null && "broadcast_uri".equals(uriSnap.albumArtSource),
+                    "Expected artwork_uri file:// to load albumArtBitmap");
+
+            TelemetrySnapshot avrcpLogSnap = new TelemetrySnapshot();
+            avrcpLogSnap.mediaSource = "Bluetooth Audio";
+            avrcpLogSnap.mediaTitle = "HAPPY";
+            avrcpLogSnap.mediaArtist = "DAY6";
+            String avrcpImgLog = "D/AvrcpControllerService( 1310): [BTAD] getImageResponseCallback device:AA:BB:CC ,handle:1000001 ,path:"
+                    + tmpArtFile.getAbsolutePath() + " ,status:4";
+            assertTrue(parseMediaLogLine(avrcpImgLog, avrcpLogSnap)
+                    && avrcpLogSnap.albumArtBitmap != null
+                    && "avrcp_file".equals(avrcpLogSnap.albumArtSource),
+                    "Expected AvrcpControllerService getImageResponseCallback log to load albumArtBitmap from path");
+            tmpArtFile.delete();
+
+            // 8E. Verify iTunes Search API JSON artworkUrl100 parser & 200x200bb upgrade
+            String sampleItunesJson = "{\"resultCount\":1,\"results\":[{\"trackName\":\"내 이름 맑음\",\"artistName\":\"QWER\","
+                    + "\"artworkUrl100\":\"https:\\/\\/is1-ssl.mzstatic.com\\/image\\/thumb\\/Music211\\/v4\\/ab\\/cd\\/100x100bb.jpg\"}]}";
+            String parsedItunesUrl = extractItunesArtworkUrl(sampleItunesJson);
+            assertTrue("https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/ab/cd/200x200bb.jpg".equals(parsedItunesUrl),
+                    "Expected extractItunesArtworkUrl to unescape slashes and upgrade to 200x200bb.jpg, got " + parsedItunesUrl);
+
+            // 9. Verify Chromium 1:1 pre-rendered HUD PNG layers + Public Sans TTF fonts are bundled and readable
             String[] requiredAssets = new String[]{
                     "base_shell.png",
                     "active_shell.png",

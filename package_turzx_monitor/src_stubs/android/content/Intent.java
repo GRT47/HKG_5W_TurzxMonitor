@@ -43,4 +43,9 @@ public class Intent {
         mExtras.putBoolean(name, value);
         return this;
     }
+
+    public Intent putExtra(String name, byte[] value) {
+        mExtras.putByteArray(name, value);
+        return this;
+    }
 }
