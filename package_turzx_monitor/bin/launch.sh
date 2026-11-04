@@ -16,19 +16,39 @@ SVC_PID_FILE="/data/local/tmp/hkg_turzxmonitor_svc.pid"
 JAVA_PID_FILE="/data/local/tmp/hkg_turzxmonitor_java.pid"
 CMD_FILE="/data/local/tmp/hkg_turzxmonitor_cmd"
 
+is_svc_pid_alive() {
+    _pid="$1"
+    [ -n "$_pid" ] || return 1
+    kill -0 "$_pid" 2>/dev/null || return 1
+    [ -r "/proc/$_pid/cmdline" ] || return 1
+    (/system/bin/busybox tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null) | grep -q "turzx-daemon"
+}
+
+is_java_pid_alive() {
+    _pid="$1"
+    [ -n "$_pid" ] || return 1
+    kill -0 "$_pid" 2>/dev/null || return 1
+    [ -r "/proc/$_pid/cmdline" ] || return 1
+    (/system/bin/busybox tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null) | grep -q "com.hkg.turzxmonitor.TurzxMonitorMain"
+}
+
 svc_alive=0
 if [ -f "$SVC_PID_FILE" ]; then
     svc_pid="$(cat "$SVC_PID_FILE" 2>/dev/null)"
-    if [ -n "$svc_pid" ] && kill -0 "$svc_pid" 2>/dev/null; then
+    if is_svc_pid_alive "$svc_pid"; then
         svc_alive=1
+    else
+        rm -f "$SVC_PID_FILE" 2>/dev/null
     fi
 fi
 
 java_alive=0
 if [ -f "$JAVA_PID_FILE" ]; then
     java_pid="$(cat "$JAVA_PID_FILE" 2>/dev/null)"
-    if [ -n "$java_pid" ] && kill -0 "$java_pid" 2>/dev/null; then
+    if is_java_pid_alive "$java_pid"; then
         java_alive=1
+    else
+        rm -f "$JAVA_PID_FILE" 2>/dev/null
     fi
 fi
 

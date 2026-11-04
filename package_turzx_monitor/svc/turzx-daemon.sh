@@ -16,6 +16,7 @@ SVC_PID_FILE="/data/local/tmp/hkg_turzxmonitor_svc.pid"
 NEMESIS_PID_FILE="/data/nemesis/pids/hkg.turzxmonitor+turzx-daemon"
 NEMESIS_FAILS_FILE="/data/nemesis/pids/hkg.turzxmonitor+turzx-daemon.fails"
 JAVA_PID_FILE="/data/local/tmp/hkg_turzxmonitor_java.pid"
+BOOT_ID_FILE="/data/local/tmp/hkg_turzxmonitor_boot.id"
 OTA_RELOAD_FILE="/data/local/tmp/hkg_turzxmonitor_ota_reload"
 LOG_FILE="/data/local/tmp/hkg_turzxmonitor.log"
 DEBUG_FILE="/data/local/tmp/hkg_turzxmonitor_debug.txt"
@@ -23,8 +24,35 @@ MONITOR_PID=""
 SYNC_TICK=0
 CRASH_STREAK=0
 
+is_svc_pid_alive() {
+    _pid="$1"
+    [ -n "$_pid" ] || return 1
+    kill -0 "$_pid" 2>/dev/null || return 1
+    [ -r "/proc/$_pid/cmdline" ] || return 1
+    (/system/bin/busybox tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null) | grep -q "turzx-daemon"
+}
+
+is_java_pid_alive() {
+    _pid="$1"
+    [ -n "$_pid" ] || return 1
+    kill -0 "$_pid" 2>/dev/null || return 1
+    [ -r "/proc/$_pid/cmdline" ] || return 1
+    (/system/bin/busybox tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null) | grep -q "com.hkg.turzxmonitor.TurzxMonitorMain"
+}
+
 mkdir -p /data/nemesis/pids 2>/dev/null
 rm -f "$NEMESIS_FAILS_FILE" "$INSTALL_DIR/bin/"*.tmp "$INSTALL_DIR/svc/"*.tmp "$INSTALL_DIR/config/"*.tmp 2>/dev/null
+
+# Clear stale persistent PID files across cold boots using kernel boot_id
+if [ -r "/proc/sys/kernel/random/boot_id" ]; then
+    cur_boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+    old_boot_id="$(cat "$BOOT_ID_FILE" 2>/dev/null)"
+    if [ -n "$cur_boot_id" ] && [ "$cur_boot_id" != "$old_boot_id" ]; then
+        rm -f "$SVC_PID_FILE" "$JAVA_PID_FILE" 2>/dev/null
+        echo "$cur_boot_id" > "$BOOT_ID_FILE" 2>/dev/null
+    fi
+fi
+
 if [ -f "/data/nemesis/services.db" ] && grep -q "hkg.turzxmonitor.*|background" /data/nemesis/services.db 2>/dev/null; then
     sed 's/\(hkg\.turzxmonitor[^|]*|[^|]*|[^|]*|[^|]*|\)background/\1restart/g' /data/nemesis/services.db > /data/nemesis/services.db.tmp 2>/dev/null
     if [ -s "/data/nemesis/services.db.tmp" ]; then
@@ -38,10 +66,11 @@ fi
 
 if [ -f "$SVC_PID_FILE" ]; then
     old_svc_pid="$(cat "$SVC_PID_FILE" 2>/dev/null)"
-    if [ -n "$old_svc_pid" ] && [ "$old_svc_pid" != "$$" ] && kill -0 "$old_svc_pid" 2>/dev/null; then
+    if [ -n "$old_svc_pid" ] && [ "$old_svc_pid" != "$$" ] && is_svc_pid_alive "$old_svc_pid"; then
         echo "$old_svc_pid" > "$NEMESIS_PID_FILE" 2>/dev/null
         exit 0
     fi
+    rm -f "$SVC_PID_FILE" 2>/dev/null
 fi
 echo "$$" > "$SVC_PID_FILE" 2>/dev/null
 echo "$$" > "$NEMESIS_PID_FILE" 2>/dev/null
@@ -49,6 +78,57 @@ echo "$$" > "$NEMESIS_PID_FILE" 2>/dev/null
 log_info() {
     echo "[TurzxMonitor] $*"
     log -t HKGTurzxMonitor "$*" 2>/dev/null
+}
+
+is_turzx_usb_present() {
+    for udev in /sys/bus/usb/devices/*; do
+        if [ -f "$udev/idVendor" ] && [ -f "$udev/idProduct" ]; then
+            vid="$(cat "$udev/idVendor" 2>/dev/null)"
+            pid="$(cat "$udev/idProduct" 2>/dev/null)"
+            if [ "$vid" = "1cbe" ] && { [ "$pid" = "0092" ] || [ "$pid" = "0088" ]; }; then
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+is_other_usb_device_present() {
+    for usb_mnt in /storage/usb0 /mnt/media_rw/usb0 /storage/usb1 /mnt/usb0; do
+        if [ -d "$usb_mnt" ] && grep -q " $usb_mnt " /proc/mounts 2>/dev/null; then
+            return 0
+        fi
+    done
+    for udev in /sys/bus/usb/devices/*; do
+        if [ -f "$udev/idVendor" ]; then
+            vid="$(cat "$udev/idVendor" 2>/dev/null)"
+            if [ -n "$vid" ] && [ "$vid" != "1d6b" ] && [ "$vid" != "1cbe" ]; then
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+nudge_usb_host_for_turzx() {
+    if is_turzx_usb_present || is_other_usb_device_present; then
+        return 0
+    fi
+    log_info "TURZX 1cbe:0092 not yet enumerated after cold boot; cycling DWC_OTG host VBUS"
+    echo 1 > /sys/module/tcc_dwc_otg/parameters/vbus_control_enable 2>/dev/null
+    echo off > /sys/devices/dwc_otg/vbus 2>/dev/null
+    echo off > /sys/devices/ehci_tcc.0/vbus 2>/dev/null
+    echo off > /sys/devices/ohci_tcc.0/vbus 2>/dev/null
+    sleep 1 &
+    wait $!
+    echo host > /sys/devices/dwc_otg/drdmode 2>/dev/null
+    echo on > /sys/devices/dwc_otg/phystatus 2>/dev/null
+    echo on > /sys/devices/dwc_otg/vbus 2>/dev/null
+    echo on > /sys/devices/ehci_tcc.0/vbus 2>/dev/null
+    echo on > /sys/devices/ohci_tcc.0/vbus 2>/dev/null
+    sleep 1 &
+    wait $!
+    chmod 666 /dev/bus/usb/*/* 2>/dev/null
 }
 
 kill_monitor_java() {
@@ -62,15 +142,16 @@ kill_monitor_java() {
 
 start_monitor_java() {
     chmod 666 /dev/bus/usb/*/* 2>/dev/null
-    if [ -n "$MONITOR_PID" ] && kill -0 "$MONITOR_PID" 2>/dev/null; then
+    if [ -n "$MONITOR_PID" ] && is_java_pid_alive "$MONITOR_PID"; then
         return 0
     fi
     if [ -f "$JAVA_PID_FILE" ]; then
         saved_jpid="$(cat "$JAVA_PID_FILE" 2>/dev/null)"
-        if [ -n "$saved_jpid" ] && kill -0 "$saved_jpid" 2>/dev/null; then
+        if [ -n "$saved_jpid" ] && is_java_pid_alive "$saved_jpid"; then
             MONITOR_PID="$saved_jpid"
             return 0
         fi
+        rm -f "$JAVA_PID_FILE" 2>/dev/null
     fi
     kill_monitor_java
     JAR_FILE="$INSTALL_DIR/bin/turzxmonitor.jar"
@@ -149,9 +230,17 @@ while [ "$(getprop sys.boot_completed)" != "1" ]; do
     wait $!
 done
 
+vbus_wait=0
+while [ "$(getprop sys.boot.vbus)" = "0" ] && [ "$vbus_wait" -lt 4 ]; do
+    vbus_wait=$((vbus_wait + 1))
+    sleep 1 &
+    wait $!
+done
+
 sleep 1 &
 wait $!
 
+nudge_usb_host_for_turzx
 start_monitor_java
 sync_logs_to_usb
 
@@ -167,7 +256,7 @@ while true; do
         rm -f "$SVC_PID_FILE" "$JAVA_PID_FILE" 2>/dev/null
         exec /system/bin/sh "$INSTALL_DIR/svc/turzx-daemon.sh"
     fi
-    if [ -z "$MONITOR_PID" ] || ! kill -0 "$MONITOR_PID" 2>/dev/null; then
+    if [ -z "$MONITOR_PID" ] || ! is_java_pid_alive "$MONITOR_PID"; then
         CRASH_STREAK=$((CRASH_STREAK + 1))
         if [ "$CRASH_STREAK" -ge 1 ]; then
             rm -f /data/dalvik-cache/*turzxmonitor.jar* /data/local/tmp/dalvik-cache/*turzxmonitor.jar* 2>/dev/null

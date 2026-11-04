@@ -72,7 +72,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.3.6";
+    public static final String MONITOR_VERSION = "1.3.7";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -376,9 +376,12 @@ public class TurzxMonitorMain {
                     cmdFile.delete();
                     DebugManager.logEvent("CMD", "Received command: " + cmd);
                     if ("toggle".equals(cmd)) {
+                        TurzxUsbDriver.requestImmediateReconnectIfDisconnected();
                         TurzxOverlayController.toggle();
                     } else if ("hide".equals(cmd) || "off".equals(cmd)) {
                         TurzxOverlayController.setEnabledAndShow(false);
+                    } else if ("usb-reset".equals(cmd)) {
+                        TurzxUsbDriver.requestImmediateReconnectIfDisconnected();
                     } else if ("update".equals(cmd) || "ota".equals(cmd)) {
                         OtaUpdateManager.triggerManualOta(installDir, false);
                     } else if ("force-update".equals(cmd) || "force-ota".equals(cmd)) {
@@ -386,6 +389,7 @@ public class TurzxMonitorMain {
                     } else if ("dump".equals(cmd) || "debug".equals(cmd) || "log".equals(cmd)) {
                         DebugManager.triggerAsyncDump(installDir);
                     } else {
+                        TurzxUsbDriver.requestImmediateReconnectIfDisconnected();
                         TurzxOverlayController.setEnabledAndShow(true);
                     }
                 }
@@ -571,6 +575,13 @@ public class TurzxMonitorMain {
         private static volatile int lastAppliedBrightness = -1;
         private static volatile byte[] latestLandscapeJpeg = null;
 
+        private static final long driverStartMs = System.currentTimeMillis();
+        private static volatile long lastUsbHostNudgeMs = 0L;
+        private static volatile int usbHostNudgeCount = 0;
+        private static volatile String lastObservedDevPath = "";
+        private static volatile long lastObservedDevPathFirstSeenMs = 0L;
+        private static volatile int consecutiveOpenFailures = 0;
+
         private static RandomAccessFile usbRaf = null;
         private static Object usbPfd = null;
         private static Object usbDevConn = null;
@@ -597,6 +608,139 @@ public class TurzxMonitorMain {
 
         public static byte[] getLatestLandscapeJpeg() {
             return latestLandscapeJpeg;
+        }
+
+        public static void requestImmediateReconnectIfDisconnected() {
+            if (!connected) {
+                lastUsbHostNudgeMs = 0L;
+                consecutiveOpenFailures = 0;
+            }
+        }
+
+        private static void writeSysfsQuick(String path, String value) {
+            FileOutputStream fos = null;
+            try {
+                File f = new File(path);
+                if (!f.exists()) return;
+                fos = new FileOutputStream(f);
+                fos.write(value.getBytes(UTF8));
+                fos.flush();
+            } catch (Throwable ignored) {
+            } finally {
+                if (fos != null) {
+                    try {
+                        fos.close();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }
+
+        private static boolean isOtherUsbDeviceOrStoragePresent() {
+            try {
+                String mounts = readAllTextQuick(new File("/proc/mounts"));
+                if (mounts.contains(" /storage/usb0 ")
+                        || mounts.contains(" /mnt/media_rw/usb0 ")
+                        || mounts.contains(" /storage/usb1 ")
+                        || mounts.contains(" /mnt/usb0 ")) {
+                    return true;
+                }
+            } catch (Throwable ignored) {
+            }
+            File sysUsb = new File("/sys/bus/usb/devices");
+            File[] dirs = sysUsb.listFiles();
+            if (dirs != null) {
+                for (int i = 0; i < dirs.length; i++) {
+                    File fVid = new File(dirs[i], "idVendor");
+                    if (!fVid.isFile()) continue;
+                    String vid = readFirstLineQuick(fVid).toLowerCase(Locale.US);
+                    if (!vid.isEmpty() && !"1d6b".equals(vid) && !"1cbe".equals(vid)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        private static void cycleUsbHostVbus(String reason) {
+            if (isOtherUsbDeviceOrStoragePresent()) {
+                return;
+            }
+            DebugManager.logEvent("USB", "Cycling Telechips DWC_OTG host VBUS (" + reason + ")");
+            statusText = "TURZX USB 포트 재인식 중...";
+            writeSysfsQuick("/sys/module/tcc_dwc_otg/parameters/vbus_control_enable", "1");
+            writeSysfsQuick("/sys/devices/dwc_otg/vbus", "off");
+            writeSysfsQuick("/sys/devices/ehci_tcc.0/vbus", "off");
+            writeSysfsQuick("/sys/devices/ohci_tcc.0/vbus", "off");
+            try {
+                Thread.sleep(850L);
+            } catch (InterruptedException ignored) {
+            }
+            writeSysfsQuick("/sys/devices/dwc_otg/drdmode", "host");
+            writeSysfsQuick("/sys/devices/dwc_otg/phystatus", "on");
+            writeSysfsQuick("/sys/devices/dwc_otg/vbus", "on");
+            writeSysfsQuick("/sys/devices/ehci_tcc.0/vbus", "on");
+            writeSysfsQuick("/sys/devices/ohci_tcc.0/vbus", "on");
+            try {
+                Thread.sleep(1150L);
+            } catch (InterruptedException ignored) {
+            }
+            lastObservedDevPath = "";
+            lastObservedDevPathFirstSeenMs = 0L;
+        }
+
+        private static void nudgeUsbHostIfTurzxMissing() {
+            long now = System.currentTimeMillis();
+            if (now - driverStartMs < 3000L) {
+                return;
+            }
+            if (usbHostNudgeCount >= 8) {
+                return;
+            }
+            long cooldownMs = (usbHostNudgeCount == 0) ? 3500L : 22000L;
+            if (lastUsbHostNudgeMs > 0L && (now - lastUsbHostNudgeMs) < cooldownMs) {
+                return;
+            }
+            String vbusProp = getSystemProperty("sys.boot.vbus", "on");
+            if ("0".equals(vbusProp) || "off".equalsIgnoreCase(vbusProp)) {
+                return;
+            }
+            lastUsbHostNudgeMs = now;
+            usbHostNudgeCount++;
+            cycleUsbHostVbus("cold-boot/missing 1cbe:0092 nudge #" + usbHostNudgeCount);
+        }
+
+        private static void resetTurzxUsbDeviceInSysfs() {
+            File sysUsb = new File("/sys/bus/usb/devices");
+            File[] dirs = sysUsb.listFiles();
+            if (dirs == null) return;
+            for (int i = 0; i < dirs.length; i++) {
+                File d = dirs[i];
+                File fVid = new File(d, "idVendor");
+                File fPid = new File(d, "idProduct");
+                if (!fVid.isFile() || !fPid.isFile()) continue;
+                String vid = readFirstLineQuick(fVid).toLowerCase(Locale.US);
+                String pid = readFirstLineQuick(fPid).toLowerCase(Locale.US);
+                if ("1cbe".equals(vid) && ("0092".equals(pid) || "0088".equals(pid))) {
+                    File authFile = new File(d, "authorized");
+                    if (authFile.exists()) {
+                        DebugManager.logEvent("USB", "Toggling sysfs authorized (0->1) on " + d.getName());
+                        writeSysfsQuick(authFile.getAbsolutePath(), "0");
+                        try {
+                            Thread.sleep(350L);
+                        } catch (InterruptedException ignored) {
+                        }
+                        writeSysfsQuick(authFile.getAbsolutePath(), "1");
+                        try {
+                            Thread.sleep(750L);
+                        } catch (InterruptedException ignored) {
+                        }
+                        lastObservedDevPath = "";
+                        lastObservedDevPathFirstSeenMs = 0L;
+                    }
+                    break;
+                }
+            }
         }
 
         public static void startUsbPusherLoop(final String installDir) {
@@ -716,14 +860,54 @@ public class TurzxMonitorMain {
             return null;
         }
 
+        private static void onUsbOpenFailure(String devPath, String msg) {
+            closeUsbConnection();
+            statusText = msg;
+            consecutiveOpenFailures++;
+            if (consecutiveOpenFailures == 3) {
+                resetTurzxUsbDeviceInSysfs();
+            } else if (consecutiveOpenFailures >= 6) {
+                consecutiveOpenFailures = 0;
+                cycleUsbHostVbus("repeated handshake/open failure on " + devPath);
+            }
+        }
+
         private static synchronized boolean tryOpenTurzxUsbDevice() {
             closeUsbConnection();
             String devPath = findTurzxUsbDevicePath();
             if (devPath == null) {
-                statusText = "TURZX USB 미감지 (1cbe:0092 대기)";
-                return false;
+                nudgeUsbHostIfTurzxMissing();
+                devPath = findTurzxUsbDevicePath();
+                if (devPath == null) {
+                    statusText = "TURZX USB 미감지 (1cbe:0092 대기)";
+                    return false;
+                }
+            }
+            if (!devPath.equals(lastObservedDevPath)) {
+                lastObservedDevPath = devPath;
+                lastObservedDevPathFirstSeenMs = System.currentTimeMillis();
+            }
+            long sinceFirstSeen = System.currentTimeMillis() - lastObservedDevPathFirstSeenMs;
+            if (sinceFirstSeen < 700L) {
+                statusText = "TURZX USB 초기화 대기 중 (" + devPath + ")";
+                try {
+                    Thread.sleep(700L - sinceFirstSeen);
+                } catch (InterruptedException ignored) {
+                }
+                devPath = findTurzxUsbDevicePath();
+                if (devPath == null) {
+                    statusText = "TURZX USB 미감지 (1cbe:0092 대기)";
+                    return false;
+                }
+                lastObservedDevPath = devPath;
             }
             try {
+                try {
+                    File devFile = new File(devPath);
+                    devFile.setReadable(true, false);
+                    devFile.setWritable(true, false);
+                } catch (Throwable ignored) {
+                }
                 FileDescriptor fd = null;
                 try {
                     usbRaf = new RandomAccessFile(devPath, "rw");
@@ -746,8 +930,7 @@ public class TurzxMonitorMain {
                     }
                 }
                 if (fd == null) {
-                    closeUsbConnection();
-                    statusText = "USB 권한/FD 오픈 실패 (" + devPath + ")";
+                    onUsbOpenFailure(devPath, "USB 권한/FD 오픈 실패 (" + devPath + ")");
                     return false;
                 }
 
@@ -761,8 +944,7 @@ public class TurzxMonitorMain {
                 nativeOpen.setAccessible(true);
                 boolean opened = ((Boolean) nativeOpen.invoke(conn, devPath, fd)).booleanValue();
                 if (!opened) {
-                    closeUsbConnection();
-                    statusText = "USB 오픈 실패 (" + devPath + ")";
+                    onUsbOpenFailure(devPath, "USB 오픈 실패 (" + devPath + ")");
                     return false;
                 }
 
@@ -770,8 +952,7 @@ public class TurzxMonitorMain {
                 claimIfc.setAccessible(true);
                 boolean claimed = ((Boolean) claimIfc.invoke(conn, Integer.valueOf(0), Boolean.TRUE)).booleanValue();
                 if (!claimed) {
-                    closeUsbConnection();
-                    statusText = "USB 인터페이스 점유 실패 (" + devPath + ")";
+                    onUsbOpenFailure(devPath, "USB 인터페이스 점유 실패 (" + devPath + ")");
                     return false;
                 }
 
@@ -792,40 +973,52 @@ public class TurzxMonitorMain {
                 usbDevConn = conn;
                 connectedDevPath = devPath;
 
-                // 1. Drain any stale bytes on EP_IN (0x81)
-                drainBulkIn(30);
-
-                // 2. Send CMD 10 (HELLO / Sync) -> replies "turzx_0001_0015" (512B + ZLP)
+                // 1. Send CMD 10 (HELLO / Sync) with up to 3 attempts -> replies "turzx_0001_0015" (512B + ZLP)
                 byte[] helloPkt = buildTurzxCommandPacket(TURZX_CMD_HELLO, 0);
-                if (!bulkTransferOut(helloPkt, 0, helloPkt.length, 500) || drainBulkIn(250) <= 0) {
-                    closeUsbConnection();
-                    statusText = "TURZX 핸드셰이크 응답 없음 (" + devPath + ")";
-                    return false;
+                boolean helloOk = false;
+                for (int attempt = 1; attempt <= 3; attempt++) {
+                    drainBulkIn(40);
+                    if (bulkTransferOut(helloPkt, 0, helloPkt.length, 600) && drainBulkIn(600) > 0) {
+                        helloOk = true;
+                        break;
+                    }
+                    try {
+                        Thread.sleep(180L);
+                    } catch (InterruptedException ignored) {
+                    }
                 }
 
-                // 3. Send CMD 111 (Stop built-in storage video playback)
+                // 2. Send CMD 111 (Stop built-in storage video playback)
                 byte[] stopVideoPkt = buildTurzxCommandPacket(TURZX_CMD_STOP_VIDEO, 0);
-                bulkTransferOut(stopVideoPkt, 0, stopVideoPkt.length, 500);
-                drainBulkIn(200);
+                boolean stopOk = bulkTransferOut(stopVideoPkt, 0, stopVideoPkt.length, 600);
+                drainBulkIn(250);
 
-                // 4. Send initial brightness (CMD 14)
+                // 3. Send initial brightness (CMD 14)
                 MonitorConfig cfg = TurzxOverlayController.getConfig();
-                if (sendBrightnessCommand(cfg.usbBrightness)) {
+                boolean brOk = sendBrightnessCommand(cfg.usbBrightness);
+                if (brOk) {
                     lastAppliedBrightness = cfg.usbBrightness;
                 } else {
                     lastAppliedBrightness = -1;
                 }
 
-                // 5. Clear the 480x1920 RGBA PNG overlay layer (CMD 102) so CMD 101 JPEGs are visible
+                if (!helloOk && !brOk && !stopOk) {
+                    onUsbOpenFailure(devPath, "TURZX 핸드셰이크 응답 없음 (" + devPath + ")");
+                    return false;
+                }
+
+                // 4. Clear the 480x1920 RGBA PNG overlay layer (CMD 102) so CMD 101 JPEGs are visible
                 byte[] clearPng = buildTransparentOverlayPng480x1920();
                 sendPayloadFrame(TURZX_CMD_SEND_PNG, clearPng);
 
+                consecutiveOpenFailures = 0;
+                usbHostNudgeCount = 0;
                 connected = true;
                 statusText = "TURZX 연결됨 (" + devPath + ")";
+                DebugManager.logEvent("USB", "Connected to TURZX 9.2 panel at " + devPath + " (hello=" + helloOk + ", br=" + brOk + ")");
                 return true;
             } catch (Throwable t) {
-                closeUsbConnection();
-                statusText = "USB 초기화 오류: " + t.getClass().getSimpleName();
+                onUsbOpenFailure(devPath, "USB 초기화 오류: " + t.getClass().getSimpleName());
                 return false;
             }
         }
@@ -2850,21 +3043,25 @@ public class TurzxMonitorMain {
                     if (bundleObj == null) return false;
                     Class<?> bc = bundleObj.getClass();
                     int accStatus = -1;
-                    try {
-                        Method getInt = bc.getMethod("getInt", String.class, int.class);
-                        accStatus = ((Integer) getInt.invoke(bundleObj, "EXTRA_ACC_STATUS", Integer.valueOf(-1))).intValue();
-                    } catch (Throwable t1) {
+                    String[] accKeys = new String[]{"android.ibox.mode.EXTRA_ACC_STATUS", "EXTRA_ACC_STATUS"};
+                    for (int k = 0; k < accKeys.length && accStatus < 0; k++) {
                         try {
-                            Method getObj = bc.getMethod("get", String.class);
-                            Object oAcc = getObj.invoke(bundleObj, "EXTRA_ACC_STATUS");
-                            if (oAcc instanceof Number) accStatus = ((Number) oAcc).intValue();
-                        } catch (Throwable ignored) {
+                            Method getInt = bc.getMethod("getInt", String.class, int.class);
+                            accStatus = ((Integer) getInt.invoke(bundleObj, accKeys[k], Integer.valueOf(-1))).intValue();
+                        } catch (Throwable t1) {
+                            try {
+                                Method getObj = bc.getMethod("get", String.class);
+                                Object oAcc = getObj.invoke(bundleObj, accKeys[k]);
+                                if (oAcc instanceof Number) accStatus = ((Number) oAcc).intValue();
+                            } catch (Throwable ignored) {
+                            }
                         }
                     }
                     if (accStatus >= 0) {
                         lastPowerStatus = accStatus;
-                        if (accStatus == 0) {
+                        if (accStatus == 0 || accStatus == 5) {
                             lastBcmAccCallbackState = 1;
+                            lastBcmIgnCallbackState = 1;
                         }
                         refreshVehicleScreenOffFast();
                         if (vehicleScreenOff) {
@@ -3856,6 +4053,7 @@ public class TurzxMonitorMain {
             boolean prepOff = false;
             boolean dispOff = false;
             boolean keepOff = false;
+            int prevPowerStatus = lastPowerStatus;
             if (powerService != null) {
                 try {
                     if (powerGetStatusMethod != null) {
@@ -3890,9 +4088,11 @@ public class TurzxMonitorMain {
                 } catch (Throwable ignored) {
                 }
             }
-            if (Boolean.TRUE.equals(lastDatcIg3State) || liveSnapshot.evReady) {
+            if (((lastPowerStatus == 0 || lastPowerStatus == 5) && prevPowerStatus != lastPowerStatus)
+                    || Boolean.TRUE.equals(lastDatcIg3State)
+                    || liveSnapshot.evReady) {
                 lastBcmIgnCallbackState = 1;
-                if (lastPowerStatus == 0) {
+                if (lastPowerStatus == 0 || lastPowerStatus == 5) {
                     lastBcmAccCallbackState = 1;
                 }
             }
@@ -7222,17 +7422,15 @@ public class TurzxMonitorMain {
         // 0 = ACCON (normal driving / ACC ON)
         // 1 = LOGICON (ACC OFF, logic power only)
         // 2 = ADM (Accessory Delayed Mode — entered the instant the driver presses Start/Stop to turn OFF the vehicle!)
-        // 5 = SYSTEMREADY, 6 = DELAYMODE, 7 = PRESYSTEMOFF, 255 = OFF
-        if (powerStatus > 0) {
+        // 5 = SYSTEMREADY (initial cold-boot state in MicomPowerService.<clinit> before onAccOnRequest transitions to 0)
+        // 6 = DELAYMODE, 7 = PRESYSTEMOFF, 255 = OFF
+        // Note: DATCService.<init> initializes mIgn3Status = -1 and calls onIG3Status(false) on listener registration,
+        // so datcIg3 == false must never blank the screen when powerStatus is ACCON(0) or SYSTEMREADY(5).
+        if (powerStatus > 0 && powerStatus != 5) {
             return true;
         }
-        if (!charging) {
-            if (Boolean.FALSE.equals(datcIg3)) {
-                return true;
-            }
-            if (bcmIgnCallback == 0 || bcmAccCallback == 0) {
-                return true;
-            }
+        if (!charging && (bcmIgnCallback == 0 || bcmAccCallback == 0)) {
+            return true;
         }
         return false;
     }
@@ -8415,17 +8613,34 @@ public class TurzxMonitorMain {
                     && "USB Music".equals(mapModeManagerModeToSourceName(33)),
                     "Expected ModeConstants$ModeType mapping");
 
-            // Verify immediate ignition-off / ACC-off / ADM (powerStatus=2) / IG3-off screen blanking logic
+            // Verify immediate ignition-off / ACC-off / ADM (powerStatus=2) & cold-boot SYSTEMREADY (5) / initial IG3=false handling
             assertTrue(!evaluateVehicleScreenOffState(0, false, false, false, Boolean.TRUE, 1, 1, false),
                     "Expected screen ON when ACCON (0) and IG3=true");
+            assertTrue(!evaluateVehicleScreenOffState(5, false, false, false, Boolean.FALSE, -1, -1, false),
+                    "Expected screen ON during cold-boot SYSTEMREADY (powerStatus=5) even when DATCService initial IG3=false");
+            assertTrue(!evaluateVehicleScreenOffState(0, false, false, false, Boolean.FALSE, 1, 1, false),
+                    "Expected screen ON when ACCON (0) and DATCService mIgn3Status=-1 returns IG3=false");
             assertTrue(evaluateVehicleScreenOffState(2, false, false, false, Boolean.TRUE, 1, 1, false),
                     "Expected screen OFF immediately when entering ADM (powerStatus=2 on Start/Stop button off)");
-            assertTrue(evaluateVehicleScreenOffState(0, false, false, false, Boolean.FALSE, 1, 1, false),
-                    "Expected screen OFF immediately when IG3 transitions to false (not charging)");
+            assertTrue(evaluateVehicleScreenOffState(1, false, false, false, Boolean.TRUE, 1, 1, false),
+                    "Expected screen OFF immediately when entering LOGICON (powerStatus=1)");
+            assertTrue(evaluateVehicleScreenOffState(0, false, false, false, Boolean.TRUE, 0, 1, false),
+                    "Expected screen OFF immediately when BCM onIgnitionChanged(0) fires (not charging)");
             assertTrue(!evaluateVehicleScreenOffState(0, false, false, false, Boolean.FALSE, 0, 1, true),
                     "Expected screen to remain ON during active EV charging when ACCON=0");
             assertTrue(evaluateVehicleScreenOffState(0, true, false, false, Boolean.TRUE, 1, 1, true),
                     "Expected screen OFF when isPreparingSystemOff() is true");
+
+            android.content.Intent accAdmIntent = new android.content.Intent("com.hkmc.intent.action.ACTION_ACC_STATUS_CHANGED");
+            accAdmIntent.putExtra("android.ibox.mode.EXTRA_ACC_STATUS", 2);
+            assertTrue(TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(accAdmIntent.getAction(), accAdmIntent.getExtras(), snap)
+                    && TelemetryCollector.isVehicleScreenOff(),
+                    "Expected ACTION_ACC_STATUS_CHANGED with android.ibox.mode.EXTRA_ACC_STATUS=2 (ADM) to set vehicleScreenOff=true");
+            android.content.Intent accOnIntent = new android.content.Intent("com.hkmc.intent.action.ACTION_ACC_STATUS_CHANGED");
+            accOnIntent.putExtra("android.ibox.mode.EXTRA_ACC_STATUS", 0);
+            assertTrue(TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(accOnIntent.getAction(), accOnIntent.getExtras(), snap)
+                    && !TelemetryCollector.isVehicleScreenOff(),
+                    "Expected ACTION_ACC_STATUS_CHANGED with android.ibox.mode.EXTRA_ACC_STATUS=0 (ACCON) to set vehicleScreenOff=false");
 
             // Verify TP_DEVICE_FATC (0xAB) UDS 62 01 00 indoor (25.0°C) & outdoor (20.0°C) sensor decoding
             String sampleLogFatc = "I/TM_HSCANPacketRunner(  524): onEventFromMicom(Bypass CAN) : length _41[c7, c0, ab, c8, 2b, "
