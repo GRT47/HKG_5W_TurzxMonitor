@@ -72,7 +72,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.3.8";
+    public static final String MONITOR_VERSION = "1.3.9";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -5765,12 +5765,14 @@ public class TurzxMonitorMain {
                     appendObjectFieldsDump(sb, "  clusterService flds : ", TelemetryCollector.clusterService);
                 }
                 if (new File("/system/bin/sh").isFile()) {
+                    String grepCmd = new File("/system/bin/busybox").canExecute() ? "/system/bin/busybox grep" : "grep";
+                    String headCmd = new File("/system/bin/busybox").canExecute() ? "/system/bin/busybox head" : "head";
                     sb.append("  [dumpsys audio (RemoteControl / Focus)]:\n");
-                    sb.append(runQuickShellCmd("dumpsys audio 2>/dev/null | grep -iE -A 2 -B 1 'RemoteControl|Focus|Client|Package|Media|Player' | head -n 60", "    "));
+                    sb.append(runQuickShellCmd("dumpsys audio 2>/dev/null | " + grepCmd + " -iE -A 2 -B 1 'RemoteControl|Focus|Client|Package|Media|Player' | " + headCmd + " -n 60", "    "));
                     sb.append("  [Sticky & Recent Media/Vehicle Broadcasts]:\n");
-                    sb.append(runQuickShellCmd("dumpsys activity broadcasts 2>/dev/null | grep -iE -A 4 'hkmc|media|music|avrcp|bt|cluster|datc|hev|title|artist|play' | head -n 90", "    "));
+                    sb.append(runQuickShellCmd("dumpsys activity broadcasts 2>/dev/null | " + grepCmd + " -iE -A 4 'hkmc|media|music|avrcp|bt|cluster|datc|hev|title|artist|play' | " + headCmd + " -n 90", "    "));
                     sb.append("  [Binder Services (hkmc / media / audio / cluster)]:\n");
-                    sb.append(runQuickShellCmd("service list 2>/dev/null | grep -iE 'hkmc|micom|datc|hev|hscan|cluster|audio|media|tm_' | head -n 50", "    "));
+                    sb.append(runQuickShellCmd("service list 2>/dev/null | " + grepCmd + " -iE 'hkmc|micom|datc|hev|hscan|cluster|audio|media|tm_' | " + headCmd + " -n 50", "    "));
                 }
             } catch (Throwable ignored) {
             }
@@ -6102,6 +6104,12 @@ public class TurzxMonitorMain {
                     }
                     writeBytesAtomic(jarFile, newJarBytes);
                     jarFile.setReadable(true, false);
+                    try {
+                        File jarBakFile = new File(installDir, "bin/turzxmonitor.jar.bak");
+                        writeBytesAtomic(jarBakFile, newJarBytes);
+                        jarBakFile.setReadable(true, false);
+                    } catch (Throwable ignored) {
+                    }
                 }
 
                 if (forceApply || daemonChanged) {
@@ -6129,11 +6137,9 @@ public class TurzxMonitorMain {
                 }
 
                 writeBytesAtomic(localVerFile, verBytes);
-                if (daemonChanged) {
-                    try {
-                        writeBytesAtomic(new File(OTA_RELOAD_TRIGGER_PATH), ("v" + rVer + "\n").getBytes(UTF8));
-                    } catch (Throwable ignored) {
-                    }
+                try {
+                    writeBytesAtomic(new File(OTA_RELOAD_TRIGGER_PATH), ("v" + rVer + "\n").getBytes(UTF8));
+                } catch (Throwable ignored) {
                 }
                 clearDalvikCacheAndSync();
                 otaStatusText = "v" + rVer + " 적용 완료 · 재시작 중";

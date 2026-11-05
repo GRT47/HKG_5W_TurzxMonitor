@@ -26,22 +26,22 @@ CRASH_STREAK=0
 
 is_svc_pid_alive() {
     _pid="$1"
-    [ -n "$_pid" ] || return 1
-    kill -0 "$_pid" 2>/dev/null || return 1
-    [ -r "/proc/$_pid/cmdline" ] || return 1
-    (/system/bin/busybox tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null) | grep -q "turzx-daemon"
+    [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && [ -d "/proc/$_pid" ]
 }
 
 is_java_pid_alive() {
     _pid="$1"
-    [ -n "$_pid" ] || return 1
-    kill -0 "$_pid" 2>/dev/null || return 1
-    [ -r "/proc/$_pid/cmdline" ] || return 1
-    (/system/bin/busybox tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null) | grep -q "com.hkg.turzxmonitor.TurzxMonitorMain"
+    [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && [ -d "/proc/$_pid" ]
 }
 
 mkdir -p /data/nemesis/pids 2>/dev/null
 rm -f "$NEMESIS_FAILS_FILE" "$INSTALL_DIR/bin/"*.tmp "$INSTALL_DIR/svc/"*.tmp "$INSTALL_DIR/config/"*.tmp 2>/dev/null
+
+# Ensure .bak always mirrors a valid non-empty turzxmonitor.jar on startup / OTA reload
+if [ -s "$INSTALL_DIR/bin/turzxmonitor.jar" ]; then
+    cp -f "$INSTALL_DIR/bin/turzxmonitor.jar" "$INSTALL_DIR/bin/turzxmonitor.jar.bak" 2>/dev/null
+    chmod 644 "$INSTALL_DIR/bin/turzxmonitor.jar.bak" 2>/dev/null
+fi
 
 # Clear stale persistent PID files across cold boots using kernel boot_id
 if [ -r "/proc/sys/kernel/random/boot_id" ]; then
@@ -53,8 +53,12 @@ if [ -r "/proc/sys/kernel/random/boot_id" ]; then
     fi
 fi
 
-if [ -f "/data/nemesis/services.db" ] && grep -q "hkg.turzxmonitor.*|background" /data/nemesis/services.db 2>/dev/null; then
-    sed 's/\(hkg\.turzxmonitor[^|]*|[^|]*|[^|]*|[^|]*|\)background/\1restart/g' /data/nemesis/services.db > /data/nemesis/services.db.tmp 2>/dev/null
+if [ -f "/data/nemesis/services.db" ] && grep "hkg.turzxmonitor.*|background" /data/nemesis/services.db >/dev/null 2>&1; then
+    if [ -x "/system/bin/busybox" ]; then
+        /system/bin/busybox sed 's/\(hkg\.turzxmonitor[^|]*|[^|]*|[^|]*|[^|]*|\)background/\1restart/g' /data/nemesis/services.db > /data/nemesis/services.db.tmp 2>/dev/null
+    else
+        sed 's/\(hkg\.turzxmonitor[^|]*|[^|]*|[^|]*|[^|]*|\)background/\1restart/g' /data/nemesis/services.db > /data/nemesis/services.db.tmp 2>/dev/null
+    fi
     if [ -s "/data/nemesis/services.db.tmp" ]; then
         sync
         mv -f /data/nemesis/services.db.tmp /data/nemesis/services.db 2>/dev/null
@@ -95,7 +99,7 @@ is_turzx_usb_present() {
 
 is_other_usb_device_present() {
     for usb_mnt in /storage/usb0 /mnt/media_rw/usb0 /storage/usb1 /mnt/usb0; do
-        if [ -d "$usb_mnt" ] && grep -q " $usb_mnt " /proc/mounts 2>/dev/null; then
+        if [ -d "$usb_mnt" ] && grep " $usb_mnt " /proc/mounts >/dev/null 2>&1; then
             return 0
         fi
     done
@@ -156,13 +160,9 @@ start_monitor_java() {
     kill_monitor_java
     JAR_FILE="$INSTALL_DIR/bin/turzxmonitor.jar"
     JAR_BAK="$INSTALL_DIR/bin/turzxmonitor.jar.bak"
-    jar_sz=0
-    if [ -f "$JAR_FILE" ]; then
-        jar_sz="$(wc -c < "$JAR_FILE" 2>/dev/null)"
-    fi
-    if [ -z "$jar_sz" ] || [ "$jar_sz" -lt 32768 ] 2>/dev/null; then
-        if [ -f "$JAR_BAK" ]; then
-            log_info "Detected truncated/missing turzxmonitor.jar (size=$jar_sz); restoring from turzxmonitor.jar.bak"
+    if [ ! -s "$JAR_FILE" ]; then
+        if [ -s "$JAR_BAK" ]; then
+            log_info "Detected missing/empty turzxmonitor.jar; restoring from turzxmonitor.jar.bak"
             cp -f "$JAR_BAK" "$JAR_FILE" 2>/dev/null
             chmod 644 "$JAR_FILE" 2>/dev/null
             rm -f /data/dalvik-cache/*turzxmonitor.jar* /data/local/tmp/dalvik-cache/*turzxmonitor.jar* 2>/dev/null
@@ -170,10 +170,11 @@ start_monitor_java() {
         fi
     else
         cp -f "$JAR_FILE" "$JAR_BAK" 2>/dev/null
+        chmod 644 "$JAR_BAK" 2>/dev/null
     fi
     LOG_FILE="/data/local/tmp/hkg_turzxmonitor.log"
-    if [ -f "$LOG_FILE" ]; then
-        log_sz="$(wc -c < "$LOG_FILE" 2>/dev/null)"
+    if [ -f "$LOG_FILE" ] && [ -x "/system/bin/busybox" ]; then
+        log_sz="$(/system/bin/busybox wc -c < "$LOG_FILE" 2>/dev/null)"
         if [ -n "$log_sz" ] && [ "$log_sz" -gt 262144 ] 2>/dev/null; then
             mv -f "$LOG_FILE" "${LOG_FILE}.old" 2>/dev/null
         fi
@@ -192,19 +193,23 @@ start_monitor_java() {
 
 sync_logs_to_usb() {
     for usb_mnt in /storage/usb0 /mnt/media_rw/usb0 /storage/usb1 /mnt/usb0; do
-        if [ -d "$usb_mnt" ] && grep -q " $usb_mnt " /proc/mounts 2>/dev/null; then
+        if [ -d "$usb_mnt" ] && grep " $usb_mnt " /proc/mounts >/dev/null 2>&1; then
             usb_log_dir="$usb_mnt/HKG_TurzxMonitor_Log"
             mkdir -p "$usb_log_dir" 2>/dev/null
             [ -f "$LOG_FILE" ] && cp -f "$LOG_FILE" "$usb_log_dir/hkg_turzxmonitor.log" 2>/dev/null
             [ -f "${LOG_FILE}.old" ] && cp -f "${LOG_FILE}.old" "$usb_log_dir/hkg_turzxmonitor.log.old" 2>/dev/null
             [ -f "$DEBUG_FILE" ] && cp -f "$DEBUG_FILE" "$usb_log_dir/HKG_TurzxMonitor_Debug.txt" 2>/dev/null
-            dmesg 2>/dev/null | grep -iE "(usb|1cbe|turzx|rndis|xhci|ehci)" | tail -n 120 > "$usb_log_dir/dmesg_usb.txt" 2>/dev/null
+            if [ -x "/system/bin/busybox" ]; then
+                dmesg 2>/dev/null | /system/bin/busybox grep -iE "(usb|1cbe|turzx|rndis|xhci|ehci)" | /system/bin/busybox tail -n 120 > "$usb_log_dir/dmesg_usb.txt" 2>/dev/null
+            else
+                dmesg 2>/dev/null > "$usb_log_dir/dmesg_usb.txt" 2>/dev/null
+            fi
             for udev in /sys/bus/usb/devices/*; do
                 if [ -f "$udev/idVendor" ]; then
                     vid="$(cat "$udev/idVendor" 2>/dev/null)"
                     pid="$(cat "$udev/idProduct" 2>/dev/null)"
                     prod="$(cat "$udev/product" 2>/dev/null)"
-                    echo "$(basename "$udev"): ${vid}:${pid} (${prod})"
+                    echo "${udev##*/}: ${vid}:${pid} (${prod})"
                 fi
             done > "$usb_log_dir/usb_devices.txt" 2>/dev/null
             sync
@@ -252,6 +257,11 @@ while true; do
     if [ -f "$OTA_RELOAD_FILE" ]; then
         rm -f "$OTA_RELOAD_FILE" 2>/dev/null
         log_info "OTA reload requested; restarting daemon script and Java process"
+        if [ -s "$INSTALL_DIR/bin/turzxmonitor.jar" ]; then
+            cp -f "$INSTALL_DIR/bin/turzxmonitor.jar" "$INSTALL_DIR/bin/turzxmonitor.jar.bak" 2>/dev/null
+            chmod 644 "$INSTALL_DIR/bin/turzxmonitor.jar.bak" 2>/dev/null
+        fi
+        rm -f /data/dalvik-cache/*turzxmonitor.jar* /data/local/tmp/dalvik-cache/*turzxmonitor.jar* 2>/dev/null
         kill_monitor_java
         rm -f "$SVC_PID_FILE" "$JAVA_PID_FILE" 2>/dev/null
         exec /system/bin/sh "$INSTALL_DIR/svc/turzx-daemon.sh"
@@ -260,12 +270,6 @@ while true; do
         CRASH_STREAK=$((CRASH_STREAK + 1))
         if [ "$CRASH_STREAK" -ge 1 ]; then
             rm -f /data/dalvik-cache/*turzxmonitor.jar* /data/local/tmp/dalvik-cache/*turzxmonitor.jar* 2>/dev/null
-        fi
-        if [ "$CRASH_STREAK" -ge 2 ] && [ -f "$INSTALL_DIR/bin/turzxmonitor.jar.bak" ]; then
-            log_info "Java daemon exited repeatedly ($CRASH_STREAK); rolling back turzxmonitor.jar from .bak"
-            cp -f "$INSTALL_DIR/bin/turzxmonitor.jar.bak" "$INSTALL_DIR/bin/turzxmonitor.jar" 2>/dev/null
-            chmod 644 "$INSTALL_DIR/bin/turzxmonitor.jar" 2>/dev/null
-            sync
         fi
         start_monitor_java
     else

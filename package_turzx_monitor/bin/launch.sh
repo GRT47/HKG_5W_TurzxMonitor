@@ -14,22 +14,27 @@ mkdir -p /data/dalvik-cache 2>/dev/null
 
 SVC_PID_FILE="/data/local/tmp/hkg_turzxmonitor_svc.pid"
 JAVA_PID_FILE="/data/local/tmp/hkg_turzxmonitor_java.pid"
+BOOT_ID_FILE="/data/local/tmp/hkg_turzxmonitor_boot.id"
 CMD_FILE="/data/local/tmp/hkg_turzxmonitor_cmd"
+
+# Clear stale persistent PID files across cold boots using kernel boot_id
+if [ -r "/proc/sys/kernel/random/boot_id" ]; then
+    cur_boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+    old_boot_id="$(cat "$BOOT_ID_FILE" 2>/dev/null)"
+    if [ -n "$cur_boot_id" ] && [ "$cur_boot_id" != "$old_boot_id" ]; then
+        rm -f "$SVC_PID_FILE" "$JAVA_PID_FILE" 2>/dev/null
+        echo "$cur_boot_id" > "$BOOT_ID_FILE" 2>/dev/null
+    fi
+fi
 
 is_svc_pid_alive() {
     _pid="$1"
-    [ -n "$_pid" ] || return 1
-    kill -0 "$_pid" 2>/dev/null || return 1
-    [ -r "/proc/$_pid/cmdline" ] || return 1
-    (/system/bin/busybox tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null) | grep -q "turzx-daemon"
+    [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && [ -d "/proc/$_pid" ]
 }
 
 is_java_pid_alive() {
     _pid="$1"
-    [ -n "$_pid" ] || return 1
-    kill -0 "$_pid" 2>/dev/null || return 1
-    [ -r "/proc/$_pid/cmdline" ] || return 1
-    (/system/bin/busybox tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null) | grep -q "com.hkg.turzxmonitor.TurzxMonitorMain"
+    [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && [ -d "/proc/$_pid" ]
 }
 
 svc_alive=0
