@@ -72,13 +72,14 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.3.9";
+    public static final String MONITOR_VERSION = "1.4.0";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
     private static final String SHARED_CARROTBRIDGE_JSON_PATH = "/data/local/tmp/carrotbridge_status.json";
     private static final String SHARED_CARROTBRIDGE_PID_PATH = "/data/local/tmp/carrotbridge_java.pid";
     private static final String TURZX_JSON_STATE_PATH = "/data/local/tmp/hkg_turzx_state.json";
+    private static final String USB_LOG_SYNC_REQUEST_PATH = "/data/local/tmp/hkg_turzxmonitor_usbsync_req";
     private static final String DEBUG_DUMP_LOCAL_PATH = "/data/local/tmp/hkg_turzxmonitor_debug.txt";
     private static final String OTA_RELOAD_TRIGGER_PATH = "/data/local/tmp/hkg_turzxmonitor_ota_reload";
     public static final String GITHUB_RAW_HOST = "raw.githubusercontent.com";
@@ -168,7 +169,7 @@ public class TurzxMonitorMain {
         public boolean usbPushEnabled = true;
         public int usbBrightness = 85;
         public int usbRotation = 270;     // 270 or 90 (1920x462 -> 462x1920 portrait scanout)
-        public int usbJpegQuality = 85;
+        public int usbJpegQuality = 70;
         public int usbFps = 12;
         public String commaIp = "";
         public boolean autoUpdate = true;
@@ -576,6 +577,10 @@ public class TurzxMonitorMain {
         private static volatile double liveFps = 0.0;
         private static volatile int lastAppliedBrightness = -1;
         private static volatile byte[] latestLandscapeJpeg = null;
+        private static volatile long latestLandscapeJpegMs = 0L;
+        private static volatile long lastLandscapeDemandMs = 0L;
+        private static volatile long lastOpenAttemptMs = 0L;
+        private static final long LANDSCAPE_DEMAND_WINDOW_MS = 5000L;
 
         private static final long driverStartMs = System.currentTimeMillis();
         private static volatile long lastUsbHostNudgeMs = 0L;
@@ -609,6 +614,24 @@ public class TurzxMonitorMain {
         }
 
         public static byte[] getLatestLandscapeJpeg() {
+            return latestLandscapeJpeg;
+        }
+
+        /**
+         * Called by the /frame.jpg handler: enables landscape encoding for the next few seconds and waits
+         * briefly for a fresh frame, since landscape JPEGs are no longer encoded when nobody is watching.
+         */
+        public static byte[] awaitFreshLandscapeJpeg(long maxWaitMs) {
+            long requestMs = System.currentTimeMillis();
+            lastLandscapeDemandMs = requestMs;
+            long deadline = requestMs + maxWaitMs;
+            while (latestLandscapeJpegMs < requestMs - 1500L && System.currentTimeMillis() < deadline) {
+                try {
+                    Thread.sleep(40L);
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
             return latestLandscapeJpeg;
         }
 
@@ -779,16 +802,29 @@ public class TurzxMonitorMain {
                         continue;
                     }
 
-                    // Always render the 1920x462 HUD frame so both USB display and HTTP /frame.jpg + preview work
-                    byte[][] jpegs = TurzxFrameRenderer.renderHudJpegPair(snap, cfg.usbRotation, cfg.usbJpegQuality);
+                    if (cfg.usbPushEnabled) {
+                        if (!connected && (frameStartMs - lastOpenAttemptMs) >= 500L) {
+                            lastOpenAttemptMs = frameStartMs;
+                            tryOpenTurzxUsbDevice();
+                        }
+                    } else if (connected) {
+                        closeUsbConnection();
+                    }
+
+                    // Only render/encode what has a consumer: the panel when connected, the landscape JPEG
+                    // only while someone polls /frame.jpg (the web viewer itself uses /status.json).
+                    boolean needPanel = cfg.usbPushEnabled && connected;
+                    boolean needLandscape = (System.currentTimeMillis() - lastLandscapeDemandMs) < LANDSCAPE_DEMAND_WINDOW_MS;
+                    byte[][] jpegs = TurzxFrameRenderer.renderHudJpegPair(
+                            snap, cfg.usbRotation, cfg.usbJpegQuality, needPanel, needLandscape);
                     if (jpegs != null && jpegs.length == 2) {
-                        latestLandscapeJpeg = jpegs[0];
+                        if (jpegs[0] != null) {
+                            latestLandscapeJpeg = jpegs[0];
+                            latestLandscapeJpegMs = System.currentTimeMillis();
+                        }
                         byte[] panelJpeg = jpegs[1];
 
                         if (cfg.usbPushEnabled) {
-                            if (!connected) {
-                                tryOpenTurzxUsbDevice();
-                            }
                             if (connected && panelJpeg != null && panelJpeg.length > 0) {
                                 if (lastAppliedBrightness != cfg.usbBrightness) {
                                     if (sendBrightnessCommand(cfg.usbBrightness)) {
@@ -1152,6 +1188,153 @@ public class TurzxMonitorMain {
     }
 
     // =========================================================================
+    // 1B. NATIVE libjpeg-turbo (NEON) JPEG ENCODER (libturzxjpeg.so, bundled in jar assets)
+    // =========================================================================
+
+    public static final class NativeJpeg {
+        private static final String ASSET_NAME = "libturzxjpeg_armv7.so";
+        private static final int MAX_CONSECUTIVE_FAILURES = 3;
+
+        private static volatile boolean loadAttempted = false;
+        private static volatile boolean available = false;
+        private static volatile String info = "not loaded";
+        private static int consecutiveFailures = 0;
+
+        // ---- Crash guard ----
+        // A SIGSEGV in native code kills the whole process (no Java catch). While the library is loaded and for
+        // the first WARMUP_ENCODES frames an "in-flight" marker (hash:attempt) exists; if the process dies in that
+        // window the marker survives. After MAX_GUARD_ATTEMPTS consecutive unfinished attempts with the same .so,
+        // native encoding is disabled for that .so hash (Skia fallback) so the HUD and OTA keep working.
+        // A new .so (different hash) is tried again. Re-enable manually: rm /data/local/tmp/hkg_turzxjpeg_disabled_*
+        private static final String GUARD_DIR = "/data/local/tmp";
+        private static final String INFLIGHT_NAME = "hkg_turzxjpeg_inflight";
+        private static final String DISABLED_PREFIX = "hkg_turzxjpeg_disabled_";
+        private static final int WARMUP_ENCODES = 50;
+        static final int MAX_GUARD_ATTEMPTS = 2;
+        private static int warmupRemaining = 0;
+
+        /** Number of previous unfinished attempts for this .so hash, given the in-flight marker content (or null). */
+        static int previousGuardAttempts(String inflightContent, String soHash) {
+            if (inflightContent == null) return 0;
+            String c = inflightContent.trim();
+            int sep = c.lastIndexOf(':');
+            if (sep <= 0 || !c.substring(0, sep).equals(soHash)) return 0;
+            return parseIntSafe(c.substring(sep + 1), 0) + 1;
+        }
+
+        private static void clearInflight() {
+            new File(GUARD_DIR, INFLIGHT_NAME).delete();
+        }
+
+        static native byte[] nEncode(Object bitmap, int rotation, int padWidth, int quality);
+
+        static native String nInfo();
+
+        public static boolean isAvailable() {
+            return available;
+        }
+
+        public static String getInfo() {
+            return info;
+        }
+
+        /** Extracts the bundled .so (content-hash named, so OTA never overwrites a mapped file) and loads it once. */
+        public static synchronized boolean ensureLoaded() {
+            if (loadAttempted) return available;
+            loadAttempted = true;
+            try {
+                String arch = System.getProperty("os.arch", "");
+                if (!arch.startsWith("arm")) {
+                    info = "skipped (os.arch=" + arch + ")";
+                    return false;
+                }
+                byte[] so = TurzxFrameRenderer.readJarAssetBytesPublic(ASSET_NAME);
+                if (so == null || so.length < 1024) {
+                    info = "asset missing";
+                    return false;
+                }
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                byte[] dig = md.digest(so);
+                StringBuilder hex = new StringBuilder(12);
+                for (int i = 0; i < 6; i++) hex.append(String.format(Locale.US, "%02x", dig[i] & 0xFF));
+
+                File disabledMarker = new File(GUARD_DIR, DISABLED_PREFIX + hex);
+                if (disabledMarker.isFile()) {
+                    info = "disabled by crash guard (" + hex + ")";
+                    DebugManager.logEvent("RENDER", "Native JPEG encoder " + info + " -> Skia fallback");
+                    return false;
+                }
+                File inflight = new File(GUARD_DIR, INFLIGHT_NAME);
+                int attempts = previousGuardAttempts(inflight.isFile() ? readAllTextQuick(inflight) : null, hex.toString());
+                if (attempts >= MAX_GUARD_ATTEMPTS) {
+                    writeBytesNoSync(disabledMarker, ("process died " + attempts + "x during native load/warmup\n").getBytes(UTF8));
+                    clearInflight();
+                    info = "disabled by crash guard (" + hex + ", " + attempts + " crashes)";
+                    DebugManager.logEvent("RENDER", "Native JPEG encoder " + info + " -> Skia fallback");
+                    return false;
+                }
+                writeBytesNoSync(inflight, (hex + ":" + attempts).getBytes(UTF8));
+                warmupRemaining = WARMUP_ENCODES;
+
+                String installDir = TurzxOverlayController.getInstallDir();
+                File dir = (installDir != null && !installDir.isEmpty() && new File(installDir, "bin").isDirectory())
+                        ? new File(installDir, "bin")
+                        : new File("/data/local/tmp");
+                File target = new File(dir, "libturzxjpeg-" + hex + ".so");
+                if (!target.isFile() || target.length() != so.length) {
+                    writeBytesAtomic(target, so);
+                }
+                target.setReadable(true, false);
+                target.setExecutable(true, false);
+                File[] olds = dir.listFiles();
+                if (olds != null) {
+                    for (int i = 0; i < olds.length; i++) {
+                        String n = olds[i].getName();
+                        if (n.startsWith("libturzxjpeg-") && n.endsWith(".so") && !n.equals(target.getName())) {
+                            olds[i].delete();
+                        }
+                    }
+                }
+                System.load(target.getAbsolutePath());
+                info = nInfo();
+                available = true;
+                DebugManager.logEvent("RENDER", "Native JPEG encoder loaded: " + info + " (" + target.getAbsolutePath() + ")");
+            } catch (Throwable t) {
+                available = false;
+                info = "load failed: " + t.getClass().getSimpleName() + ": " + t.getMessage();
+                DebugManager.logError("RENDER", "NativeJpeg.ensureLoaded", t);
+            }
+            return available;
+        }
+
+        /** Returns JPEG bytes or null (caller falls back to Skia). Disables itself after repeated failures. */
+        public static byte[] encode(Object bitmap, int rotation, int padWidth, int quality) {
+            if (!available) return null;
+            byte[] out = null;
+            try {
+                out = nEncode(bitmap, rotation, padWidth, quality);
+            } catch (Throwable t) {
+                DebugManager.logError("RENDER", "NativeJpeg.encode", t);
+            }
+            if (out == null || out.length == 0) {
+                if (++consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                    available = false;
+                    clearInflight();  // clean failure, not a crash
+                    info = "disabled after " + consecutiveFailures + " encode failures";
+                    DebugManager.logEvent("RENDER", "Native JPEG encoder " + info + " -> Skia fallback");
+                }
+                return null;
+            }
+            consecutiveFailures = 0;
+            if (warmupRemaining > 0 && --warmupRemaining == 0) {
+                clearInflight();
+                DebugManager.logEvent("RENDER", "Native JPEG encoder passed " + WARMUP_ENCODES + "-frame warmup; crash guard cleared");
+            }
+            return out;
+        }
+    }
+
+    // =========================================================================
     // 2. ANDROID CANVAS 1920x462 CLUSTER HUD FRAME RENDERER
     // =========================================================================
 
@@ -1243,6 +1426,10 @@ public class TurzxMonitorMain {
             return null;
         }
 
+        static byte[] readJarAssetBytesPublic(String assetName) {
+            return readJarAssetBytes(assetName);
+        }
+
         private static Object decodeAssetBitmap(Method decodeByteArray, String assetName) {
             try {
                 byte[] raw = readJarAssetBytes(assetName);
@@ -1304,12 +1491,35 @@ public class TurzxMonitorMain {
             }
         }
 
+        private static volatile String lastEncoderName = "-";
+        private static volatile double avgRenderMs = 0.0;
+        private static volatile double avgEncodeMs = 0.0;
+
+        public static String getLastEncoderName() {
+            return lastEncoderName;
+        }
+
+        public static double getAvgRenderMs() {
+            return avgRenderMs;
+        }
+
+        public static double getAvgEncodeMs() {
+            return avgEncodeMs;
+        }
+
+        private static double ema(double prev, double sample) {
+            return (prev <= 0.0) ? sample : (prev * 0.9 + sample * 0.1);
+        }
+
         /**
          * Renders the 1920x462 HUD frame onto an Android Canvas and returns:
-         * - result[0]: 1920x462 landscape JPEG (for web preview /frame.jpg & headunit overlay)
-         * - result[1]: rotated 464x1920 portrait JPEG (for TURZX 9.2" CMD 101 hardware JPEG decoder)
+         * - result[0]: 1920x462 landscape JPEG (web /frame.jpg) — only when needLandscape, else null
+         * - result[1]: rotated 464x1920 portrait JPEG (TURZX CMD 101) — only when needPanel, else null
+         * Encoding uses libjpeg-turbo NEON (rotation done in native code); Skia is the fallback.
          */
-        public static synchronized byte[][] renderHudJpegPair(TelemetrySnapshot s, int rotationDeg, int jpegQuality) {
+        public static synchronized byte[][] renderHudJpegPair(TelemetrySnapshot s, int rotationDeg, int jpegQuality,
+                                                              boolean needPanel, boolean needLandscape) {
+            if (!needPanel && !needLandscape) return null;
             try {
                 Class<?> bmpCls = Class.forName("android.graphics.Bitmap");
                 Class<?> cfgCls = Class.forName("android.graphics.Bitmap$Config");
@@ -1365,18 +1575,50 @@ public class TurzxMonitorMain {
                     roadPhase = (roadPhase + (spd / 180.0f)) % 36.0f;
                 }
 
+                long tRender0 = System.nanoTime();
                 drawHudToCanvas(landscapeCanvas, paintFill, paintStroke, paintShader,
                         paintPublicBold, paintPublicMed, paintSysBold, paintSysMed,
                         rectF, srcRect, dstRect,
                         bmpCls, canvasCls, paintCls, alignCls, rectFCls, rectCls, pathCls, s);
+                long tEncode0 = System.nanoTime();
+                avgRenderMs = ema(avgRenderMs, (tEncode0 - tRender0) / 1e6);
 
+                int q = Math.max(50, Math.min(95, jpegQuality));
+                int nativeRot = (rotationDeg == 90) ? 90 : 270;
+                byte[] landBytes = null;
+                byte[] panelBytes = null;
+
+                if (NativeJpeg.ensureLoaded()) {
+                    boolean ok = true;
+                    if (needPanel) {
+                        panelBytes = NativeJpeg.encode(landscapeBitmap, nativeRot, PANEL_JPEG_WIDTH, q);
+                        ok = panelBytes != null;
+                    }
+                    if (ok && needLandscape) {
+                        landBytes = NativeJpeg.encode(landscapeBitmap, 0, 0, q);
+                        ok = landBytes != null;
+                    }
+                    if (ok) {
+                        lastEncoderName = NativeJpeg.getInfo();
+                        avgEncodeMs = ema(avgEncodeMs, (System.nanoTime() - tEncode0) / 1e6);
+                        return new byte[][]{landBytes, panelBytes};
+                    }
+                }
+
+                // ---- Skia Bitmap.compress() fallback ----
+                lastEncoderName = "skia";
                 Object jpegFmt = fmtCls.getField("JPEG").get(null);
                 Method compressM = bmpCls.getMethod("compress", fmtCls, int.class, OutputStream.class);
-                int q = Math.max(50, Math.min(95, jpegQuality));
 
-                ByteArrayOutputStream baosLand = new ByteArrayOutputStream(65536);
-                compressM.invoke(landscapeBitmap, jpegFmt, Integer.valueOf(q), baosLand);
-                byte[] landBytes = baosLand.toByteArray();
+                if (needLandscape) {
+                    ByteArrayOutputStream baosLand = new ByteArrayOutputStream(65536);
+                    compressM.invoke(landscapeBitmap, jpegFmt, Integer.valueOf(q), baosLand);
+                    landBytes = baosLand.toByteArray();
+                }
+                if (!needPanel) {
+                    avgEncodeMs = ema(avgEncodeMs, (System.nanoTime() - tEncode0) / 1e6);
+                    return new byte[][]{landBytes, null};
+                }
 
                 // Rotate 1920x462 landscape into 462x1920 at (0,0) on the 464x1920 macroblock-aligned panelBitmap
                 canvasCls.getMethod("drawColor", int.class).invoke(panelCanvas, Integer.valueOf(0xFF000000));
@@ -1395,8 +1637,9 @@ public class TurzxMonitorMain {
 
                 ByteArrayOutputStream baosPanel = new ByteArrayOutputStream(65536);
                 compressM.invoke(panelBitmap, jpegFmt, Integer.valueOf(q), baosPanel);
-                byte[] panelBytes = baosPanel.toByteArray();
+                panelBytes = baosPanel.toByteArray();
 
+                avgEncodeMs = ema(avgEncodeMs, (System.nanoTime() - tEncode0) / 1e6);
                 return new byte[][]{landBytes, panelBytes};
             } catch (Throwable t) {
                 return null;
@@ -2869,6 +3112,7 @@ public class TurzxMonitorMain {
         private static volatile boolean backgroundStarted = false;
         private static volatile long lastCarrotRxMs = 0L;
         private static int pollTick = 0;
+        private static long lastStateJsonWriteMs = 0L;
 
         private static final String[] MEDIA_WIDGET_ACTIONS = new String[]{
                 "com.hkmc.audio.btaudio.widgetupdate",
@@ -3621,9 +3865,11 @@ public class TurzxMonitorMain {
                 }
 
                 TelemetrySnapshot snap = copySnapshotLocked();
-                if (pollTick % 3 == 0) {
+                // Shared state JSON: 1Hz, tmp+rename without fsync (was every 3rd frame with fsync on the render thread)
+                if (nowMs - lastStateJsonWriteMs >= 1000L) {
+                    lastStateJsonWriteMs = nowMs;
                     try {
-                        writeBytesAtomic(new File(TURZX_JSON_STATE_PATH), formatTelemetryJson(snap).getBytes(UTF8));
+                        writeBytesNoSync(new File(TURZX_JSON_STATE_PATH), formatTelemetryJson(snap).getBytes(UTF8));
                     } catch (Throwable ignored) {
                     }
                 }
@@ -4862,7 +5108,7 @@ public class TurzxMonitorMain {
                             byte[] body = formatTelemetryJson(getLatestSnapshot()).getBytes(UTF8);
                             writeHttpResponse(os, "200 OK", "application/json; charset=utf-8", body);
                         } else if (path.startsWith("/frame.jpg")) {
-                            byte[] jpg = TurzxUsbDriver.getLatestLandscapeJpeg();
+                            byte[] jpg = TurzxUsbDriver.awaitFreshLandscapeJpeg(800L);
                             if (jpg != null && jpg.length > 0) {
                                 writeHttpResponse(os, "200 OK", "image/jpeg", jpg);
                             } else {
@@ -4876,8 +5122,14 @@ public class TurzxMonitorMain {
                                 writeHttpResponse(os, "404 Not Found", "text/plain; charset=utf-8", "No album art".getBytes(UTF8));
                             }
                         } else if (path.startsWith("/debug.txt") || path.startsWith("/logs")) {
+                            // View-only by default; writing to USB happens only on explicit save (?save=1 or overlay button)
                             String dir = TurzxOverlayController.getInstallDir();
-                            String savedPath = DebugManager.dumpDiagnosticsToDisk(dir, getLatestSnapshot(), TurzxOverlayController.getConfig());
+                            boolean save = path.contains("save=1") || path.contains("save=true");
+                            String savedPath = "";
+                            if (save) {
+                                savedPath = DebugManager.dumpDiagnosticsToDisk(dir, getLatestSnapshot(), TurzxOverlayController.getConfig());
+                                DebugManager.requestDaemonUsbLogSync();
+                            }
                             String report = DebugManager.buildDiagnosticReport(dir, getLatestSnapshot(), TurzxOverlayController.getConfig(), savedPath);
                             writeHttpResponse(os, "200 OK", "text/plain; charset=utf-8", report.getBytes(UTF8));
                         } else if (path.startsWith("/update") || path.startsWith("/ota")) {
@@ -5540,6 +5792,15 @@ public class TurzxMonitorMain {
             return lastDumpPath;
         }
 
+        /** Asks turzx-daemon.sh to copy dmesg / USB device list / rotated logs to the USB stick once (picked up within ~5s). */
+        public static void requestDaemonUsbLogSync() {
+            try {
+                writeBytesNoSync(new File(USB_LOG_SYNC_REQUEST_PATH), String.valueOf(System.currentTimeMillis()).getBytes(UTF8));
+            } catch (Throwable t) {
+                logError("DEBUG", "requestDaemonUsbLogSync", t);
+            }
+        }
+
         public static void triggerAsyncDump(final String installDir) {
             TurzxOverlayController.showBannerMessage("💾 진단 로그 수집 중...", 4000L);
             Thread t = new Thread(new Runnable() {
@@ -5551,6 +5812,7 @@ public class TurzxMonitorMain {
                                 TelemetryCollector.getLatestSnapshot(),
                                 TurzxOverlayController.getConfig()
                         );
+                        requestDaemonUsbLogSync();
                         TurzxOverlayController.showBannerMessage("💾 로그 저장 완료: " + path, 6500L);
                     } catch (Throwable err) {
                         logError("DEBUG", "triggerAsyncDump", err);
@@ -5605,6 +5867,10 @@ public class TurzxMonitorMain {
             sb.append("USB Status      : ").append(TurzxUsbDriver.getStatusText()).append("\n");
             sb.append("Pushed Frames   : ").append(TurzxUsbDriver.getPushedFrames())
                     .append(String.format(Locale.US, " (Live FPS: %.1f)\n", TurzxUsbDriver.getLiveFps()));
+            sb.append("JPEG Encoder    : ").append(TurzxFrameRenderer.getLastEncoderName())
+                    .append(" | native=").append(NativeJpeg.getInfo())
+                    .append(String.format(Locale.US, " | render %.1fms, encode %.1fms (avg)\n",
+                            TurzxFrameRenderer.getAvgRenderMs(), TurzxFrameRenderer.getAvgEncodeMs()));
             File sysUsb = new File("/sys/bus/usb/devices");
             File[] usbDirs = sysUsb.listFiles();
             if (usbDirs != null) {
@@ -7186,6 +7452,9 @@ public class TurzxMonitorMain {
         sb.append("\"connected\":").append(TurzxUsbDriver.isConnected());
         sb.append(",\"frames\":").append(TurzxUsbDriver.getPushedFrames());
         sb.append(String.format(Locale.US, ",\"fps\":%.1f", TurzxUsbDriver.getLiveFps()));
+        sb.append(",\"jpeg_encoder\":\"").append(escapeJson(TurzxFrameRenderer.getLastEncoderName())).append("\"");
+        sb.append(String.format(Locale.US, ",\"render_ms\":%.1f,\"encode_ms\":%.1f",
+                TurzxFrameRenderer.getAvgRenderMs(), TurzxFrameRenderer.getAvgEncodeMs()));
         sb.append(",\"status\":\"").append(escapeJson(TurzxUsbDriver.getStatusText())).append("\"");
         sb.append("},\"ota\":{");
         sb.append("\"updating\":").append(OtaUpdateManager.isUpdating());
@@ -8767,10 +9036,13 @@ public class TurzxMonitorMain {
         return "";
     }
 
+    private static final int CONFIG_REV = 2;
+
     public static MonitorConfig loadMonitorConfig(File file) {
         MonitorConfig cfg = new MonitorConfig();
         if (file == null || !file.isFile()) return cfg;
         BufferedReader br = null;
+        int configRev = 1;
         try {
             br = new BufferedReader(new InputStreamReader(new FileInputStream(file), UTF8));
             String line;
@@ -8786,7 +9058,8 @@ public class TurzxMonitorMain {
                 else if ("usb_push_enabled".equals(k)) cfg.usbPushEnabled = "1".equals(v) || "true".equalsIgnoreCase(v);
                 else if ("usb_brightness".equals(k)) cfg.usbBrightness = Math.max(0, Math.min(100, parseIntSafe(v, 85)));
                 else if ("usb_rotation".equals(k)) cfg.usbRotation = parseIntSafe(v, 270);
-                else if ("usb_jpeg_quality".equals(k)) cfg.usbJpegQuality = Math.max(50, Math.min(95, parseIntSafe(v, 85)));
+                else if ("usb_jpeg_quality".equals(k)) cfg.usbJpegQuality = Math.max(50, Math.min(95, parseIntSafe(v, 70)));
+                else if ("config_rev".equals(k)) configRev = parseIntSafe(v, 1);
                 else if ("usb_fps".equals(k)) cfg.usbFps = Math.max(2, Math.min(25, parseIntSafe(v, 12)));
                 else if ("comma_ip".equals(k)) cfg.commaIp = v;
                 else if ("auto_update".equals(k)) cfg.autoUpdate = !"0".equals(v) && !"false".equalsIgnoreCase(v);
@@ -8796,6 +9069,11 @@ public class TurzxMonitorMain {
         } catch (Throwable ignored) {
         } finally {
             if (br != null) { try { br.close(); } catch (Throwable ignored) {} }
+        }
+        // v1.4.0: old default quality 85 -> 70 (native encoder + less USB payload). Explicit values saved
+        // with config_rev>=2 are respected.
+        if (configRev < 2 && cfg.usbJpegQuality == 85) {
+            cfg.usbJpegQuality = 70;
         }
         return cfg;
     }
@@ -8813,7 +9091,8 @@ public class TurzxMonitorMain {
                     + "comma_ip=" + (cfg.commaIp != null ? cfg.commaIp : "") + "\n"
                     + "auto_update=" + (cfg.autoUpdate ? 1 : 0) + "\n"
                     + "x=" + cfg.x + "\n"
-                    + "y=" + cfg.y + "\n";
+                    + "y=" + cfg.y + "\n"
+                    + "config_rev=" + CONFIG_REV + "\n";
             writeBytesAtomic(file, content.getBytes(UTF8));
         } catch (Throwable ignored) {
         }
@@ -9020,6 +9299,21 @@ public class TurzxMonitorMain {
             return baos.toByteArray();
         } finally {
             fis.close();
+        }
+    }
+
+    /** tmp + rename without fsync: for frequently rewritten, non-critical state files (no eMMC flush stalls). */
+    private static void writeBytesNoSync(File target, byte[] data) throws Exception {
+        File tmp = new File(target.getAbsolutePath() + ".tmp");
+        FileOutputStream fos = new FileOutputStream(tmp);
+        try {
+            fos.write(data);
+        } finally {
+            fos.close();
+        }
+        if (!tmp.renameTo(target)) {
+            tmp.delete();
+            throw new IllegalStateException("rename failed: " + tmp + " -> " + target);
         }
     }
 
@@ -9554,6 +9848,37 @@ public class TurzxMonitorMain {
             }
         } catch (Exception e) {
             throw new RuntimeException("MonitorConfig / OTA self-test failed", e);
+        }
+
+        // v1.4.0: JPEG quality migration (legacy 85 -> 70 unless config_rev>=2) + native encoder asset/fallback
+        try {
+            File legacy = File.createTempFile("turzx_cfg_legacy", ".conf");
+            File current = File.createTempFile("turzx_cfg_rev2", ".conf");
+            legacy.deleteOnExit();
+            current.deleteOnExit();
+            writeBytesNoSync(legacy, "usb_jpeg_quality=85\nusb_fps=12\n".getBytes(UTF8));
+            assertTrue(loadMonitorConfig(legacy).usbJpegQuality == 70, "Expected legacy q85 config to migrate to 70");
+            writeBytesNoSync(current, "usb_jpeg_quality=85\nconfig_rev=2\n".getBytes(UTF8));
+            assertTrue(loadMonitorConfig(current).usbJpegQuality == 85, "Expected explicit q85 with config_rev=2 to be kept");
+            MonitorConfig rt = new MonitorConfig();
+            saveMonitorConfig(current, rt);
+            assertTrue(readAllTextQuick(current).contains("config_rev=2"), "Expected saved config to carry config_rev=2");
+
+            byte[] so = TurzxFrameRenderer.readJarAssetBytesPublic("libturzxjpeg_armv7.so");
+            assertTrue(so != null && so.length > 16384 && so[0] == 0x7F && so[1] == 'E' && so[2] == 'L' && so[3] == 'F'
+                            && so[4] == 1 && so[18] == 40,
+                    "Expected bundled ELF32/ARM libturzxjpeg_armv7.so asset");
+            // Host (x86) must refuse to load the ARM library and report Skia fallback instead of throwing
+            assertTrue(!NativeJpeg.ensureLoaded(), "Expected NativeJpeg to stay disabled on non-ARM host");
+            // Crash guard: consecutive unfinished attempts for the same .so hash; other hash / no marker resets
+            assertTrue(NativeJpeg.previousGuardAttempts(null, "abc123") == 0, "guard: no marker -> 0");
+            assertTrue(NativeJpeg.previousGuardAttempts("abc123:0", "abc123") == 1, "guard: one crash -> 1");
+            assertTrue(NativeJpeg.previousGuardAttempts("abc123:1\n", "abc123") == NativeJpeg.MAX_GUARD_ATTEMPTS,
+                    "guard: two crashes -> disable threshold");
+            assertTrue(NativeJpeg.previousGuardAttempts("old999:5", "abc123") == 0, "guard: other .so hash -> 0");
+            assertTrue(NativeJpeg.previousGuardAttempts("garbage", "abc123") == 0, "guard: malformed -> 0");
+        } catch (Exception e) {
+            throw new RuntimeException("v1.4.0 config migration / native encoder self-test failed", e);
         }
 
         System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + Chromium 1:1 HUD Assets + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");

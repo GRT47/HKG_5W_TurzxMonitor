@@ -25,7 +25,7 @@ PKG_STAGE_DIR = BUILD_DIR / "pkg_stage"
 USB_ROOT_DIR = BUILD_DIR / "usb_root"
 
 OUTER_ZIP_PATH = REPO_ROOT / "HKG_5W_TurzxMonitor_USB.zip"
-MONITOR_VERSION = "1.3.9"
+MONITOR_VERSION = "1.4.0"
 
 PUBLIC_SANS_FONTS = {
     "PublicSans-Bold.ttf": "https://fonts.gstatic.com/s/publicsans/v21/ijwGs572Xtc6ZYQws9YVwllKVG8qX1oyOymu8Z65ww.ttf",
@@ -411,6 +411,46 @@ def generate_hud_assets(assets_dir: Path) -> None:
         shutil.rmtree(user_data, ignore_errors=True)
 
 
+NATIVE_SO_ASSET = "libturzxjpeg_armv7.so"
+
+
+def stage_native_encoder(assets_dir: Path) -> None:
+    """Bundle libturzxjpeg.so (libjpeg-turbo NEON JNI) into jar assets.
+
+    Rebuilds with the NDK when available (set TURZX_SKIP_NATIVE_BUILD=1 to force the prebuilt),
+    otherwise uses the committed native/prebuilt/armeabi-v7a/libturzxjpeg.so.
+    """
+    import sys
+
+    sys.path.insert(0, str(BASE_DIR / "native"))
+    import build_native  # noqa: E402
+
+    so_path = build_native.PREBUILT_SO
+    if os.environ.get("TURZX_SKIP_NATIVE_BUILD") != "1" and build_native.find_ndk() is not None:
+        so_path = build_native.build_native()
+    elif not so_path.is_file():
+        raise RuntimeError(f"No NDK found and prebuilt native encoder missing: {so_path}")
+    else:
+        print(f"Using prebuilt native encoder: {so_path}")
+    data = so_path.read_bytes()
+    if data[:4] != b"\x7fELF" or data[4] != 1 or data[18] != 40:
+        raise RuntimeError(f"{so_path} is not an ELF32 ARM shared object")
+    (assets_dir / NATIVE_SO_ASSET).write_bytes(data)
+
+
+def reuse_assets_from_ota(assets_dir: Path) -> None:
+    """TURZX_REUSE_OTA_ASSETS=1: take PNG layers + fonts from the current ota/turzxmonitor.b64 jar
+    instead of re-rendering them with Chromium (for build hosts without Edge/Chrome)."""
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    jar_bytes = base64.b64decode((REPO_ROOT / "ota" / "turzxmonitor.b64").read_bytes())
+    import io
+
+    with zipfile.ZipFile(io.BytesIO(jar_bytes)) as zf:
+        for name in zf.namelist():
+            if name.startswith("assets/") and not name.endswith("/") and not name.endswith(".so"):
+                (assets_dir / Path(name).name).write_bytes(zf.read(name))
+
+
 def build() -> None:
     if BUILD_DIR.exists():
         shutil.rmtree(BUILD_DIR)
@@ -433,7 +473,12 @@ def build() -> None:
         normalize_lf(BASE_DIR / rel)
 
     # 1b. Render 1:1 Chromium HUD layer PNGs + fetch Public Sans .ttf fonts
-    generate_hud_assets(ASSETS_DIR)
+    if os.environ.get("TURZX_REUSE_OTA_ASSETS") == "1":
+        reuse_assets_from_ota(ASSETS_DIR)
+    else:
+        generate_hud_assets(ASSETS_DIR)
+    # 1c. libjpeg-turbo NEON JNI encoder (.so) as jar asset — extracted at runtime by NativeJpeg
+    stage_native_encoder(ASSETS_DIR)
     classes_assets_dir = CLASSES_DIR / "assets"
     classes_assets_dir.mkdir(parents=True, exist_ok=True)
     for asset_file in sorted(ASSETS_DIR.iterdir()):

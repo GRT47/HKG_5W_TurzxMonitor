@@ -20,9 +20,26 @@ BOOT_ID_FILE="/data/local/tmp/hkg_turzxmonitor_boot.id"
 OTA_RELOAD_FILE="/data/local/tmp/hkg_turzxmonitor_ota_reload"
 LOG_FILE="/data/local/tmp/hkg_turzxmonitor.log"
 DEBUG_FILE="/data/local/tmp/hkg_turzxmonitor_debug.txt"
+USB_SYNC_REQ_FILE="/data/local/tmp/hkg_turzxmonitor_usbsync_req"
 MONITOR_PID=""
-SYNC_TICK=0
+
+# Crash backoff: restart delay grows 0 -> 10 -> 30 -> 60 -> 120 -> 300s while the Java process keeps
+# dying within STABLE_RUN_SECS of its start; a run longer than that resets the streak.
 CRASH_STREAK=0
+STABLE_RUN_SECS=120
+RESTART_PENDING=0
+NEXT_START_UP=0
+JAVA_START_UP=0
+
+# USB log sync happens only (a) on request (overlay button / web ?save=1 -> USB_SYNC_REQ_FILE) or
+# (b) once when a USB stick is newly mounted. Mounts appearing within USB_SETTLE_SECS of daemon start
+# or of a QuickBoot resume are treated as boot remounts, not insertions (no periodic/shutdown writes:
+# FAT32 sticks get corrupted by writes interrupted at ignition-off).
+USB_SETTLE_SECS=90
+USB_SETTLE_UNTIL=0
+LAST_USB_MNT=""
+LAST_WALL=""
+LAST_UP=""
 
 is_svc_pid_alive() {
     _pid="$1"
@@ -82,6 +99,31 @@ echo "$$" > "$NEMESIS_PID_FILE" 2>/dev/null
 log_info() {
     echo "[TurzxMonitor] $*"
     log -t HKGTurzxMonitor "$*" 2>/dev/null
+}
+
+uptime_s() {
+    _up=""
+    read _up _rest < /proc/uptime 2>/dev/null
+    _up="${_up%%.*}"
+    echo "${_up:-0}"
+}
+
+wall_s() {
+    if [ -x "/system/bin/busybox" ]; then
+        /system/bin/busybox date +%s 2>/dev/null
+    else
+        date +%s 2>/dev/null
+    fi
+}
+
+current_usb_mount() {
+    for usb_mnt in /storage/usb0 /mnt/media_rw/usb0 /storage/usb1 /mnt/usb0; do
+        if [ -d "$usb_mnt" ] && grep " $usb_mnt " /proc/mounts >/dev/null 2>&1; then
+            echo "$usb_mnt"
+            return 0
+        fi
+    done
+    return 1
 }
 
 is_turzx_usb_present() {
@@ -192,8 +234,8 @@ start_monitor_java() {
 }
 
 sync_logs_to_usb() {
-    for usb_mnt in /storage/usb0 /mnt/media_rw/usb0 /storage/usb1 /mnt/usb0; do
-        if [ -d "$usb_mnt" ] && grep " $usb_mnt " /proc/mounts >/dev/null 2>&1; then
+    for usb_mnt in "$1"; do
+        if [ -n "$usb_mnt" ] && [ -d "$usb_mnt" ] && grep " $usb_mnt " /proc/mounts >/dev/null 2>&1; then
             usb_log_dir="$usb_mnt/HKG_TurzxMonitor_Log"
             mkdir -p "$usb_log_dir" 2>/dev/null
             [ -f "$LOG_FILE" ] && cp -f "$LOG_FILE" "$usb_log_dir/hkg_turzxmonitor.log" 2>/dev/null
@@ -218,9 +260,75 @@ sync_logs_to_usb() {
     done
 }
 
+check_usb_log_sync() {
+    now_up="$(uptime_s)"
+    now_wall="$(wall_s)"
+    # QuickBoot resume (or a large clock step): wall clock moved far more than monotonic uptime.
+    if [ -n "$now_wall" ] && [ -n "$LAST_WALL" ] && [ -n "$LAST_UP" ]; then
+        clock_gap=$(( (now_wall - LAST_WALL) - (now_up - LAST_UP) ))
+        if [ "$clock_gap" -gt 30 ] || [ "$clock_gap" -lt -30 ]; then
+            USB_SETTLE_UNTIL=$((now_up + USB_SETTLE_SECS))
+            log_info "Resume/clock step detected (gap=${clock_gap}s); ignoring USB remounts for ${USB_SETTLE_SECS}s"
+        fi
+    fi
+    LAST_WALL="$now_wall"
+    LAST_UP="$now_up"
+
+    cur_mnt="$(current_usb_mount)"
+    if [ -f "$USB_SYNC_REQ_FILE" ]; then
+        rm -f "$USB_SYNC_REQ_FILE" 2>/dev/null
+        if [ -n "$cur_mnt" ]; then
+            log_info "USB log sync requested (button/web) -> $cur_mnt"
+            sync_logs_to_usb "$cur_mnt"
+        else
+            log_info "USB log sync requested but no USB storage mounted"
+        fi
+    elif [ -n "$cur_mnt" ] && [ "$cur_mnt" != "$LAST_USB_MNT" ]; then
+        if [ "$now_up" -ge "$USB_SETTLE_UNTIL" ]; then
+            log_info "USB storage inserted ($cur_mnt); syncing logs once"
+            sync_logs_to_usb "$cur_mnt"
+        else
+            log_info "USB storage mounted during boot/resume settle window ($cur_mnt); not syncing"
+        fi
+    fi
+    LAST_USB_MNT="$cur_mnt"
+}
+
+handle_java_exit() {
+    now_up="$(uptime_s)"
+    if [ "$RESTART_PENDING" = "0" ]; then
+        alive_for=$((now_up - JAVA_START_UP))
+        if [ "$alive_for" -ge "$STABLE_RUN_SECS" ]; then
+            CRASH_STREAK=0
+        fi
+        CRASH_STREAK=$((CRASH_STREAK + 1))
+        case "$CRASH_STREAK" in
+            1) RESTART_DELAY=0 ;;
+            2) RESTART_DELAY=10 ;;
+            3) RESTART_DELAY=30 ;;
+            4) RESTART_DELAY=60 ;;
+            5) RESTART_DELAY=120 ;;
+            *) RESTART_DELAY=300 ;;
+        esac
+        if [ "$CRASH_STREAK" -eq 2 ]; then
+            # Only once per crash streak: a stale/corrupt odex is a plausible cause of an immediate re-crash,
+            # but wiping on every restart forces a full dexopt each time.
+            log_info "Clearing turzxmonitor Dalvik cache (crash streak=$CRASH_STREAK)"
+            rm -f /data/dalvik-cache/*turzxmonitor.jar* /data/local/tmp/dalvik-cache/*turzxmonitor.jar* 2>/dev/null
+        fi
+        NEXT_START_UP=$((now_up + RESTART_DELAY))
+        RESTART_PENDING=1
+        log_info "Java process exited after ${alive_for}s (streak=$CRASH_STREAK); restarting in ${RESTART_DELAY}s"
+    fi
+    if [ "$now_up" -ge "$NEXT_START_UP" ]; then
+        RESTART_PENDING=0
+        start_monitor_java
+        JAVA_START_UP="$(uptime_s)"
+    fi
+}
+
 on_stop() {
     log_info "Service stopped via NEMESIS Manager"
-    sync_logs_to_usb
     rm -f "$SVC_PID_FILE" "$NEMESIS_PID_FILE" "$JAVA_PID_FILE" 2>/dev/null
     kill_monitor_java
     exit 0
@@ -247,7 +355,13 @@ wait $!
 
 nudge_usb_host_for_turzx
 start_monitor_java
-sync_logs_to_usb
+JAVA_START_UP="$(uptime_s)"
+
+# Baseline: a stick already mounted (or mounted during the settle window) is not an "insertion".
+LAST_USB_MNT="$(current_usb_mount)"
+LAST_UP="$(uptime_s)"
+LAST_WALL="$(wall_s)"
+USB_SETTLE_UNTIL=$((LAST_UP + USB_SETTLE_SECS))
 
 while true; do
     echo "$$" > "$SVC_PID_FILE" 2>/dev/null
@@ -267,19 +381,9 @@ while true; do
         exec /system/bin/sh "$INSTALL_DIR/svc/turzx-daemon.sh"
     fi
     if [ -z "$MONITOR_PID" ] || ! is_java_pid_alive "$MONITOR_PID"; then
-        CRASH_STREAK=$((CRASH_STREAK + 1))
-        if [ "$CRASH_STREAK" -ge 1 ]; then
-            rm -f /data/dalvik-cache/*turzxmonitor.jar* /data/local/tmp/dalvik-cache/*turzxmonitor.jar* 2>/dev/null
-        fi
-        start_monitor_java
-    else
-        CRASH_STREAK=0
+        handle_java_exit
     fi
-    SYNC_TICK=$((SYNC_TICK + 1))
-    if [ "$SYNC_TICK" -ge 6 ]; then
-        SYNC_TICK=0
-        sync_logs_to_usb
-    fi
+    check_usb_log_sync
     sleep 5 &
     wait $!
 done

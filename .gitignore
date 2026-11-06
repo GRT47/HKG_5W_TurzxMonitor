@@ -63,3 +63,6 @@ node_modules/
 *.patch
 telemetry_app_dump/
 dump_telemetry_apps/
+
+# Committed prebuilt native encoder (built by package_turzx_monitor/native/build_native.py)
+!package_turzx_monitor/native/prebuilt/**/*.so
