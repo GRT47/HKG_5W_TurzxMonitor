@@ -72,7 +72,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.4.0";
+    public static final String MONITOR_VERSION = "1.4.1";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";

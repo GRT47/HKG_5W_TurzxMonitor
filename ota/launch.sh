@@ -65,9 +65,14 @@ else
     echo "show" > "$CMD_FILE" 2>/dev/null
 fi
 
-if [ "$svc_alive" = "0" ] || [ "$java_alive" = "0" ]; then
-    rm -f /data/nemesis/pids/hkg.turzxmonitor+turzx-daemon.fails 2>/dev/null
-    /system/bin/sh "$INSTALL_DIR/svc/turzx-daemon.sh" </dev/null >>/data/local/tmp/hkg_turzxmonitor.log 2>&1 &
+if [ "$svc_alive" = "0" ]; then
+    # Start through NEMESIS svcmgr so it owns the daemon (restart + cold-boot autostart). A manual
+    # "service start" also re-enables a service svcmgr had marked failed.
+    if [ -x /system/xbin/nemesis ]; then
+        /system/xbin/nemesis service start hkg.turzxmonitor/hkg-turzxmonitor >/dev/null 2>&1
+    else
+        /system/bin/sh "$INSTALL_DIR/svc/turzx-daemon.sh" </dev/null >>/data/local/tmp/hkg_turzxmonitor.log 2>&1 &
+    fi
 fi
 
 exit 0

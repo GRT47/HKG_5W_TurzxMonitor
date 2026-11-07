@@ -39,7 +39,7 @@ done
 
 # Ensure NEMESIS svcmgr monitors turzx-daemon in 'restart' mode across Warm Boot / QuickBoot cycles
 mkdir -p /data/nemesis/pids 2>/dev/null
-rm -f /data/nemesis/pids/hkg.turzxmonitor+turzx-daemon.fails 2>/dev/null
+rm -f /data/nemesis/pids/hkg.turzxmonitor+turzx-daemon /data/nemesis/pids/hkg.turzxmonitor+turzx-daemon.fails 2>/dev/null
 if [ -f "/data/nemesis/services.db" ] && grep "hkg.turzxmonitor.*|background" /data/nemesis/services.db >/dev/null 2>&1; then
     if [ -x "/system/bin/busybox" ]; then
         /system/bin/busybox sed 's/\(hkg\.turzxmonitor[^|]*|[^|]*|[^|]*|[^|]*|\)background/\1restart/g' /data/nemesis/services.db > /data/nemesis/services.db.tmp 2>/dev/null
@@ -56,7 +56,7 @@ if [ -f "/data/nemesis/services.db" ] && grep "hkg.turzxmonitor.*|background" /d
 fi
 
 # Stop any running previous version so the newly installed version takes effect immediately
-for pid_file in /data/local/tmp/hkg_turzxmonitor_java.pid /data/local/tmp/hkg_turzxmonitor_svc.pid /data/nemesis/pids/hkg.turzxmonitor+turzx-daemon; do
+for pid_file in /data/local/tmp/hkg_turzxmonitor_java.pid /data/local/tmp/hkg_turzxmonitor_svc.pid; do
     if [ -f "$pid_file" ]; then
         old_pid="$(cat "$pid_file" 2>/dev/null)"
         if [ -n "$old_pid" ]; then
@@ -69,9 +69,10 @@ done
 rm -f /data/local/tmp/hkg_turzxmonitor_svc.pid /data/local/tmp/hkg_turzxmonitor_java.pid /data/local/tmp/hkg_turzxmonitor_ota_reload 2>/dev/null
 sync
 
-# Show control/preview overlay immediately after installation
+# Show control/preview overlay immediately after installation.
+# The daemon itself is started by NEMESIS (svcmgr) right after this hook returns; starting a copy here
+# made the svcmgr copy exit as a duplicate 5 times -> service marked failed -> no cold-boot autostart.
 echo "show" > /data/local/tmp/hkg_turzxmonitor_cmd 2>/dev/null
-/system/bin/sh "$INSTALL_DIR/svc/turzx-daemon.sh" </dev/null >>/data/local/tmp/hkg_turzxmonitor.log 2>&1 &
 
 exit 0
 

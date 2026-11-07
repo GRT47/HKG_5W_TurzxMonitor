@@ -13,8 +13,14 @@ fi
 mkdir -p /data/dalvik-cache 2>/dev/null
 
 SVC_PID_FILE="/data/local/tmp/hkg_turzxmonitor_svc.pid"
-NEMESIS_PID_FILE="/data/nemesis/pids/hkg.turzxmonitor+turzx-daemon"
-NEMESIS_FAILS_FILE="/data/nemesis/pids/hkg.turzxmonitor+turzx-daemon.fails"
+# NEMESIS svcmgr owns this service as "<package-id>/<service name>" (NEMESIS.data [service.0] name=).
+# Its pidfile is /data/nemesis/pids/<qname with / -> +>, written by svcmgr only (pid starttime boot-token).
+# Never write it from here, and never run a second copy outside svcmgr: an instance that exits because
+# another copy is alive counts as a crash, and after 5 of them svcmgr marks the service failed and skips
+# it on every later cold boot.
+NEMESIS_QNAME="hkg.turzxmonitor/hkg-turzxmonitor"
+SVCMGR_PID_FILE="/data/nemesis/pids/hkg.turzxmonitor+hkg-turzxmonitor"
+NEMESIS_CLI="/system/xbin/nemesis"
 JAVA_PID_FILE="/data/local/tmp/hkg_turzxmonitor_java.pid"
 BOOT_ID_FILE="/data/local/tmp/hkg_turzxmonitor_boot.id"
 OTA_RELOAD_FILE="/data/local/tmp/hkg_turzxmonitor_ota_reload"
@@ -52,7 +58,8 @@ is_java_pid_alive() {
 }
 
 mkdir -p /data/nemesis/pids 2>/dev/null
-rm -f "$NEMESIS_FAILS_FILE" "$INSTALL_DIR/bin/"*.tmp "$INSTALL_DIR/svc/"*.tmp "$INSTALL_DIR/config/"*.tmp 2>/dev/null
+rm -f /data/nemesis/pids/hkg.turzxmonitor+turzx-daemon /data/nemesis/pids/hkg.turzxmonitor+turzx-daemon.fails 2>/dev/null
+rm -f "$INSTALL_DIR/bin/"*.tmp "$INSTALL_DIR/svc/"*.tmp "$INSTALL_DIR/config/"*.tmp 2>/dev/null
 
 # Ensure .bak always mirrors a valid non-empty turzxmonitor.jar on startup / OTA reload
 if [ -s "$INSTALL_DIR/bin/turzxmonitor.jar" ]; then
@@ -85,16 +92,70 @@ if [ -f "/data/nemesis/services.db" ] && grep "hkg.turzxmonitor.*|background" /d
     fi
 fi
 
+svcmgr_pid() {
+    _sp=""
+    if [ -f "$SVCMGR_PID_FILE" ]; then
+        read _sp _rest < "$SVCMGR_PID_FILE"
+    fi
+    echo "$_sp"
+}
+
+# svcmgr writes its pidfile right after fork(), so give it a moment before deciding.
+is_svcmgr_managed() {
+    _tries=0
+    while [ "$_tries" -lt 10 ]; do
+        [ "$(svcmgr_pid)" = "$$" ] && return 0
+        _tries=$((_tries + 1))
+        if [ -x "/system/bin/busybox" ]; then
+            /system/bin/busybox usleep 200000 2>/dev/null || sleep 1
+        else
+            sleep 1
+        fi
+    done
+    return 1
+}
+
+if is_svcmgr_managed; then
+    MANAGED=1
+else
+    MANAGED=0
+fi
+
 if [ -f "$SVC_PID_FILE" ]; then
     old_svc_pid="$(cat "$SVC_PID_FILE" 2>/dev/null)"
     if [ -n "$old_svc_pid" ] && [ "$old_svc_pid" != "$$" ] && is_svc_pid_alive "$old_svc_pid"; then
-        echo "$old_svc_pid" > "$NEMESIS_PID_FILE" 2>/dev/null
-        exit 0
+        if [ "$MANAGED" = "1" ]; then
+            # A copy started outside svcmgr (older launch.sh/post.sh). Take over instead of exiting, which
+            # svcmgr would count as a crash. SIGKILL so its TERM trap does not stop the Java process;
+            # the Java pid file lets this instance adopt it without a HUD restart.
+            kill -9 "$old_svc_pid" 2>/dev/null
+            echo "[TurzxMonitor] Took over from unmanaged daemon pid=$old_svc_pid"
+        else
+            exit 0
+        fi
     fi
     rm -f "$SVC_PID_FILE" 2>/dev/null
 fi
+
+# Started outside svcmgr (launch.sh fallback, OTA reload of an old unmanaged copy): hand over to svcmgr.
+# A manual "service start" also gives a service that svcmgr marked failed one more run, and svcmgr clears
+# the failure count once it stays up for 10s, so cold-boot autostart recovers by itself.
+if [ "$MANAGED" = "0" ] && [ -x "$NEMESIS_CLI" ]; then
+    echo "[TurzxMonitor] Not started by NEMESIS svcmgr (pid=$$); handing over to $NEMESIS_QNAME"
+    "$NEMESIS_CLI" service start "$NEMESIS_QNAME" >/dev/null 2>&1
+    _wait=0
+    while [ "$_wait" -lt 10 ]; do
+        _mp="$(svcmgr_pid)"
+        if [ -n "$_mp" ] && [ "$_mp" != "$$" ] && is_svc_pid_alive "$_mp"; then
+            echo "[TurzxMonitor] Handed over to svcmgr-managed pid=$_mp"
+            exit 0
+        fi
+        _wait=$((_wait + 1))
+        sleep 1
+    done
+    echo "[TurzxMonitor] svcmgr handover failed; continuing unmanaged"
+fi
 echo "$$" > "$SVC_PID_FILE" 2>/dev/null
-echo "$$" > "$NEMESIS_PID_FILE" 2>/dev/null
 
 log_info() {
     echo "[TurzxMonitor] $*"
@@ -329,7 +390,7 @@ handle_java_exit() {
 
 on_stop() {
     log_info "Service stopped via NEMESIS Manager"
-    rm -f "$SVC_PID_FILE" "$NEMESIS_PID_FILE" "$JAVA_PID_FILE" 2>/dev/null
+    rm -f "$SVC_PID_FILE" "$JAVA_PID_FILE" 2>/dev/null
     kill_monitor_java
     exit 0
 }
@@ -365,8 +426,6 @@ USB_SETTLE_UNTIL=$((LAST_UP + USB_SETTLE_SECS))
 
 while true; do
     echo "$$" > "$SVC_PID_FILE" 2>/dev/null
-    echo "$$" > "$NEMESIS_PID_FILE" 2>/dev/null
-    rm -f "$NEMESIS_FAILS_FILE" 2>/dev/null
     chmod 666 /dev/bus/usb/*/* 2>/dev/null
     if [ -f "$OTA_RELOAD_FILE" ]; then
         rm -f "$OTA_RELOAD_FILE" 2>/dev/null

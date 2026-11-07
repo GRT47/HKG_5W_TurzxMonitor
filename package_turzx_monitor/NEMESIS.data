@@ -1,5 +1,5 @@
 [nemesis]
-version=1.4.0
+version=1.4.1
 id=hkg.turzxmonitor
 name=HKG 5W TURZX 9.2 Cluster
 types=application,service
