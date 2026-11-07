@@ -30,6 +30,7 @@ import java.security.cert.X509Certificate;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -72,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.4.1";
+    public static final String MONITOR_VERSION = "1.4.2";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -3092,6 +3093,27 @@ public class TurzxMonitorMain {
         private static volatile int lastClusterMediaMode = -1;
         private static volatile long lastMediaPosUpdateMs = 0L;
 
+        // ---- v1.4.2 media source / playback-time bookkeeping ----
+        private static volatile String modeSourceName = "";          // ModeManager-derived current source
+        private static volatile long modeSourceMs = 0L;
+        private static String lastExternalPropSig = null;             // persist.sys.hkg.media.* (null = no baseline yet)
+        private static long lastMediaStateFileMtime = -1L;           // /data/local/tmp/hkg_media_state.txt
+        private static final Map<String, Boolean> broadcastUnitMsBySource = new HashMap<String, Boolean>();
+        private static volatile long lastPosAdvanceMs = 0L;          // last time an external position moved forward
+        private static volatile long lastExternalPosMs = 0L;         // last external position sample time
+        private static volatile int lastExternalPosSec = -1;
+        private static volatile boolean periodicPosReporter = false; // current source reports position >= every 2.5s
+        private static volatile int periodicAdvanceStreak = 0;       // consecutive advancing samples <= 2.5s apart
+        private static volatile boolean playbackStalled = false;
+        private static volatile long clusterRawPlaytime = -1L;
+        private static volatile Boolean clusterUnitMs = null;
+        private static volatile int clusterLastSec = -1;
+        private static volatile int clusterFirstSecThisTrack = -1;
+        private static volatile boolean clusterAdvancedThisTrack = false;
+        private static volatile String clusterPlaytimeInfo = "none";
+        static final long STALL_MS = 3500L;
+        static final long EXTRAPOLATE_NO_DURATION_MAX_MS = 20L * 60L * 1000L;
+
         private static volatile Object pgsService = null;
         private static volatile Method pgsGetGearPMethod = null;
         private static volatile Method pgsIsGearNMethod = null;
@@ -3268,6 +3290,92 @@ public class TurzxMonitorMain {
 
         public static void onMediaWidgetBroadcast(Object intentObj) {
             onMediaWidgetBroadcast(intentObj, null);
+        }
+
+        /** Single entry point for every external playback-position sample (broadcast, RCD, logcat, ClusterService). */
+        static void notePositionUpdate(TelemetrySnapshot target, int sec) {
+            if (target == null || sec < 0 || sec >= 36000) return;
+            target.mediaPositionSec = sec;
+            if (target != liveSnapshot) return;
+            long now = System.currentTimeMillis();
+            lastMediaPosUpdateMs = now;
+            boolean advancing = lastExternalPosSec >= 0 && sec > lastExternalPosSec && (sec - lastExternalPosSec) <= 5;
+            if (advancing && lastExternalPosMs > 0L && (now - lastExternalPosMs) <= 2500L) {
+                // Needs 2 consecutive advancing samples: a metadata+time burst at track start is not "periodic"
+                if (++periodicAdvanceStreak >= 2) periodicPosReporter = true;
+            } else if (lastExternalPosMs > 0L && (now - lastExternalPosMs) > 2500L) {
+                periodicAdvanceStreak = 0;
+            }
+            if (advancing) {
+                lastPosAdvanceMs = now;
+                if (playbackStalled) {
+                    playbackStalled = false;
+                    target.mediaPlaying = true;
+                }
+            } else if (lastExternalPosSec < 0 || sec != lastExternalPosSec) {
+                lastPosAdvanceMs = now; // first sample or seek: restart the stall window
+            }
+            lastExternalPosSec = sec;
+            lastExternalPosMs = now;
+        }
+
+        /** New track: position 0, duration unknown, restart stall / ClusterService tracking. */
+        static void resetPlaybackTimeForNewTrack(TelemetrySnapshot target) {
+            if (target == null) return;
+            target.mediaPositionSec = 0;
+            target.mediaDurationSec = 0;
+            if (target != liveSnapshot) return;
+            long now = System.currentTimeMillis();
+            lastMediaPosUpdateMs = now;
+            lastPosAdvanceMs = now;
+            lastExternalPosMs = 0L;
+            lastExternalPosSec = -1;
+            periodicPosReporter = false;
+            periodicAdvanceStreak = 0;
+            playbackStalled = false;
+            clusterFirstSecThisTrack = -1;
+            clusterLastSec = -1;
+            clusterAdvancedThisTrack = false;
+        }
+
+        /** ModeManager says a non-Bluetooth source is active (fresh reading). */
+        static boolean isNonBtModeSourceActive() {
+            String m = modeSourceName;
+            return m != null && !m.isEmpty() && !"Bluetooth Audio".equals(m)
+                    && (System.currentTimeMillis() - modeSourceMs) < 5000L;
+        }
+
+        /**
+         * getLastPlaytime() unit is not documented: values > 36000 can only be ms; otherwise pick the reading
+         * (seconds vs ms) closest to the current position estimate, unless the unit was already locked.
+         */
+        static int chooseClusterPlaytimeSec(long raw, int estimateSec, Boolean unitMs) {
+            if (raw < 0L) return -1;
+            if (Boolean.TRUE.equals(unitMs) || raw > 36000L) return (int) (raw / 1000L);
+            if (Boolean.FALSE.equals(unitMs)) return (int) raw;
+            int asSec = (int) raw;
+            int asMsSec = (int) (raw / 1000L);
+            int est = Math.max(0, estimateSec);
+            return (Math.abs(asSec - est) <= Math.abs(asMsSec - est)) ? asSec : asMsSec;
+        }
+
+        /** Broadcast time unit: a duration > 36000 can only be ms; learned per source for time-only updates. Default ms. */
+        static boolean resolveBroadcastUnitMs(String sourceKey, long totRaw) {
+            synchronized (broadcastUnitMsBySource) {
+                if (totRaw > 0L) {
+                    boolean ms = totRaw > 36000L;
+                    broadcastUnitMsBySource.put(sourceKey, Boolean.valueOf(ms));
+                    return ms;
+                }
+                Boolean learned = broadcastUnitMsBySource.get(sourceKey);
+                return learned == null || learned.booleanValue();
+            }
+        }
+
+        /** Disk artwork must have been written for the current track, not left over from the previous one. */
+        static boolean isDiskArtFreshForTrack(long mtimeMs, long trackChangeMs, long nowMs) {
+            if (trackChangeMs > 0L) return mtimeMs >= trackChangeMs - 3000L;
+            return (nowMs - mtimeMs) < 600000L;
         }
 
         public static void onMediaWidgetBroadcast(Object intentObj, Object explicitExtrasObj) {
@@ -3542,17 +3650,23 @@ public class TurzxMonitorMain {
                     }
                 }
 
-                long totMs = readBundleLongAny(bundleObj, getLong, getObj,
+                long totRaw = readBundleLongAny(bundleObj, getLong, getObj,
                         "audio_total_time", "LENGTH", "duration", "total_time");
-                if (totMs > 0L && totMs < 36000000L) {
-                    target.mediaDurationSec = (int) (totMs >= 500L ? (totMs / 1000L) : totMs);
+                // Position 0 is a real value, but only trusted on time-only updates (metadata bundles often carry a
+                // stale 0); a new track already resets the position to 0 in onMediaTrackUpdated().
+                long curRaw = isTimeOnly
+                        ? readBundleLongAnyAllowZero(bundleObj, getLong, getObj,
+                                "audio_current_time", "POSITION", "position", "current_time", "play_time")
+                        : readBundleLongAny(bundleObj, getLong, getObj,
+                                "audio_current_time", "POSITION", "position", "current_time", "play_time");
+                String unitKey = !src.isEmpty() ? src : (target.mediaSource != null ? target.mediaSource : "");
+                boolean unitMs = resolveBroadcastUnitMs(unitKey, totRaw);
+                if (totRaw > 0L && totRaw < 36000000L) {
+                    int durSec = (int) (unitMs ? (totRaw / 1000L) : totRaw);
+                    if (durSec > 0 && durSec < 36000) target.mediaDurationSec = durSec;
                 }
-
-                long curMs = readBundleLongAny(bundleObj, getLong, getObj,
-                        "audio_current_time", "POSITION", "position", "current_time", "play_time");
-                if (curMs >= 0L && curMs < 36000000L) {
-                    target.mediaPositionSec = (int) (curMs >= 500L || totMs >= 500L ? (curMs / 1000L) : curMs);
-                    lastMediaPosUpdateMs = System.currentTimeMillis();
+                if (curRaw >= 0L && curRaw < 36000000L) {
+                    notePositionUpdate(target, (int) (unitMs ? (curRaw / 1000L) : curRaw));
                 }
                 return true;
             } catch (Throwable ignored) {
@@ -3660,9 +3774,9 @@ public class TurzxMonitorMain {
             synchronized (liveSnapshot) {
                 // MediaFocusControl / RemoteControlClient: PLAYSTATE_PLAYING = 3
                 liveSnapshot.mediaPlaying = (state == 3);
+                if (state == 3) playbackStalled = false;
                 if (currentPosMs >= 0L && currentPosMs < 36000000L) {
-                    liveSnapshot.mediaPositionSec = (int) (currentPosMs / 1000L);
-                    lastMediaPosUpdateMs = System.currentTimeMillis();
+                    notePositionUpdate(liveSnapshot, (int) (currentPosMs / 1000L)); // RemoteControlClient API: ms
                 }
             }
         }
@@ -3689,6 +3803,30 @@ public class TurzxMonitorMain {
                 }
             }
             return "";
+        }
+
+        /** Like readBundleLongAny but 0 is a valid value (playback position at track start); -1 = absent. */
+        private static long readBundleLongAnyAllowZero(Object bundleObj, Method getLong, Method getObj, String... keys) {
+            for (int i = 0; i < keys.length; i++) {
+                String k = keys[i];
+                try {
+                    if (getObj != null) {
+                        Object o = getObj.invoke(bundleObj, k);
+                        if (o instanceof Number) {
+                            long v = ((Number) o).longValue();
+                            if (v >= 0L) return v;
+                        } else if (o != null) {
+                            long v = Long.parseLong(String.valueOf(o).trim());
+                            if (v >= 0L) return v;
+                        }
+                    } else if (getLong != null) {
+                        long v = ((Long) getLong.invoke(bundleObj, k, Long.valueOf(-1L))).longValue();
+                        if (v >= 0L) return v;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            return -1L;
         }
 
         private static long readBundleLongAny(Object bundleObj, Method getLong, Method getObj, String... keys) {
@@ -3765,7 +3903,7 @@ public class TurzxMonitorMain {
                         liveSnapshot.mediaPlaying = true;
                     }
                     if (durMs > 0L && durMs < 36000000L) {
-                        liveSnapshot.mediaDurationSec = (int) (durMs > 36000L ? (durMs / 1000L) : durMs);
+                        liveSnapshot.mediaDurationSec = (int) (durMs / 1000L); // METADATA_KEY_DURATION: ms
                     }
                     if (liveSnapshot.albumArtBitmap == null) {
                         AlbumArtResolver.requestOnlineLookupIfNeeded(liveSnapshot);
@@ -3842,9 +3980,19 @@ public class TurzxMonitorMain {
                 pollCarrotBridgeAndArpLocked();
 
                 long nowMs = System.currentTimeMillis();
-                if (liveSnapshot.albumArtBitmap == null) {
-                    long reqInterval = (trackWidgetReqCount < 4) ? 2500L : 15000L;
-                    if (nowMs - lastMediaWidgetReqMs >= reqInterval) {
+                String curTitle = liveSnapshot.mediaTitle != null ? liveSnapshot.mediaTitle : "";
+                boolean waitingForMedia = curTitle.isEmpty() || "미디어 재생 대기 중".equals(curTitle);
+                if (waitingForMedia) {
+                    // Discovery heartbeat: ask media apps to re-announce what is playing
+                    if (nowMs - lastMediaWidgetReqMs > 15000L) {
+                        requestMediaWidgetUpdate();
+                    }
+                } else if (liveSnapshot.albumArtBitmap == null) {
+                    // Artwork re-requests: at most 4 right after a track change (counter reset in onMediaTrackUpdated),
+                    // never for sources that have no artwork (radio/DMB/...)
+                    if (trackWidgetReqCount < 4
+                            && isLookupEligibleTrack(liveSnapshot.mediaSource, curTitle)
+                            && nowMs - lastMediaWidgetReqMs >= 2500L) {
                         trackWidgetReqCount++;
                         requestMediaWidgetUpdate();
                     }
@@ -3855,9 +4003,6 @@ public class TurzxMonitorMain {
                     if (liveSnapshot.albumArtBitmap == null) {
                         AlbumArtResolver.requestOnlineLookupIfNeeded(liveSnapshot);
                     }
-                } else if ("미디어 재생 대기 중".equals(liveSnapshot.mediaTitle)
-                        && (nowMs - lastMediaWidgetReqMs > 15000L)) {
-                    requestMediaWidgetUpdate();
                 }
 
                 if (liveSnapshot.carrotConnected && (System.currentTimeMillis() - lastCarrotRxMs > 8000L)) {
@@ -4655,11 +4800,25 @@ public class TurzxMonitorMain {
         }
 
         private static void pollMediaNowPlayingLocked() {
+            long now = System.currentTimeMillis();
             if (modeService != null && modeGetCurrentMethod != null) {
                 try {
                     int mode = ((Integer) modeGetCurrentMethod.invoke(modeService)).intValue();
                     String modeSrc = mapModeManagerModeToSourceName(mode);
                     if (!modeSrc.isEmpty()) {
+                        if (!modeSrc.equals(modeSourceName)) {
+                            // Source switch: the ClusterService mode learned from logcat belongs to the old source
+                            lastClusterMediaMode = -1;
+                            clusterUnitMs = null;
+                            clusterLastSec = -1;
+                            clusterFirstSecThisTrack = -1;
+                            clusterAdvancedThisTrack = false;
+                            periodicPosReporter = false;
+                            periodicAdvanceStreak = 0;
+                            playbackStalled = false;
+                        }
+                        modeSourceName = modeSrc;
+                        modeSourceMs = now;
                         liveSnapshot.mediaSource = modeSrc;
                     }
                 } catch (Throwable t) {
@@ -4673,55 +4832,94 @@ public class TurzxMonitorMain {
                 pollStickyMediaIntentLocked("com.hkmc.av.app.radioservice.statuschanged");
             }
 
-            String propTitle = getSystemProperty("persist.sys.hkg.media.title", "");
-            String propArtist = getSystemProperty("persist.sys.hkg.media.artist", "");
-            String propAlbum = getSystemProperty("persist.sys.hkg.media.album", "");
-            String propSource = getSystemProperty("persist.sys.hkg.media.source", "");
-            if (!propSource.isEmpty()) liveSnapshot.mediaSource = propSource;
-            if (!propTitle.isEmpty() || !propArtist.isEmpty() || !propAlbum.isEmpty()) {
-                onMediaTrackUpdated(liveSnapshot, propTitle, propArtist, propAlbum);
-            }
+            // External injection channels (no writer in this package). Applied only when they CHANGE: persist.* props
+            // survive reboot, and re-applying a stale value every frame used to override live broadcasts.
+            if (pollTick % 4 == 0) {
+                String propTitle = getSystemProperty("persist.sys.hkg.media.title", "");
+                String propArtist = getSystemProperty("persist.sys.hkg.media.artist", "");
+                String propAlbum = getSystemProperty("persist.sys.hkg.media.album", "");
+                String propSource = getSystemProperty("persist.sys.hkg.media.source", "");
+                String sig = propSource + "\u0001" + propTitle + "\u0001" + propArtist + "\u0001" + propAlbum;
+                if (lastExternalPropSig == null) {
+                    lastExternalPropSig = sig; // baseline: whatever survived the last reboot is not current
+                } else if (!sig.equals(lastExternalPropSig)) {
+                    lastExternalPropSig = sig;
+                    if (!propSource.isEmpty()) liveSnapshot.mediaSource = propSource;
+                    if (!propTitle.isEmpty() || !propArtist.isEmpty() || !propAlbum.isEmpty()) {
+                        onMediaTrackUpdated(liveSnapshot, propTitle, propArtist, propAlbum);
+                    }
+                }
 
-            File mediaFile = new File("/data/local/tmp/hkg_media_state.txt");
-            if (mediaFile.isFile()) {
-                String line = readFirstLineQuick(mediaFile);
-                if (!line.isEmpty() && line.contains("|")) {
-                    String[] parts = line.split("\\|");
-                    if (parts.length >= 1 && !parts[0].trim().isEmpty()) liveSnapshot.mediaSource = parts[0].trim();
-                    String fTitle = parts.length >= 2 ? parts[1].trim() : "";
-                    String fArtist = parts.length >= 3 ? parts[2].trim() : "";
-                    String fAlbum = parts.length >= 4 ? parts[3].trim() : "";
-                    onMediaTrackUpdated(liveSnapshot, fTitle, fArtist, fAlbum);
+                File mediaFile = new File("/data/local/tmp/hkg_media_state.txt");
+                long mtime = mediaFile.isFile() ? mediaFile.lastModified() : -1L;
+                if (mtime > 0L && mtime != lastMediaStateFileMtime && (now - mtime) < 60000L) {
+                    lastMediaStateFileMtime = mtime;
+                    String line = readFirstLineQuick(mediaFile);
+                    if (!line.isEmpty() && line.contains("|")) {
+                        String[] parts = line.split("\\|");
+                        if (parts.length >= 1 && !parts[0].trim().isEmpty()) liveSnapshot.mediaSource = parts[0].trim();
+                        String fTitle = parts.length >= 2 ? parts[1].trim() : "";
+                        String fArtist = parts.length >= 3 ? parts[2].trim() : "";
+                        String fAlbum = parts.length >= 4 ? parts[3].trim() : "";
+                        onMediaTrackUpdated(liveSnapshot, fTitle, fArtist, fAlbum);
+                    }
+                } else if (mtime > 0L) {
+                    lastMediaStateFileMtime = mtime;
                 }
             }
 
-            // Query ClusterService.getLastPlaytime(mode) if available (returns long in automotive.odex)
+            // ClusterService.getLastPlaytime(mode): only for the mode of the currently active source, and only once it
+            // has been seen moving for this track (a frozen value from another/stale mode must not pin the position).
             if (clusterService != null && clusterGetLastPlaytimeMethod != null && lastClusterMediaMode >= 0) {
-                try {
-                    Object rawPlay = clusterGetLastPlaytimeMethod.invoke(clusterService, Integer.valueOf(lastClusterMediaMode));
-                    if (rawPlay instanceof Number) {
-                        long playVal = ((Number) rawPlay).longValue();
-                        if (playVal >= 0L && playVal < 36000000L) {
-                            int playSec = (int) (playVal > 36000L ? (playVal / 1000L) : playVal);
-                            if (playSec >= 0 && playSec < 36000) {
-                                liveSnapshot.mediaPositionSec = playSec;
-                                lastMediaPosUpdateMs = System.currentTimeMillis();
+                String clusterSrc = mapClusterModeToSourceName(lastClusterMediaMode);
+                boolean modeKnown = !modeSourceName.isEmpty() && (now - modeSourceMs) < 5000L;
+                if (!modeKnown || clusterSrc.equals(modeSourceName)) {
+                    try {
+                        Object rawPlay = clusterGetLastPlaytimeMethod.invoke(clusterService, Integer.valueOf(lastClusterMediaMode));
+                        if (rawPlay instanceof Number) {
+                            long raw = ((Number) rawPlay).longValue();
+                            clusterRawPlaytime = raw;
+                            if (raw > 36000L && raw < 36000000L) clusterUnitMs = Boolean.TRUE;
+                            int sec = chooseClusterPlaytimeSec(raw, liveSnapshot.mediaPositionSec, clusterUnitMs);
+                            clusterPlaytimeInfo = "mode=" + lastClusterMediaMode + " raw=" + raw + " -> " + sec + "s"
+                                    + " unitMs=" + clusterUnitMs + " advanced=" + clusterAdvancedThisTrack;
+                            if (sec >= 0 && sec < 36000) {
+                                if (clusterFirstSecThisTrack < 0) {
+                                    clusterFirstSecThisTrack = sec;
+                                } else if (sec != clusterFirstSecThisTrack) {
+                                    clusterAdvancedThisTrack = true;
+                                }
+                                if (clusterAdvancedThisTrack && sec != clusterLastSec) {
+                                    notePositionUpdate(liveSnapshot, sec);
+                                }
+                                clusterLastSec = sec;
                             }
                         }
+                    } catch (Throwable ignored) {
                     }
-                } catch (Throwable ignored) {
+                } else {
+                    clusterPlaytimeInfo = "skipped: cluster mode " + lastClusterMediaMode + " (" + clusterSrc
+                            + ") != active " + modeSourceName;
                 }
-            } else if (liveSnapshot.mediaPlaying && lastMediaPosUpdateMs > 0L) {
-                long now = System.currentTimeMillis();
-                if (now - lastMediaPosUpdateMs >= 1000L) {
+            }
+
+            // Pause detection for sources that report position periodically: no forward movement for STALL_MS.
+            if (liveSnapshot.mediaPlaying && periodicPosReporter && lastPosAdvanceMs > 0L
+                    && (now - lastPosAdvanceMs) > STALL_MS) {
+                liveSnapshot.mediaPlaying = false;
+                playbackStalled = true;
+            }
+
+            // Local extrapolation between samples (and for sources that only report on track change).
+            if (liveSnapshot.mediaPlaying && !playbackStalled && lastMediaPosUpdateMs > 0L
+                    && (now - lastMediaPosUpdateMs) >= 1000L) {
+                boolean durKnown = liveSnapshot.mediaDurationSec > 0;
+                long sinceExternal = now - (lastExternalPosMs > 0L ? lastExternalPosMs : lastTrackChangeMs);
+                if (durKnown || sinceExternal < EXTRAPOLATE_NO_DURATION_MAX_MS) {
                     int deltaSec = (int) ((now - lastMediaPosUpdateMs) / 1000L);
                     lastMediaPosUpdateMs += deltaSec * 1000L;
                     int nextPos = liveSnapshot.mediaPositionSec + deltaSec;
-                    if (liveSnapshot.mediaDurationSec > 0) {
-                        liveSnapshot.mediaPositionSec = Math.min(liveSnapshot.mediaDurationSec, nextPos);
-                    } else {
-                        liveSnapshot.mediaPositionSec = nextPos;
-                    }
+                    liveSnapshot.mediaPositionSec = durKnown ? Math.min(liveSnapshot.mediaDurationSec, nextPos) : nextPos;
                 }
             }
         }
@@ -5941,6 +6139,18 @@ public class TurzxMonitorMain {
                         .append(" (listenerReg=").append(TelemetryCollector.hscanListenerRegistered).append(")\n");
                 sb.append("  clusterService      : ").append(TelemetryCollector.clusterService != null ? TelemetryCollector.clusterService.getClass().getName() : "null")
                         .append(" (lastMode=").append(TelemetryCollector.lastClusterMediaMode).append(")\n");
+                TelemetrySnapshot mt = TelemetryCollector.getLatestSnapshot();
+                sb.append("  mediaTiming         : pos=").append(mt.mediaPositionSec).append("s dur=").append(mt.mediaDurationSec)
+                        .append("s playing=").append(mt.mediaPlaying)
+                        .append(" periodic=").append(TelemetryCollector.periodicPosReporter)
+                        .append(" stalled=").append(TelemetryCollector.playbackStalled)
+                        .append(" lastExtPos=").append(TelemetryCollector.lastExternalPosSec)
+                        .append(" modeSource=").append(TelemetryCollector.modeSourceName).append("\n");
+                sb.append("  clusterPlaytime     : ").append(TelemetryCollector.clusterPlaytimeInfo).append("\n");
+                synchronized (TelemetryCollector.broadcastUnitMsBySource) {
+                    sb.append("  broadcastUnitMs     : ").append(TelemetryCollector.broadcastUnitMsBySource).append("\n");
+                }
+                sb.append("  albumArt            : ").append(mt.albumArtSource).append("\n");
                 sb.append("  powerService        : ").append(TelemetryCollector.powerService != null ? TelemetryCollector.powerService.getClass().getName() : "null")
                         .append(" (").append(TelemetryCollector.lastRawPowerStateInfo).append(")\n");
                 sb.append("  modeService         : ").append(TelemetryCollector.modeService != null ? TelemetryCollector.modeService.getClass().getName() : "null").append("\n");
@@ -7925,6 +8135,11 @@ public class TurzxMonitorMain {
                 TelemetryCollector.requestMediaWidgetUpdateAsync();
                 return true;
             }
+            if (!line.contains("AdvancedLauncher") && target == TelemetryCollector.liveSnapshot
+                    && TelemetryCollector.isNonBtModeSourceActive()) {
+                // Background AVRCP / BT player logs while CarPlay, USB, radio ... is the active source
+                return false;
+            }
 
             if (line.contains("getImageResponseCallback")
                     || line.contains("onGetImageRsp")
@@ -7977,8 +8192,7 @@ public class TurzxMonitorMain {
                     onMediaTrackUpdated(target, title, artist, album);
                 }
                 if (playMs >= 0L && playMs < 36000000L) {
-                    target.mediaPositionSec = (int) (playMs / 1000L);
-                    TelemetryCollector.lastMediaPosUpdateMs = System.currentTimeMillis();
+                    TelemetryCollector.notePositionUpdate(target, (int) (playMs / 1000L)); // mPlayingTime: ms
                     updated = true;
                 }
                 if (updated && target == TelemetryCollector.liveSnapshot && target.albumArtBitmap == null) {
@@ -8156,8 +8370,7 @@ public class TurzxMonitorMain {
                     target.mediaPlaying = true;
                 }
                 if (sec >= 0 && sec < 36000) {
-                    target.mediaPositionSec = sec;
-                    TelemetryCollector.lastMediaPosUpdateMs = System.currentTimeMillis();
+                    TelemetryCollector.notePositionUpdate(target, sec); // ClusterService "seconds =": s
                 }
                 if (target == TelemetryCollector.liveSnapshot && target.albumArtBitmap == null) {
                     AlbumArtResolver.requestOnlineLookupIfNeeded(target);
@@ -8183,8 +8396,7 @@ public class TurzxMonitorMain {
                     target.mediaPlaying = true;
                 }
                 if (sec >= 0 && sec < 36000) {
-                    target.mediaPositionSec = sec;
-                    TelemetryCollector.lastMediaPosUpdateMs = System.currentTimeMillis();
+                    TelemetryCollector.notePositionUpdate(target, sec); // ClusterService "seconds =": s
                 }
                 return mode;
             } else if (line.contains("updateClusterInfo")) {
@@ -8208,8 +8420,7 @@ public class TurzxMonitorMain {
                     }
                 }
                 if (sec >= 0 && sec < 36000) {
-                    target.mediaPositionSec = sec;
-                    TelemetryCollector.lastMediaPosUpdateMs = System.currentTimeMillis();
+                    TelemetryCollector.notePositionUpdate(target, sec); // ClusterService "seconds =": s
                 }
                 return mode;
             } else if (line.contains("updateClusterRadioInfo")) {
@@ -8378,6 +8589,9 @@ public class TurzxMonitorMain {
         }
 
         String trackKey = AlbumArtResolver.buildTrackCacheKey(target.mediaTitle, target.mediaArtist);
+        if (titleChanged) {
+            TelemetryCollector.resetPlaybackTimeForNewTrack(target);
+        }
         if (titleChanged && !prevTitle.isEmpty()) {
             Object cached = AlbumArtResolver.getCachedArt(target.mediaTitle, target.mediaArtist);
             if (cached != null) {
@@ -8593,7 +8807,8 @@ public class TurzxMonitorMain {
             String src = target.mediaSource != null ? target.mediaSource : "";
             if ("Apple CarPlay".equals(src)) {
                 File dipoArt = new File("/data/data/com.daudio.app.dipo/files/image");
-                if (dipoArt.isFile() && dipoArt.length() > 64L && (now - dipoArt.lastModified() < 1800000L)) {
+                if (dipoArt.isFile() && dipoArt.length() > 64L
+                        && TelemetryCollector.isDiskArtFreshForTrack(dipoArt.lastModified(), TelemetryCollector.lastTrackChangeMs, now)) {
                     Object bmp = decodeAlbumArtFile(dipoArt);
                     if (bmp != null) {
                         target.albumArtBitmap = bmp;
@@ -8604,7 +8819,8 @@ public class TurzxMonitorMain {
                 }
             } else if ("Android Auto".equals(src)) {
                 File gpmArt = new File("/data/data/com.google.android.projection.sink/files/gpm_artwork");
-                if (gpmArt.isFile() && gpmArt.length() > 64L && (now - gpmArt.lastModified() < 1800000L)) {
+                if (gpmArt.isFile() && gpmArt.length() > 64L
+                        && TelemetryCollector.isDiskArtFreshForTrack(gpmArt.lastModified(), TelemetryCollector.lastTrackChangeMs, now)) {
                     Object bmp = decodeAlbumArtFile(gpmArt);
                     if (bmp != null) {
                         target.albumArtBitmap = bmp;
@@ -8780,6 +8996,7 @@ public class TurzxMonitorMain {
                             }
                         }
 
+                        boolean weakMatch = artist.isEmpty(); // title-only search: may be a different song
                         String query = artist.isEmpty() ? title : (title + " " + artist);
                         String encoded = java.net.URLEncoder.encode(query, "UTF-8");
                         String searchPath = "/search?term=" + encoded + "&media=music&entity=song&limit=3";
@@ -8797,6 +9014,7 @@ public class TurzxMonitorMain {
                             );
                             if (fbBytes != null && fbBytes.length > 20) {
                                 artUrl = extractItunesArtworkUrl(new String(fbBytes, UTF8));
+                                weakMatch = true;
                             }
                         }
                         if (artUrl.isEmpty()) return;
@@ -8811,7 +9029,9 @@ public class TurzxMonitorMain {
                         Object bmp = decodeAlbumArtBytes(imgBytes);
                         if (bmp == null) return;
 
-                        putCachedArt(title, artist, bmp);
+                        if (!weakMatch) {
+                            putCachedArt(title, artist, bmp);
+                        }
                         synchronized (TelemetryCollector.liveSnapshot) {
                             String curKey = buildTrackCacheKey(
                                     TelemetryCollector.liveSnapshot.mediaTitle,
@@ -8821,7 +9041,7 @@ public class TurzxMonitorMain {
                             if (TelemetryCollector.liveSnapshot.albumArtBitmap == null
                                     && (key.equals(curKey) || title.toLowerCase(Locale.US).equals(curTitleOnly))) {
                                 TelemetryCollector.liveSnapshot.albumArtBitmap = bmp;
-                                TelemetryCollector.liveSnapshot.albumArtSource = "itunes_api";
+                                TelemetryCollector.liveSnapshot.albumArtSource = weakMatch ? "itunes_title_only" : "itunes_api";
                                 TelemetryCollector.liveSnapshot.albumArtTrackKey = curKey;
                                 TelemetryCollector.latestAlbumArtBytes = imgBytes;
                             }
@@ -9848,6 +10068,105 @@ public class TurzxMonitorMain {
             }
         } catch (Exception e) {
             throw new RuntimeException("MonitorConfig / OTA self-test failed", e);
+        }
+
+        // v1.4.2: media source / playback-time / album-art rules
+        try {
+            TelemetrySnapshot ms = new TelemetrySnapshot();
+            android.content.Intent a1 = new android.content.Intent("com.hkmc.audio.btaudio.widgetupdate");
+            a1.putExtra("filename", "Track A");
+            a1.putExtra("artist_name", "Artist A");
+            a1.putExtra("audio_total_time", 200000L);
+            a1.putExtra("audio_current_time", 150000L);
+            TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(a1.getAction(), a1.getExtras(), ms);
+            assertTrue(ms.mediaDurationSec == 200 && ms.mediaPositionSec == 150, "media: ms broadcast decoded");
+            // New track without time keys: position 0, duration unknown (not the previous track's 200s)
+            android.content.Intent a2 = new android.content.Intent("com.hkmc.audio.btaudio.widgetupdate");
+            a2.putExtra("filename", "Track B");
+            a2.putExtra("artist_name", "Artist B");
+            TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(a2.getAction(), a2.getExtras(), ms);
+            assertTrue("Track B".equals(ms.mediaTitle) && ms.mediaPositionSec == 0 && ms.mediaDurationSec == 0,
+                    "media: track change resets position and duration");
+            // Seconds-based source with a track longer than 500s (old heuristic divided it to 0)
+            TelemetrySnapshot sec = new TelemetrySnapshot();
+            android.content.Intent u1 = new android.content.Intent("com.hkmc.audio.usb.widgetupdate");
+            u1.putExtra("filename", "Long Track");
+            u1.putExtra("audio_total_time", 600L);
+            u1.putExtra("audio_current_time", 550L);
+            TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(u1.getAction(), u1.getExtras(), sec);
+            assertTrue(sec.mediaDurationSec == 600 && sec.mediaPositionSec == 550, "media: seconds-unit broadcast kept");
+            // ms source: time-only update of 300ms is 0s (old heuristic read it as 300s); 0 accepted on time-only updates
+            android.content.Intent t1 = new android.content.Intent("com.hkmc.audio.timeupdate");
+            t1.putExtra("audio_current_time", 42000L);
+            TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(t1.getAction(), t1.getExtras(), ms);
+            assertTrue(ms.mediaPositionSec == 42, "media: ms time-only update");
+            android.content.Intent t2 = new android.content.Intent("com.hkmc.audio.timeupdate");
+            t2.putExtra("audio_current_time", 300L);
+            TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(t2.getAction(), t2.getExtras(), ms);
+            assertTrue(ms.mediaPositionSec == 0, "media: 300ms is 0s, not 300s");
+            android.content.Intent t3 = new android.content.Intent("com.hkmc.audio.timeupdate");
+            t3.putExtra("audio_current_time", 0L);
+            ms.mediaPositionSec = 77;
+            TelemetryCollector.applyMediaWidgetBroadcastToSnapshot(t3.getAction(), t3.getExtras(), ms);
+            assertTrue(ms.mediaPositionSec == 0, "media: position 0 accepted on time-only update");
+
+            assertTrue(TelemetryCollector.resolveBroadcastUnitMs("UT-X", 600L) == false
+                            && TelemetryCollector.resolveBroadcastUnitMs("UT-X", -1L) == false
+                            && TelemetryCollector.resolveBroadcastUnitMs("UT-Y", -1L) == true
+                            && TelemetryCollector.resolveBroadcastUnitMs("UT-X", 183000L) == true,
+                    "media: broadcast unit learned per source, default ms");
+
+            // ClusterService.getLastPlaytime unit selection
+            assertTrue(TelemetryCollector.chooseClusterPlaytimeSec(20000L, 2, null) == 20, "cluster: 20000 near start = 20s (ms)");
+            assertTrue(TelemetryCollector.chooseClusterPlaytimeSec(20L, 19, null) == 20, "cluster: 20 near 19s = 20s (s)");
+            assertTrue(TelemetryCollector.chooseClusterPlaytimeSec(45000L, 0, null) == 45, "cluster: >36000 always ms");
+            assertTrue(TelemetryCollector.chooseClusterPlaytimeSec(100L, 0, Boolean.FALSE) == 100, "cluster: locked seconds");
+            assertTrue(TelemetryCollector.chooseClusterPlaytimeSec(1500L, 0, Boolean.TRUE) == 1, "cluster: locked ms");
+            assertTrue(TelemetryCollector.chooseClusterPlaytimeSec(-1L, 0, null) == -1, "cluster: invalid");
+
+            // CarPlay / Android Auto disk artwork must belong to the current track
+            long nowT = System.currentTimeMillis();
+            assertTrue(!TelemetryCollector.isDiskArtFreshForTrack(nowT - 60000L, nowT - 10000L, nowT), "art: previous track's file rejected");
+            assertTrue(TelemetryCollector.isDiskArtFreshForTrack(nowT - 11000L, nowT - 10000L, nowT), "art: file written just before change ok");
+            assertTrue(TelemetryCollector.isDiskArtFreshForTrack(nowT - 5000L, nowT - 10000L, nowT), "art: file written after change ok");
+            assertTrue(!TelemetryCollector.isDiskArtFreshForTrack(nowT - 700000L, 0L, nowT), "art: no track change, old file rejected");
+
+            // BT logcat metadata ignored while ModeManager reports a non-BT source
+            String savedMode = TelemetryCollector.modeSourceName;
+            long savedModeMs = TelemetryCollector.modeSourceMs;
+            synchronized (TelemetryCollector.liveSnapshot) {
+                String before = TelemetryCollector.liveSnapshot.mediaTitle;
+                TelemetryCollector.modeSourceName = "Apple CarPlay";
+                TelemetryCollector.modeSourceMs = System.currentTimeMillis();
+                boolean applied = parseMediaLogLine(
+                        "D/MobisAvrcpControllerService( 1310): [BTAD] mSongTitle:Ghost, mArtistName:BT, mAlbum:X, mPlayingTime:1000",
+                        TelemetryCollector.liveSnapshot);
+                assertTrue(!applied && (before == null ? TelemetryCollector.liveSnapshot.mediaTitle == null
+                                : before.equals(TelemetryCollector.liveSnapshot.mediaTitle)),
+                        "media: BT log ignored while CarPlay is active");
+                TelemetryCollector.modeSourceName = savedMode;
+                TelemetryCollector.modeSourceMs = savedModeMs;
+            }
+            // Periodic-reporter detection (drives pause detection): a burst is not periodic, 3 advancing samples are
+            synchronized (TelemetryCollector.liveSnapshot) {
+                TelemetrySnapshot live = TelemetryCollector.liveSnapshot;
+                TelemetryCollector.resetPlaybackTimeForNewTrack(live);
+                TelemetryCollector.notePositionUpdate(live, 10);
+                TelemetryCollector.notePositionUpdate(live, 10);
+                assertTrue(!TelemetryCollector.periodicPosReporter, "stall: duplicate burst is not periodic");
+                TelemetryCollector.lastExternalPosMs = System.currentTimeMillis() - 1000L;
+                TelemetryCollector.notePositionUpdate(live, 11);
+                assertTrue(!TelemetryCollector.periodicPosReporter, "stall: one advancing sample is not enough");
+                TelemetryCollector.lastExternalPosMs = System.currentTimeMillis() - 1000L;
+                TelemetryCollector.notePositionUpdate(live, 12);
+                assertTrue(TelemetryCollector.periodicPosReporter && live.mediaPositionSec == 12,
+                        "stall: two consecutive advancing samples = periodic");
+                TelemetryCollector.resetPlaybackTimeForNewTrack(live);
+                assertTrue(!TelemetryCollector.periodicPosReporter && live.mediaPositionSec == 0 && live.mediaDurationSec == 0,
+                        "stall: track change resets tracking");
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("v1.4.2 media rules self-test failed", e);
         }
 
         // v1.4.0: JPEG quality migration (legacy 85 -> 70 unless config_rev>=2) + native encoder asset/fallback
