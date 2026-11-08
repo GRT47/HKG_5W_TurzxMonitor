@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.4.3";
+    public static final String MONITOR_VERSION = "1.4.4";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -793,15 +793,25 @@ public class TurzxMonitorMain {
 
         // ---- Pipeline (v1.4.3) ----
         // The old single loop ran poll -> render -> encode -> USB send -> panel ACK back to back, so the frame time was
-        // the SUM of all stages (~200-250ms = 4-5 FPS). Now three threads:
-        //   Turzx-TelemetryPoll : Binder/CAN polling at ~5Hz, publishes the latest snapshot (off the frame path)
-        //   TurzxUsbPusher      : render + JPEG encode of frame N+1 while frame N is on the wire
-        //   TurzxUsbSender      : USB connect, bulk send and panel ACK wait
-        // A one-slot mailbox with back-pressure links render and send, so throughput ~ the SLOWEST stage
-        // and no frame is rendered just to be dropped.
+        // the SUM of all stages (~200-250ms = 4-5 FPS). Now four threads:
+        //   Turzx-TelemetryPoll : Binder/CAN polling, publishes the latest snapshot (off the frame path)
+        //   TurzxUsbPusher      : Canvas render of frame N+2 into a free landscape buffer
+        //   TurzxJpegEncoder    : JPEG encode of frame N+1 (v1.4.4: was serial with render; 4x Cortex-A53)
+        //   TurzxUsbSender      : USB connect, bulk send of frame N and panel ACK wait
+        // One-slot mailboxes with back-pressure link the stages, so throughput ~ the SLOWEST stage
+        // (max(render, encode, send) instead of render + encode) and no frame is rendered just to be dropped.
         private static final long TELEMETRY_POLL_PERIOD_SCREEN_OFF_MS = 400L;
         private static final Object FRAME_SLOT_LOCK = new Object();
         private static byte[] pendingPanelJpeg = null; // guarded by FRAME_SLOT_LOCK
+
+        // Render -> encode handoff of landscape buffers (TurzxFrameRenderer.LANDSCAPE_BUFFERS = 2)
+        private static final Object ENCODE_SLOT_LOCK = new Object();
+        private static int queuedEncodeBuf = -1;          // guarded by ENCODE_SLOT_LOCK: drawn, waiting for the encoder
+        private static boolean queuedNeedPanel = false;    // guarded by ENCODE_SLOT_LOCK
+        private static boolean queuedNeedLandscape = false; // guarded by ENCODE_SLOT_LOCK
+        private static int encodingBuf = -1;              // guarded by ENCODE_SLOT_LOCK: being read by the encoder
+        private static volatile double avgEncodeWaitMs = 0.0;
+        private static volatile double lastAckMs = 0.0;
         private static volatile TelemetrySnapshot latestPolledSnap = null;
         private static volatile boolean screenOffActive = false;
 
@@ -832,6 +842,74 @@ public class TurzxMonitorMain {
             return avgSlotWaitMs;
         }
 
+        /** How long the render thread waited for the encoder to accept its previous frame (EMA, ms). */
+        public static double getAvgEncodeWaitMs() {
+            return avgEncodeWaitMs;
+        }
+
+        /**
+         * Render thread: waits until the encoder has picked up the previously queued frame, then returns a landscape
+         * buffer the encoder is not reading. Returns -1 on timeout (encoder stuck); nothing is reserved then.
+         */
+        static int acquireRenderBuffer(long maxWaitMs) throws InterruptedException {
+            long t0 = System.currentTimeMillis();
+            int buf = -1;
+            synchronized (ENCODE_SLOT_LOCK) {
+                long deadline = t0 + maxWaitMs;
+                while (queuedEncodeBuf >= 0) {
+                    long remain = deadline - System.currentTimeMillis();
+                    if (remain <= 0L) break;
+                    ENCODE_SLOT_LOCK.wait(remain);
+                }
+                if (queuedEncodeBuf < 0) {
+                    buf = pickFreeBuffer(encodingBuf, -1, TurzxFrameRenderer.LANDSCAPE_BUFFERS);
+                }
+            }
+            avgEncodeWaitMs = emaMs(avgEncodeWaitMs, System.currentTimeMillis() - t0);
+            return buf;
+        }
+
+        /** First buffer index in [0, count) that is neither busy index; -1 if none. */
+        static int pickFreeBuffer(int busyA, int busyB, int count) {
+            for (int i = 0; i < count; i++) {
+                if (i != busyA && i != busyB) return i;
+            }
+            return -1;
+        }
+
+        /** Render thread: hands a drawn buffer to the encoder (the slot is empty after acquireRenderBuffer). */
+        static void queueEncodeJob(int buf, boolean needPanel, boolean needLandscape) {
+            synchronized (ENCODE_SLOT_LOCK) {
+                queuedEncodeBuf = buf;
+                queuedNeedPanel = needPanel;
+                queuedNeedLandscape = needLandscape;
+                ENCODE_SLOT_LOCK.notifyAll();
+            }
+        }
+
+        /** Encoder thread: blocks for the next drawn buffer and marks it as being encoded. Returns {buf, panel, land}. */
+        static int[] takeEncodeJob(long maxWaitMs) throws InterruptedException {
+            synchronized (ENCODE_SLOT_LOCK) {
+                if (queuedEncodeBuf < 0 && maxWaitMs > 0L) {
+                    ENCODE_SLOT_LOCK.wait(maxWaitMs);
+                }
+                if (queuedEncodeBuf < 0) return null;
+                int[] job = new int[]{queuedEncodeBuf, queuedNeedPanel ? 1 : 0, queuedNeedLandscape ? 1 : 0};
+                encodingBuf = queuedEncodeBuf;
+                queuedEncodeBuf = -1;
+                ENCODE_SLOT_LOCK.notifyAll();
+                return job;
+            }
+        }
+
+        /** Encoder thread: the buffer may be drawn again. */
+        static void finishEncodeJob() {
+            synchronized (ENCODE_SLOT_LOCK) {
+                encodingBuf = -1;
+                ENCODE_SLOT_LOCK.notifyAll();
+            }
+        }
+
         private static double emaMs(double prev, double sample) {
             return (prev <= 0.0) ? sample : (prev * 0.9 + sample * 0.1);
         }
@@ -854,6 +932,15 @@ public class TurzxMonitorMain {
             }, "TurzxUsbSender");
             sender.setDaemon(true);
             sender.start();
+
+            Thread encoder = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    runEncoderLoop();
+                }
+            }, "TurzxJpegEncoder");
+            encoder.setDaemon(true);
+            encoder.start();
 
             Thread t = new Thread(new Runnable() {
                 @Override
@@ -967,23 +1054,16 @@ public class TurzxMonitorMain {
                     // Only render/encode what has a consumer: the panel when connected, the landscape JPEG
                     // only while someone polls /frame.jpg (the web viewer itself uses /status.json).
                     boolean needPanel = cfg.usbPushEnabled && connected;
-                    if (needPanel) {
-                        waitForFrameSlotFree(600L);
-                        needPanel = connected;
-                    }
                     boolean needLandscape = (System.currentTimeMillis() - lastLandscapeDemandMs) < LANDSCAPE_DEMAND_WINDOW_MS;
-                    // Freshest telemetry after the (possible) wait above
-                    TelemetrySnapshot fresh = latestPolledSnap;
-                    byte[][] jpegs = TurzxFrameRenderer.renderHudJpegPair(
-                            fresh != null ? fresh : snap, cfg.usbRotation, LiveTuning.jpegQuality, needPanel, needLandscape);
-                    if (jpegs != null && jpegs.length == 2) {
-                        if (jpegs[0] != null) {
-                            latestLandscapeJpeg = jpegs[0];
-                            latestLandscapeJpegMs = System.currentTimeMillis();
-                        }
-                        byte[] panelJpeg = jpegs[1];
-                        if (needPanel && connected && panelJpeg != null && panelJpeg.length > 0) {
-                            offerPanelFrame(panelJpeg);
+                    if (needPanel || needLandscape) {
+                        // Back-pressure: wait until the encoder took the previous frame, then draw into the other buffer
+                        int buf = acquireRenderBuffer(1000L);
+                        if (buf >= 0) {
+                            // Freshest telemetry after the (possible) wait above
+                            TelemetrySnapshot fresh = latestPolledSnap;
+                            if (TurzxFrameRenderer.renderHudFrame(fresh != null ? fresh : snap, buf)) {
+                                queueEncodeJob(buf, cfg.usbPushEnabled && connected, needLandscape);
+                            }
                         }
                     }
 
@@ -1003,7 +1083,46 @@ public class TurzxMonitorMain {
             }
         }
 
-        /** USB owner: connects to the panel and transmits frames handed over by the render thread. */
+        /** JPEG encoder: compresses frames drawn by the render thread and hands panel JPEGs to the sender. */
+        private static void runEncoderLoop() {
+            while (true) {
+                int[] job = null;
+                try {
+                    job = takeEncodeJob(1000L);
+                    if (job == null) continue;
+                    boolean needPanel = job[1] != 0 && connected && !screenOffActive;
+                    boolean needLandscape = job[2] != 0;
+                    if (needPanel) {
+                        // Do not encode a frame the sender cannot take yet (it would only be replaced)
+                        waitForFrameSlotFree(600L);
+                        needPanel = connected && !screenOffActive;
+                    }
+                    if (!needPanel && !needLandscape) continue;
+                    MonitorConfig cfg = TurzxOverlayController.getConfig();
+                    byte[][] jpegs = TurzxFrameRenderer.encodeHudFrame(
+                            job[0], cfg.usbRotation, LiveTuning.jpegQuality, needPanel, needLandscape);
+                    if (jpegs != null && jpegs.length == 2) {
+                        if (jpegs[0] != null) {
+                            latestLandscapeJpeg = jpegs[0];
+                            latestLandscapeJpegMs = System.currentTimeMillis();
+                        }
+                        byte[] panelJpeg = jpegs[1];
+                        if (needPanel && connected && !screenOffActive && panelJpeg != null && panelJpeg.length > 0) {
+                            offerPanelFrame(panelJpeg);
+                        }
+                    }
+                } catch (Throwable t) {
+                    try {
+                        Thread.sleep(200L);
+                    } catch (InterruptedException ignored) {
+                    }
+                } finally {
+                    if (job != null) finishEncodeJob();
+                }
+            }
+        }
+
+        /** USB owner: connects to the panel and transmits frames handed over by the encoder thread. */
         private static void runSenderLoop() {
             long fpsWinStartMs = System.currentTimeMillis();
             int fpsWinCount = 0;
@@ -1020,6 +1139,11 @@ public class TurzxMonitorMain {
                     }
 
                     byte[] frame = takePanelFrame(connected ? 500L : 250L);
+                    int rstPhase = connected ? PanelRstTest.phase(System.currentTimeMillis()) : -1;
+                    if (rstPhase >= 0) {
+                        byte[] testFrame = PanelRstTest.frameFor(rstPhase);
+                        if (testFrame != null) frame = testFrame;
+                    }
                     if (frame == null) {
                         continue;
                     }
@@ -1044,6 +1168,9 @@ public class TurzxMonitorMain {
                                 closeUsbConnection();
                             }
                         }
+                    }
+                    if (rstPhase >= 0 && attempted) {
+                        PanelRstTest.record(rstPhase, sent, lastAckMs);
                     }
                     if (attempted && sent) {
                         pushedFrames++;
@@ -1362,6 +1489,9 @@ public class TurzxMonitorMain {
             }
             long tAck0 = System.nanoTime();
             boolean acked = drainBulkIn(350) > 0;
+            if (acked) {
+                lastAckMs = (System.nanoTime() - tAck0) / 1e6;
+            }
             if (cmdId == TURZX_CMD_SEND_JPEG && acked) {
                 avgTxMs = emaMs(avgTxMs, (tAck0 - tTx0) / 1e6);
                 avgAckMs = emaMs(avgAckMs, (System.nanoTime() - tAck0) / 1e6);
@@ -1569,8 +1699,13 @@ public class TurzxMonitorMain {
         public static final int PANEL_JPEG_WIDTH = 464;
         public static final int PANEL_JPEG_HEIGHT = 1920;
 
-        private static Object landscapeBitmap = null;
-        private static Object landscapeCanvas = null;
+        // v1.4.4: two landscape buffers so the render thread draws frame N+1 while the encoder thread
+        // compresses frame N (TurzxUsbDriver hands buffers over; a buffer is never drawn and encoded at once).
+        public static final int LANDSCAPE_BUFFERS = 2;
+        private static final Object[] landscapeBitmaps = new Object[LANDSCAPE_BUFFERS];
+        private static final Object[] landscapeCanvases = new Object[LANDSCAPE_BUFFERS];
+        // Guards the encoder-side state (panelBitmap/panelCanvas/rotMatrix for the Skia fallback)
+        private static final Object ENCODE_LOCK = new Object();
         private static Object panelBitmap = null;
         private static Object panelCanvas = null;
         private static Object rotMatrix = null;
@@ -1741,75 +1876,92 @@ public class TurzxMonitorMain {
             return (prev <= 0.0) ? sample : (prev * 0.9 + sample * 0.1);
         }
 
+        private static volatile double avgRoadMs = 0.0;
+
+        public static double getAvgRoadMs() {
+            return avgRoadMs;
+        }
+
+        /** Lazily creates the bitmaps, canvases and paints (render thread, under the class lock). */
+        private static void ensureRenderResources() throws Exception {
+            if (gfxClasses == null) {
+                String[] names = new String[]{
+                        "android.graphics.Bitmap", "android.graphics.Bitmap$Config", "android.graphics.Canvas",
+                        "android.graphics.Paint", "android.graphics.Paint$Style", "android.graphics.Paint$Align",
+                        "android.graphics.Typeface", "android.graphics.RectF", "android.graphics.Rect",
+                        "android.graphics.Path", "android.graphics.Matrix", "android.graphics.Bitmap$CompressFormat"
+                };
+                Class<?>[] loaded = new Class<?>[names.length];
+                for (int i = 0; i < names.length; i++) loaded[i] = Class.forName(names[i]);
+                gfxClasses = loaded;
+            }
+            if (landscapeBitmaps[LANDSCAPE_BUFFERS - 1] != null) return;
+
+            Class<?> bmpCls = gfxClasses[0];
+            Class<?> cfgCls = gfxClasses[1];
+            Class<?> canvasCls = gfxClasses[2];
+            Class<?> paintCls = gfxClasses[3];
+            Class<?> styleCls = gfxClasses[4];
+            Class<?> tfCls = gfxClasses[6];
+            Class<?> rectFCls = gfxClasses[7];
+            Class<?> rectCls = gfxClasses[8];
+            Class<?> matrixCls = gfxClasses[10];
+
+            Object argb8888 = cfgCls.getField("ARGB_8888").get(null);
+            Method createBitmap = bmpCls.getMethod("createBitmap", int.class, int.class, cfgCls);
+            synchronized (ENCODE_LOCK) {
+                panelBitmap = createBitmap.invoke(null, Integer.valueOf(PANEL_JPEG_WIDTH), Integer.valueOf(PANEL_JPEG_HEIGHT), argb8888);
+                panelCanvas = canvasCls.getConstructor(bmpCls).newInstance(panelBitmap);
+                rotMatrix = matrixCls.getConstructor().newInstance();
+            }
+
+            Object fillStyle = styleCls.getField("FILL").get(null);
+            Object strokeStyle = styleCls.getField("STROKE").get(null);
+
+            paintFill = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
+            paintCls.getMethod("setStyle", styleCls).invoke(paintFill, fillStyle);
+
+            paintStroke = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
+            paintCls.getMethod("setStyle", styleCls).invoke(paintStroke, strokeStyle);
+
+            paintShader = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
+            paintCls.getMethod("setStyle", styleCls).invoke(paintShader, fillStyle);
+
+            // 129 = ANTI_ALIAS_FLAG (1) | SUBPIXEL_TEXT_FLAG (128)
+            paintPublicBold = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
+            paintPublicMed = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
+            paintSysBold = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
+            paintSysMed = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
+
+            rectF = rectFCls.getConstructor().newInstance();
+            srcRect = rectCls.getConstructor().newInstance();
+            dstRect = rectCls.getConstructor().newInstance();
+
+            ensureAssetsLoaded(tfCls, paintCls);
+
+            // Landscape buffers last: their presence marks the resources as complete
+            for (int i = 0; i < LANDSCAPE_BUFFERS; i++) {
+                Object bmp = createBitmap.invoke(null, Integer.valueOf(HUD_WIDTH), Integer.valueOf(HUD_HEIGHT), argb8888);
+                landscapeCanvases[i] = canvasCls.getConstructor(bmpCls).newInstance(bmp);
+                landscapeBitmaps[i] = bmp;
+            }
+        }
+
         /**
-         * Renders the 1920x462 HUD frame onto an Android Canvas and returns:
-         * - result[0]: 1920x462 landscape JPEG (web /frame.jpg) — only when needLandscape, else null
-         * - result[1]: rotated 464x1920 portrait JPEG (TURZX CMD 101) — only when needPanel, else null
-         * Encoding uses libjpeg-turbo NEON (rotation done in native code); Skia is the fallback.
+         * Render thread: draws the 1920x462 HUD frame into landscape buffer {@code buf}.
+         * The caller guarantees the encoder is not reading that buffer at the same time.
          */
-        public static synchronized byte[][] renderHudJpegPair(TelemetrySnapshot s, int rotationDeg, int jpegQuality,
-                                                              boolean needPanel, boolean needLandscape) {
-            if (!needPanel && !needLandscape) return null;
+        public static synchronized boolean renderHudFrame(TelemetrySnapshot s, int buf) {
+            if (s == null || buf < 0 || buf >= LANDSCAPE_BUFFERS) return false;
             try {
-                if (gfxClasses == null) {
-                    String[] names = new String[]{
-                            "android.graphics.Bitmap", "android.graphics.Bitmap$Config", "android.graphics.Canvas",
-                            "android.graphics.Paint", "android.graphics.Paint$Style", "android.graphics.Paint$Align",
-                            "android.graphics.Typeface", "android.graphics.RectF", "android.graphics.Rect",
-                            "android.graphics.Path", "android.graphics.Matrix", "android.graphics.Bitmap$CompressFormat"
-                    };
-                    Class<?>[] loaded = new Class<?>[names.length];
-                    for (int i = 0; i < names.length; i++) loaded[i] = Class.forName(names[i]);
-                    gfxClasses = loaded;
-                }
+                ensureRenderResources();
                 Class<?> bmpCls = gfxClasses[0];
-                Class<?> cfgCls = gfxClasses[1];
                 Class<?> canvasCls = gfxClasses[2];
                 Class<?> paintCls = gfxClasses[3];
-                Class<?> styleCls = gfxClasses[4];
                 Class<?> alignCls = gfxClasses[5];
-                Class<?> tfCls = gfxClasses[6];
                 Class<?> rectFCls = gfxClasses[7];
                 Class<?> rectCls = gfxClasses[8];
                 Class<?> pathCls = gfxClasses[9];
-                Class<?> matrixCls = gfxClasses[10];
-                Class<?> fmtCls = gfxClasses[11];
-
-                if (landscapeBitmap == null) {
-                    Object argb8888 = cfgCls.getField("ARGB_8888").get(null);
-                    landscapeBitmap = bmpCls.getMethod("createBitmap", int.class, int.class, cfgCls)
-                            .invoke(null, Integer.valueOf(HUD_WIDTH), Integer.valueOf(HUD_HEIGHT), argb8888);
-                    landscapeCanvas = canvasCls.getConstructor(bmpCls).newInstance(landscapeBitmap);
-
-                    panelBitmap = bmpCls.getMethod("createBitmap", int.class, int.class, cfgCls)
-                            .invoke(null, Integer.valueOf(PANEL_JPEG_WIDTH), Integer.valueOf(PANEL_JPEG_HEIGHT), argb8888);
-                    panelCanvas = canvasCls.getConstructor(bmpCls).newInstance(panelBitmap);
-                    rotMatrix = matrixCls.getConstructor().newInstance();
-
-                    Object fillStyle = styleCls.getField("FILL").get(null);
-                    Object strokeStyle = styleCls.getField("STROKE").get(null);
-
-                    paintFill = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
-                    paintCls.getMethod("setStyle", styleCls).invoke(paintFill, fillStyle);
-
-                    paintStroke = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
-                    paintCls.getMethod("setStyle", styleCls).invoke(paintStroke, strokeStyle);
-
-                    paintShader = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
-                    paintCls.getMethod("setStyle", styleCls).invoke(paintShader, fillStyle);
-
-                    // 129 = ANTI_ALIAS_FLAG (1) | SUBPIXEL_TEXT_FLAG (128)
-                    paintPublicBold = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
-                    paintPublicMed = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
-                    paintSysBold = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
-                    paintSysMed = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
-
-                    rectF = rectFCls.getConstructor().newInstance();
-                    srcRect = rectCls.getConstructor().newInstance();
-                    dstRect = rectCls.getConstructor().newInstance();
-
-                    ensureAssetsLoaded(tfCls, paintCls);
-                }
 
                 int spd = (s.carrotSpeedKph > 0) ? s.carrotSpeedKph : 0;
                 if (spd > 0) {
@@ -1817,74 +1969,101 @@ public class TurzxMonitorMain {
                 }
 
                 long tRender0 = System.nanoTime();
-                drawHudToCanvas(landscapeCanvas, paintFill, paintStroke, paintShader,
+                drawHudToCanvas(landscapeCanvases[buf], paintFill, paintStroke, paintShader,
                         paintPublicBold, paintPublicMed, paintSysBold, paintSysMed,
                         rectF, srcRect, dstRect,
                         bmpCls, canvasCls, paintCls, alignCls, rectFCls, rectCls, pathCls, s);
-                long tEncode0 = System.nanoTime();
-                avgRenderMs = ema(avgRenderMs, (tEncode0 - tRender0) / 1e6);
-                FpsBench.addRender((tEncode0 - tRender0) / 1e6);
-
-                int q = Math.max(50, Math.min(95, jpegQuality));
-                int nativeRot = (rotationDeg == 90) ? 90 : 270;
-                byte[] landBytes = null;
-                byte[] panelBytes = null;
-
-                if (NativeJpeg.ensureLoaded()) {
-                    boolean ok = true;
-                    if (needPanel) {
-                        panelBytes = NativeJpeg.encode(landscapeBitmap, nativeRot, PANEL_JPEG_WIDTH, q);
-                        ok = panelBytes != null;
-                    }
-                    if (ok && needLandscape) {
-                        landBytes = NativeJpeg.encode(landscapeBitmap, 0, 0, q);
-                        ok = landBytes != null;
-                    }
-                    if (ok) {
-                        lastEncoderName = NativeJpeg.getInfo();
-                        recordEncodeMs((System.nanoTime() - tEncode0) / 1e6);
-                        return new byte[][]{landBytes, panelBytes};
-                    }
-                }
-
-                // ---- Skia Bitmap.compress() fallback ----
-                lastEncoderName = "skia";
-                Object jpegFmt = fmtCls.getField("JPEG").get(null);
-                Method compressM = bmpCls.getMethod("compress", fmtCls, int.class, OutputStream.class);
-
-                if (needLandscape) {
-                    ByteArrayOutputStream baosLand = new ByteArrayOutputStream(65536);
-                    compressM.invoke(landscapeBitmap, jpegFmt, Integer.valueOf(q), baosLand);
-                    landBytes = baosLand.toByteArray();
-                }
-                if (!needPanel) {
-                    recordEncodeMs((System.nanoTime() - tEncode0) / 1e6);
-                    return new byte[][]{landBytes, null};
-                }
-
-                // Rotate 1920x462 landscape into 462x1920 at (0,0) on the 464x1920 macroblock-aligned panelBitmap
-                canvasCls.getMethod("drawColor", int.class).invoke(panelCanvas, Integer.valueOf(0xFF000000));
-                matrixCls.getMethod("reset").invoke(rotMatrix);
-                if (rotationDeg == 90) {
-                    matrixCls.getMethod("postRotate", float.class).invoke(rotMatrix, Float.valueOf(270.0f));
-                    matrixCls.getMethod("postTranslate", float.class, float.class)
-                            .invoke(rotMatrix, Float.valueOf(0.0f), Float.valueOf((float) HUD_WIDTH));
-                } else {
-                    matrixCls.getMethod("postRotate", float.class).invoke(rotMatrix, Float.valueOf(90.0f));
-                    matrixCls.getMethod("postTranslate", float.class, float.class)
-                            .invoke(rotMatrix, Float.valueOf((float) HUD_HEIGHT), Float.valueOf(0.0f));
-                }
-                canvasCls.getMethod("drawBitmap", bmpCls, matrixCls, paintCls)
-                        .invoke(panelCanvas, landscapeBitmap, rotMatrix, null);
-
-                ByteArrayOutputStream baosPanel = new ByteArrayOutputStream(65536);
-                compressM.invoke(panelBitmap, jpegFmt, Integer.valueOf(q), baosPanel);
-                panelBytes = baosPanel.toByteArray();
-
-                recordEncodeMs((System.nanoTime() - tEncode0) / 1e6);
-                return new byte[][]{landBytes, panelBytes};
+                double ms = (System.nanoTime() - tRender0) / 1e6;
+                avgRenderMs = ema(avgRenderMs, ms);
+                FpsBench.addRender(ms);
+                return true;
             } catch (Throwable t) {
-                return null;
+                return false;
+            }
+        }
+
+        /**
+         * Encoder thread: compresses landscape buffer {@code buf} (already drawn by {@link #renderHudFrame}) into:
+         * - result[0]: 1920x462 landscape JPEG (web /frame.jpg) — only when needLandscape, else null
+         * - result[1]: rotated 464x1920 portrait JPEG (TURZX CMD 101) — only when needPanel, else null
+         * Encoding uses libjpeg-turbo NEON (rotation done in native code); Skia is the fallback.
+         */
+        public static byte[][] encodeHudFrame(int buf, int rotationDeg, int jpegQuality,
+                                              boolean needPanel, boolean needLandscape) {
+            if (!needPanel && !needLandscape) return null;
+            if (buf < 0 || buf >= LANDSCAPE_BUFFERS || gfxClasses == null) return null;
+            Object src = landscapeBitmaps[buf];
+            if (src == null) return null;
+            synchronized (ENCODE_LOCK) {
+                try {
+                    Class<?> bmpCls = gfxClasses[0];
+                    Class<?> canvasCls = gfxClasses[2];
+                    Class<?> paintCls = gfxClasses[3];
+                    Class<?> matrixCls = gfxClasses[10];
+                    Class<?> fmtCls = gfxClasses[11];
+
+                    long tEncode0 = System.nanoTime();
+                    int q = Math.max(50, Math.min(95, jpegQuality));
+                    int nativeRot = (rotationDeg == 90) ? 90 : 270;
+                    byte[] landBytes = null;
+                    byte[] panelBytes = null;
+
+                    if (NativeJpeg.ensureLoaded()) {
+                        boolean ok = true;
+                        if (needPanel) {
+                            panelBytes = NativeJpeg.encode(src, nativeRot, PANEL_JPEG_WIDTH, q);
+                            ok = panelBytes != null;
+                        }
+                        if (ok && needLandscape) {
+                            landBytes = NativeJpeg.encode(src, 0, 0, q);
+                            ok = landBytes != null;
+                        }
+                        if (ok) {
+                            lastEncoderName = NativeJpeg.getInfo();
+                            recordEncodeMs((System.nanoTime() - tEncode0) / 1e6);
+                            return new byte[][]{landBytes, panelBytes};
+                        }
+                    }
+
+                    // ---- Skia Bitmap.compress() fallback ----
+                    lastEncoderName = "skia";
+                    Object jpegFmt = fmtCls.getField("JPEG").get(null);
+                    Method compressM = bmpCls.getMethod("compress", fmtCls, int.class, OutputStream.class);
+
+                    if (needLandscape) {
+                        ByteArrayOutputStream baosLand = new ByteArrayOutputStream(65536);
+                        compressM.invoke(src, jpegFmt, Integer.valueOf(q), baosLand);
+                        landBytes = baosLand.toByteArray();
+                    }
+                    if (!needPanel || panelCanvas == null) {
+                        recordEncodeMs((System.nanoTime() - tEncode0) / 1e6);
+                        return new byte[][]{landBytes, null};
+                    }
+
+                    // Rotate 1920x462 landscape into 462x1920 at (0,0) on the 464x1920 macroblock-aligned panelBitmap
+                    canvasCls.getMethod("drawColor", int.class).invoke(panelCanvas, Integer.valueOf(0xFF000000));
+                    matrixCls.getMethod("reset").invoke(rotMatrix);
+                    if (rotationDeg == 90) {
+                        matrixCls.getMethod("postRotate", float.class).invoke(rotMatrix, Float.valueOf(270.0f));
+                        matrixCls.getMethod("postTranslate", float.class, float.class)
+                                .invoke(rotMatrix, Float.valueOf(0.0f), Float.valueOf((float) HUD_WIDTH));
+                    } else {
+                        matrixCls.getMethod("postRotate", float.class).invoke(rotMatrix, Float.valueOf(90.0f));
+                        matrixCls.getMethod("postTranslate", float.class, float.class)
+                                .invoke(rotMatrix, Float.valueOf((float) HUD_HEIGHT), Float.valueOf(0.0f));
+                    }
+                    canvasCls.getMethod("drawBitmap", bmpCls, matrixCls, paintCls)
+                            .invoke(panelCanvas, src, rotMatrix, null);
+
+                    ByteArrayOutputStream baosPanel = new ByteArrayOutputStream(65536);
+                    compressM.invoke(panelBitmap, jpegFmt, Integer.valueOf(q), baosPanel);
+                    panelBytes = baosPanel.toByteArray();
+
+                    recordEncodeMs((System.nanoTime() - tEncode0) / 1e6);
+                    return new byte[][]{landBytes, panelBytes};
+                } catch (Throwable t) {
+                    return null;
+                }
             }
         }
 
@@ -2004,13 +2183,21 @@ public class TurzxMonitorMain {
             drawBmpRect.invoke(c, srcBmp, sRect, dRect, null);
         }
 
-        // Render-thread-only reflection caches (renderHudJpegPair is synchronized)
+        // Render-thread-only reflection caches (renderHudFrame is synchronized)
         private static Method[] hudMethods = null;
         private static Object[] hudAligns = null;
         private static Method[] roadMethods = null;
         private static Constructor<?>[] roadCtors = null;
         private static Object roadClampMode = null;
         private static Object roadPath = null;
+        // v1.4.4 road caches: static backdrop bitmap + shaders whose geometry does not change per frame
+        private static Object roadBgBitmap = null;
+        private static Object roadBgCanvas = null;
+        private static int roadBgKey = Integer.MIN_VALUE;
+        private static Object[] roadSurfShaders = null;
+        private static Object[] roadStripShaders = null;
+        private static Object[] roadTrajShaders = null;
+        private static int roadTrajKey = 0;
         private static Object artShaderBitmap = null;
         private static Object artShader = null;
         private static int artBmpW = 0;
@@ -2205,11 +2392,14 @@ public class TurzxMonitorMain {
             // 3. COLUMN 2: 1:1 3D PERSPECTIVE ADAS ROAD + CHROMIUM HUD OVERLAY
             // =================================================================
             if (LiveTuning.roadEnabled) {
+                long tRoad0 = System.nanoTime();
                 drawCommaAdasRoad3D(c, rf, pFill, pStroke, pShader, pPubBold, pPubMed, pSysBold, pSysMed,
                         setRf, drawRoundRect, drawRect, drawOval, drawLine, drawPath, drawText,
                         setColor, setStrokeW, setTextSize, setTextAlign, measureText, alignCenter,
                         canvasCls, paintCls, pathCls, s);
+                avgRoadMs = ema(avgRoadMs, (System.nanoTime() - tRoad0) / 1e6);
             } else {
+                avgRoadMs = 0.0;
                 // Experiment: plain dark column instead of the ~400-path 3D road (measures its render cost)
                 setColor.invoke(pFill, Integer.valueOf(0xFF0E1118));
                 drawRect.invoke(c, 610f, 14f, 1188f, 448f, pFill);
@@ -2559,6 +2749,7 @@ public class TurzxMonitorMain {
                 Class<?> tileCls = Class.forName("android.graphics.Shader$TileMode");
                 Class<?> lgCls = Class.forName("android.graphics.LinearGradient");
                 Class<?> rgCls = Class.forName("android.graphics.RadialGradient");
+                Class<?> roadBmpCls = Class.forName("android.graphics.Bitmap");
                 roadClampMode = tileCls.getField("CLAMP").get(null);
                 roadCtors = new Constructor<?>[]{
                         lgCls.getConstructor(
@@ -2577,7 +2768,10 @@ public class TurzxMonitorMain {
                         pathCls.getMethod("moveTo", float.class, float.class),
                         pathCls.getMethod("lineTo", float.class, float.class),
                         pathCls.getMethod("quadTo", float.class, float.class, float.class, float.class),
-                        pathCls.getMethod("close")
+                        pathCls.getMethod("close"),
+                        canvasCls.getMethod("drawBitmap", roadBmpCls, float.class, float.class, paintCls),
+                        canvasCls.getMethod("translate", float.class, float.class),
+                        roadBmpCls.getMethod("setHasAlpha", boolean.class)
                 };
                 roadPath = pathCls.getConstructor().newInstance();
             }
@@ -2606,20 +2800,6 @@ public class TurzxMonitorMain {
             float H = 434f;
             float horizonY = 130f;
 
-            // 1. Sky, Atmospheric Horizon Glow & Ground Plane Base
-            Object skyGrad = lgTwoCtor.newInstance(
-                    ox, oy, ox, oy + horizonY, Integer.valueOf(0xFF07080C), Integer.valueOf(0xFF0F131D), clampMode);
-            setShaderM.invoke(pShader, skyGrad);
-            drawRect.invoke(c, ox, oy, ox + W, oy + horizonY, pShader);
-
-            Object groundGrad = lgMultiCtor.newInstance(
-                    ox, oy + horizonY, ox, oy + H,
-                    new int[]{0xFF0E1118, 0xFF11131A, 0xFF0B0C10},
-                    new float[]{0f, 0.45f, 1f},
-                    clampMode);
-            setShaderM.invoke(pShader, groundGrad);
-            drawRect.invoke(c, ox, oy + horizonY, ox + W, oy + H, pShader);
-
             // Camera intrinsics in 578x434 pixel space
             float u0 = W * 0.565f;
             float v0 = horizonY;
@@ -2642,41 +2822,84 @@ public class TurzxMonitorMain {
                 curveC2 = Math.max(-0.0025f, Math.min(0.0025f, -s.steeringAngleDeg * 0.000025f));
             }
 
-            // Subtle radial horizon glow around vanishing point
+            // 1+2. Sky, ground plane, horizon glow, horizon rule and sensor ticks: an opaque backdrop cached in a
+            // 578x434 bitmap (v1.4.4). Only the glow centre follows the path curvature; it is quantized to 4px, so
+            // steady driving reuses the cache instead of re-shading three full-area gradients every frame.
             float vpY75 = roadCenterLat(75f, curveC1, curveC2);
-            float vpU = projU(ox, u0, fx, 75f, vpY75);
-            Object hGlow = rgMultiCtor.newInstance(
-                    vpU, oy + horizonY + 12f, 310f,
-                    new int[]{0x294A8AD6, 0x0F44A282, 0x000B0C10},
-                    new float[]{0f, 0.5f, 1f},
-                    clampMode);
-            setShaderM.invoke(pShader, hGlow);
-            drawRect.invoke(c, ox, oy, ox + W, oy + H, pShader);
+            int bgKey = Math.round(projU(ox, u0, fx, 75f, vpY75) / 4f);
+            if (roadBgBitmap == null || bgKey != roadBgKey) {
+                if (roadBgBitmap == null) {
+                    Class<?> bmpCls = Class.forName("android.graphics.Bitmap");
+                    Class<?> cfgCls = Class.forName("android.graphics.Bitmap$Config");
+                    roadBgBitmap = bmpCls.getMethod("createBitmap", int.class, int.class, cfgCls)
+                            .invoke(null, Integer.valueOf((int) W), Integer.valueOf((int) H), cfgCls.getField("ARGB_8888").get(null));
+                    roadBgCanvas = canvasCls.getConstructor(bmpCls).newInstance(roadBgBitmap);
+                    // Road-local coordinates: draw with the same (ox, oy) based numbers as the main canvas
+                    roadMethods[10].invoke(roadBgCanvas, Float.valueOf(-ox), Float.valueOf(-oy));
+                }
+                Object bc = roadBgCanvas;
+                float vpU = bgKey * 4f;
 
-            // 2. Horizon Azimuth Rule & Subtle Sensor Ticks
-            setColor.invoke(pStroke, Integer.valueOf(0xFF1F2430));
-            setStrokeW.invoke(pStroke, 1.5f);
-            drawLine.invoke(c, ox, oy + horizonY, ox + W, oy + horizonY, pStroke);
+                Object skyGrad = lgTwoCtor.newInstance(
+                        ox, oy, ox, oy + horizonY, Integer.valueOf(0xFF07080C), Integer.valueOf(0xFF0F131D), clampMode);
+                setShaderM.invoke(pShader, skyGrad);
+                drawRect.invoke(bc, ox, oy, ox + W, oy + horizonY, pShader);
 
-            for (int lat = -12; lat <= 12; lat += 2) {
-                float px = projU(ox, u0, fx, 60f, (float) lat);
-                setColor.invoke(pStroke, Integer.valueOf(lat == 0 ? 0xFF3A4152 : 0xFF1C2029));
-                drawLine.invoke(c, px, oy + horizonY - 4f, px, oy + horizonY + 4f, pStroke);
+                Object groundGrad = lgMultiCtor.newInstance(
+                        ox, oy + horizonY, ox, oy + H,
+                        new int[]{0xFF0E1118, 0xFF11131A, 0xFF0B0C10},
+                        new float[]{0f, 0.45f, 1f},
+                        clampMode);
+                setShaderM.invoke(pShader, groundGrad);
+                drawRect.invoke(bc, ox, oy + horizonY, ox + W, oy + H, pShader);
+
+                // Subtle radial horizon glow around vanishing point
+                Object hGlow = rgMultiCtor.newInstance(
+                        vpU, oy + horizonY + 12f, 310f,
+                        new int[]{0x294A8AD6, 0x0F44A282, 0x000B0C10},
+                        new float[]{0f, 0.5f, 1f},
+                        clampMode);
+                setShaderM.invoke(pShader, hGlow);
+                drawRect.invoke(bc, ox, oy, ox + W, oy + H, pShader);
+                setShaderM.invoke(pShader, new Object[]{null});
+
+                // Horizon Azimuth Rule & Subtle Sensor Ticks
+                setColor.invoke(pStroke, Integer.valueOf(0xFF1F2430));
+                setStrokeW.invoke(pStroke, 1.5f);
+                drawLine.invoke(bc, ox, oy + horizonY, ox + W, oy + horizonY, pStroke);
+
+                for (int lat = -12; lat <= 12; lat += 2) {
+                    float px = projU(ox, u0, fx, 60f, (float) lat);
+                    setColor.invoke(pStroke, Integer.valueOf(lat == 0 ? 0xFF3A4152 : 0xFF1C2029));
+                    drawLine.invoke(bc, px, oy + horizonY - 4f, px, oy + horizonY + 4f, pStroke);
+                }
+                try {
+                    roadMethods[11].invoke(roadBgBitmap, Boolean.FALSE); // opaque -> plain row copy when blitted
+                } catch (Throwable ignored) {
+                }
+                roadBgKey = bgKey;
             }
+            roadMethods[9].invoke(c, roadBgBitmap, Float.valueOf(ox), Float.valueOf(oy), null);
 
             // 3. Multi-Lane Asphalt Roadbed Surface (3 Lanes: Y = -5.4m to +5.4m, 38 steps)
-            float[] xSteps = new float[39];
-            for (int i = 0; i <= 38; i++) {
-                float t = i / 38.0f;
-                xSteps[i] = 3.85f + 82.0f * (t * t);
-            }
+            float[] xSteps = ROAD_X_STEPS;
 
-            Object roadSurfGrad = lgMultiCtor.newInstance(
-                    ox, oy + horizonY, ox, oy + H,
-                    new int[]{0xFF12151E, 0xFF161922, 0xFF101218},
-                    new float[]{0f, 0.4f, 1f},
-                    clampMode);
-            setShaderM.invoke(pShader, roadSurfGrad);
+            if (roadSurfShaders == null) {
+                // Constant geometry -> built once (was re-created, with its native SkShader, on every frame)
+                roadSurfShaders = new Object[]{
+                        lgMultiCtor.newInstance(
+                                ox, oy + horizonY, ox, oy + H,
+                                new int[]{0xFF12151E, 0xFF161922, 0xFF101218},
+                                new float[]{0f, 0.4f, 1f},
+                                clampMode),
+                        lgMultiCtor.newInstance(
+                                ox, oy + horizonY, ox, oy + H,
+                                new int[]{0xFF161A24, 0xFF1B202C, 0xFF141821},
+                                new float[]{0f, 0.5f, 1f},
+                                clampMode)
+                };
+            }
+            setShaderM.invoke(pShader, roadSurfShaders[0]);
             resetP.invoke(path);
             for (int i = 0; i < xSteps.length; i++) {
                 float x = xSteps[i];
@@ -2697,12 +2920,7 @@ public class TurzxMonitorMain {
             drawPath.invoke(c, path, pShader);
 
             // Ego Lane Subtle Surface Contrast (Y = -1.82m to +1.82m)
-            Object egoSurfGrad = lgMultiCtor.newInstance(
-                    ox, oy + horizonY, ox, oy + H,
-                    new int[]{0xFF161A24, 0xFF1B202C, 0xFF141821},
-                    new float[]{0f, 0.5f, 1f},
-                    clampMode);
-            setShaderM.invoke(pShader, egoSurfGrad);
+            setShaderM.invoke(pShader, roadSurfShaders[1]);
             resetP.invoke(path);
             for (int i = 0; i < xSteps.length; i++) {
                 float x = xSteps[i];
@@ -2736,19 +2954,23 @@ public class TurzxMonitorMain {
                 drawLine.invoke(c, uL, vG, uR, vG, pStroke);
             }
 
+            // Strip fades (alpha by distance) as vertical gradients: distance maps 1:1 to screen y, so one shader per
+            // strip style replaces a per-segment paint colour, and each strip is a single path (v1.4.4: ~370 -> ~11
+            // anti-aliased path fills per frame).
+            if (roadStripShaders == null) {
+                roadStripShaders = new Object[]{
+                        stripFadeShader(lgMultiCtor, clampMode, xSteps, oy, v0, fy, camH, 74, 82, 98, 0.65f),
+                        stripFadeShader(lgMultiCtor, clampMode, xSteps, oy, v0, fy, camH, 148, 163, 184, 0.38f),
+                        stripFadeShader(lgMultiCtor, clampMode, xSteps, oy, v0, fy, camH, 74, 138, 214, 0.25f),
+                        stripFadeShader(lgMultiCtor, clampMode, xSteps, oy, v0, fy, camH, 120, 188, 255, 0.96f)
+                };
+            }
+
             // 5. Road Shoulder Edges (-5.4m, +5.4m) & Adjacent Dashed Lane Lines (-3.6m, +3.6m)
-            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
-                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
-                    -5.4f, 0.06f, 74, 82, 98, 0.65f, false, roadPhase);
-            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
-                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
-                    5.4f, 0.06f, 74, 82, 98, 0.65f, false, roadPhase);
-            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
-                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
-                    -3.6f, 0.055f, 148, 163, 184, 0.38f, true, roadPhase);
-            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
-                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
-                    3.6f, 0.055f, 148, 163, 184, 0.38f, true, roadPhase);
+            drawTaperedStrip3D(c, path, pShader, setShaderM, roadStripShaders[0], resetP, moveTo, lineTo, closeP, drawPath,
+                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2, 0.06f, false, roadPhase, -5.4f, 5.4f);
+            drawTaperedStrip3D(c, path, pShader, setShaderM, roadStripShaders[1], resetP, moveTo, lineTo, closeP, drawPath,
+                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2, 0.055f, true, roadPhase, -3.6f, 3.6f);
 
             // 6. Comma modelV2 Predicted Steering Trajectory Carpet (34 steps)
             float pathMaxX = Math.max(6.8f, visualLeadX - 0.6f);
@@ -2759,63 +2981,71 @@ public class TurzxMonitorMain {
             int carpR = isCriticalLead ? 229 : (isCloseLead ? 217 : 68);
             int carpG = isCriticalLead ? 86 : (isCloseLead ? 164 : 162);
             int carpB = isCriticalLead ? 111 : (isCloseLead ? 65 : 130);
-
-            for (int i = 0; i < pathSteps; i++) {
-                float t0 = i / (float) pathSteps;
-                float t1 = (i + 1) / (float) pathSteps;
-                float x0 = 3.85f + (pathMaxX - 3.85f) * (t0 * t0);
-                float x1 = 3.85f + (pathMaxX - 3.85f) * (t1 * t1);
-                float w0 = pathHalfW * (1f - t0 * 0.16f);
-                float w1 = pathHalfW * (1f - t1 * 0.16f);
-                float c0 = roadCenterLat(x0, curveC1, curveC2);
-                float c1 = roadCenterLat(x1, curveC1, curveC2);
-
-                float v0y = projV(oy, v0, fy, camH, x0, 0f);
-                float v1y = projV(oy, v0, fy, camH, x1, 0f);
-                resetP.invoke(path);
-                moveTo.invoke(path, projU(ox, u0, fx, x0, c0 - w0), v0y);
-                lineTo.invoke(path, projU(ox, u0, fx, x0, c0 + w0), v0y);
-                lineTo.invoke(path, projU(ox, u0, fx, x1, c1 + w1), v1y);
-                lineTo.invoke(path, projU(ox, u0, fx, x1, c1 - w1), v1y);
-                closeP.invoke(path);
-
-                float alpha = (1f - t0 * 0.65f) * 0.38f;
-                setColor.invoke(pFill, Integer.valueOf(argbFromAlphaRgb(alpha, carpR, carpG, carpB)));
-                drawPath.invoke(c, path, pFill);
-            }
-
-            // Trajectory Left & Right 3D Edge Rails
             int railR = isCriticalLead ? 255 : (isCloseLead ? 245 : 95);
             int railG = isCriticalLead ? 133 : (isCloseLead ? 194 : 195);
             int railB = isCriticalLead ? 152 : (isCloseLead ? 96 : 156);
-            int[] sides = new int[]{-1, 1};
-            for (int sIdx = 0; sIdx < sides.length; sIdx++) {
-                int side = sides[sIdx];
-                for (int i = 0; i < pathSteps; i++) {
-                    float t0 = i / (float) pathSteps;
-                    float t1 = (i + 1) / (float) pathSteps;
-                    float x0 = 3.85f + (pathMaxX - 3.85f) * (t0 * t0);
-                    float x1 = 3.85f + (pathMaxX - 3.85f) * (t1 * t1);
-                    float w0 = pathHalfW * (1f - t0 * 0.16f);
-                    float w1 = pathHalfW * (1f - t1 * 0.16f);
-                    float lat0 = roadCenterLat(x0, curveC1, curveC2) + side * w0;
-                    float lat1 = roadCenterLat(x1, curveC1, curveC2) + side * w1;
-                    float wRail = 0.045f;
 
-                    float v0y = projV(oy, v0, fy, camH, x0, 0f);
-                    float v1y = projV(oy, v0, fy, camH, x1, 0f);
-                    resetP.invoke(path);
-                    moveTo.invoke(path, projU(ox, u0, fx, x0, lat0 - wRail), v0y);
-                    lineTo.invoke(path, projU(ox, u0, fx, x0, lat0 + wRail), v0y);
-                    lineTo.invoke(path, projU(ox, u0, fx, x1, lat1 + wRail), v1y);
-                    lineTo.invoke(path, projU(ox, u0, fx, x1, lat1 - wRail), v1y);
-                    closeP.invoke(path);
-
-                    float fade = Math.max(0.22f, 1f - t0 * 0.72f);
-                    setColor.invoke(pFill, Integer.valueOf(argbFromAlphaRgb(fade, railR, railG, railB)));
-                    drawPath.invoke(c, path, pFill);
-                }
+            float[] pxs = new float[pathSteps + 1];
+            float[] pws = new float[pathSteps + 1];
+            for (int i = 0; i <= pathSteps; i++) {
+                float t = i / (float) pathSteps;
+                pxs[i] = 3.85f + (pathMaxX - 3.85f) * (t * t);
+                pws[i] = pathHalfW * (1f - t * 0.16f);
             }
+            int trajKey = Float.floatToIntBits(pathMaxX) * 31 + (isCriticalLead ? 2 : (isCloseLead ? 1 : 0));
+            if (roadTrajShaders == null || trajKey != roadTrajKey) {
+                // Alpha of segment i was (1 - t0*0.65)*0.38 (carpet) / max(0.22, 1 - t0*0.72) (rails), t0 = i/steps
+                float[] carpA = new float[pathSteps + 1];
+                float[] railA = new float[pathSteps + 1];
+                for (int i = 0; i <= pathSteps; i++) {
+                    float t = Math.min(i, pathSteps - 1) / (float) pathSteps;
+                    carpA[i] = (1f - t * 0.65f) * 0.38f;
+                    railA[i] = Math.max(0.22f, 1f - t * 0.72f);
+                }
+                roadTrajShaders = new Object[]{
+                        fadeShader(lgMultiCtor, clampMode, pxs, carpA, oy, v0, fy, camH, carpR, carpG, carpB),
+                        fadeShader(lgMultiCtor, clampMode, pxs, railA, oy, v0, fy, camH, railR, railG, railB)
+                };
+                roadTrajKey = trajKey;
+            }
+
+            // Carpet: one polygon (left edge out, right edge back)
+            resetP.invoke(path);
+            for (int i = 0; i <= pathSteps; i++) {
+                float cLat = roadCenterLat(pxs[i], curveC1, curveC2);
+                float u = projU(ox, u0, fx, pxs[i], cLat - pws[i]);
+                float v = projV(oy, v0, fy, camH, pxs[i], 0f);
+                if (i == 0) moveTo.invoke(path, u, v);
+                else lineTo.invoke(path, u, v);
+            }
+            for (int i = pathSteps; i >= 0; i--) {
+                float cLat = roadCenterLat(pxs[i], curveC1, curveC2);
+                lineTo.invoke(path, projU(ox, u0, fx, pxs[i], cLat + pws[i]), projV(oy, v0, fy, camH, pxs[i], 0f));
+            }
+            closeP.invoke(path);
+            setShaderM.invoke(pShader, roadTrajShaders[0]);
+            drawPath.invoke(c, path, pShader);
+
+            // Trajectory Left & Right 3D Edge Rails: both rails as sub-paths of one path
+            float wRail = 0.045f;
+            resetP.invoke(path);
+            for (int side = -1; side <= 1; side += 2) {
+                for (int i = 0; i <= pathSteps; i++) {
+                    float lat = roadCenterLat(pxs[i], curveC1, curveC2) + side * pws[i];
+                    float u = projU(ox, u0, fx, pxs[i], lat - wRail);
+                    float v = projV(oy, v0, fy, camH, pxs[i], 0f);
+                    if (i == 0) moveTo.invoke(path, u, v);
+                    else lineTo.invoke(path, u, v);
+                }
+                for (int i = pathSteps; i >= 0; i--) {
+                    float lat = roadCenterLat(pxs[i], curveC1, curveC2) + side * pws[i];
+                    lineTo.invoke(path, projU(ox, u0, fx, pxs[i], lat + wRail), projV(oy, v0, fy, camH, pxs[i], 0f));
+                }
+                closeP.invoke(path);
+            }
+            setShaderM.invoke(pShader, roadTrajShaders[1]);
+            drawPath.invoke(c, path, pShader);
+            setShaderM.invoke(pShader, new Object[]{null});
 
             // Trajectory Internal Chevron Rungs
             float rungSpacing = 2.4f;
@@ -2864,18 +3094,11 @@ public class TurzxMonitorMain {
             drawPath.invoke(c, path, pStroke);
 
             // 7. Ego Left & Right Recognized Lane Lines (-1.82m, +1.82m) with Outer Halo + Crisp Core
-            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
-                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
-                    -1.82f, 0.19f, 74, 138, 214, 0.25f, false, roadPhase);
-            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
-                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
-                    1.82f, 0.19f, 74, 138, 214, 0.25f, false, roadPhase);
-            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
-                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
-                    -1.82f, 0.068f, 120, 188, 255, 0.96f, false, roadPhase);
-            drawTaperedStrip3D(c, path, pFill, resetP, moveTo, lineTo, closeP, setColor, drawPath,
-                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2,
-                    1.82f, 0.068f, 120, 188, 255, 0.96f, false, roadPhase);
+            drawTaperedStrip3D(c, path, pShader, setShaderM, roadStripShaders[2], resetP, moveTo, lineTo, closeP, drawPath,
+                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2, 0.19f, false, roadPhase, -1.82f, 1.82f);
+            drawTaperedStrip3D(c, path, pShader, setShaderM, roadStripShaders[3], resetP, moveTo, lineTo, closeP, drawPath,
+                    xSteps, ox, oy, u0, v0, fx, fy, camH, curveC1, curveC2, 0.068f, false, roadPhase, -1.82f, 1.82f);
+            setShaderM.invoke(pShader, new Object[]{null});
 
             // 8. 3D-Projected Lead Vehicle Model + CarrotPilot Radar Lock (only when real lead vehicle is detected)
             if (hasRealLead) {
@@ -3030,15 +3253,20 @@ public class TurzxMonitorMain {
             return (a << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
         }
 
+        /**
+         * Draws tapered 3D strips (one per lateral offset) as ONE path filled with a distance-fade gradient shader.
+         * Dashed strips keep the 3m on/off pattern as separate sub-paths of the same path.
+         */
         private static void drawTaperedStrip3D(
                 Object c,
                 Object path,
-                Object pFill,
+                Object pShader,
+                Method setShaderM,
+                Object fadeShader,
                 Method resetP,
                 Method moveTo,
                 Method lineTo,
                 Method closeP,
-                Method setColor,
                 Method drawPath,
                 float[] xSteps,
                 float ox,
@@ -3050,38 +3278,116 @@ public class TurzxMonitorMain {
                 float camH,
                 float curveC1,
                 float curveC2,
-                float latOffset,
                 float halfWidthM,
-                int r,
-                int g,
-                int b,
-                float baseAlpha,
                 boolean dashed,
-                float phase
+                float phase,
+                float... latOffsets
         ) throws Exception {
-            for (int i = 0; i < xSteps.length - 1; i++) {
-                float x0 = xSteps[i];
-                float x1 = xSteps[i + 1];
-                if (dashed) {
-                    int seg = (int) Math.floor((x0 + phase) / 3.0f);
-                    if ((seg & 1) != 0) continue;
+            resetP.invoke(path);
+            int[] runs = stripRuns(xSteps, dashed, phase);
+            for (int li = 0; li < latOffsets.length; li++) {
+                float lat = latOffsets[li];
+                for (int r = 0; r + 1 < runs.length; r += 2) {
+                    int a = runs[r];
+                    int b = runs[r + 1];
+                    for (int k = a; k <= b; k++) {
+                        float cl = roadCenterLat(xSteps[k], curveC1, curveC2) + lat;
+                        float u = projU(ox, u0, fx, xSteps[k], cl - halfWidthM);
+                        float v = projV(oy, v0, fy, camH, xSteps[k], 0f);
+                        if (k == a) moveTo.invoke(path, u, v);
+                        else lineTo.invoke(path, u, v);
+                    }
+                    for (int k = b; k >= a; k--) {
+                        float cl = roadCenterLat(xSteps[k], curveC1, curveC2) + lat;
+                        lineTo.invoke(path, projU(ox, u0, fx, xSteps[k], cl + halfWidthM),
+                                projV(oy, v0, fy, camH, xSteps[k], 0f));
+                    }
+                    closeP.invoke(path);
                 }
-                float c0 = roadCenterLat(x0, curveC1, curveC2) + latOffset;
-                float c1 = roadCenterLat(x1, curveC1, curveC2) + latOffset;
-                float v0y = projV(oy, v0, fy, camH, x0, 0f);
-                float v1y = projV(oy, v0, fy, camH, x1, 0f);
-
-                resetP.invoke(path);
-                moveTo.invoke(path, projU(ox, u0, fx, x0, c0 - halfWidthM), v0y);
-                lineTo.invoke(path, projU(ox, u0, fx, x0, c0 + halfWidthM), v0y);
-                lineTo.invoke(path, projU(ox, u0, fx, x1, c1 + halfWidthM), v1y);
-                lineTo.invoke(path, projU(ox, u0, fx, x1, c1 - halfWidthM), v1y);
-                closeP.invoke(path);
-
-                float fade = Math.max(0.08f, 1.0f - (x0 / 88.0f));
-                setColor.invoke(pFill, Integer.valueOf(argbFromAlphaRgb(fade * baseAlpha, r, g, b)));
-                drawPath.invoke(c, path, pFill);
             }
+            setShaderM.invoke(pShader, fadeShader);
+            drawPath.invoke(c, path, pShader);
+        }
+
+        /**
+         * Visible runs of a strip as {firstPoint, lastPoint} pairs over xs. Segment i spans points i..i+1; a dashed
+         * strip hides segment i when floor((xs[i] + phase) / 3) is odd (3m dashes, same rule as the per-segment code).
+         */
+        static int[] stripRuns(float[] xs, boolean dashed, float phase) {
+            int n = xs.length;
+            int[] tmp = new int[Math.max(2, n + 1)];
+            int cnt = 0;
+            int runStart = -1;
+            for (int i = 0; i < n - 1; i++) {
+                boolean on = !dashed || ((((int) Math.floor((xs[i] + phase) / 3.0f)) & 1) == 0);
+                if (on && runStart < 0) runStart = i;
+                if (runStart >= 0 && (!on || i == n - 2)) {
+                    tmp[cnt++] = runStart;
+                    tmp[cnt++] = on ? i + 1 : i;
+                    runStart = -1;
+                }
+            }
+            int[] out = new int[cnt];
+            System.arraycopy(tmp, 0, out, 0, cnt);
+            return out;
+        }
+
+        /** Road sample distances (m) for the roadbed and lane strips: 39 points, denser near the car. */
+        static final float[] ROAD_X_STEPS = buildRoadXSteps();
+
+        private static float[] buildRoadXSteps() {
+            float[] xs = new float[39];
+            for (int i = 0; i <= 38; i++) {
+                float t = i / 38.0f;
+                xs[i] = 3.85f + 82.0f * (t * t);
+            }
+            return xs;
+        }
+
+        /** Lane-strip fade: alpha = max(0.08, 1 - x/88) * baseAlpha at each sample distance. */
+        private static Object stripFadeShader(Constructor<?> lgMultiCtor, Object clampMode, float[] xs,
+                                              float oy, float v0, float fy, float camH,
+                                              int r, int g, int b, float baseAlpha) throws Exception {
+            float[] alphas = new float[xs.length];
+            for (int i = 0; i < xs.length; i++) {
+                alphas[i] = Math.max(0.08f, 1.0f - (xs[i] / 88.0f)) * baseAlpha;
+            }
+            return fadeShader(lgMultiCtor, clampMode, xs, alphas, oy, v0, fy, camH, r, g, b);
+        }
+
+        /**
+         * Vertical LinearGradient whose alpha follows {@code alphas[i]} at the screen row of distance {@code xs[i]}
+         * (xs ascending -> rows ascending up the screen). Colours are (alpha, r, g, b).
+         */
+        private static Object fadeShader(Constructor<?> lgMultiCtor, Object clampMode, float[] xs, float[] alphas,
+                                         float oy, float v0, float fy, float camH,
+                                         int r, int g, int b) throws Exception {
+            float[] pos = fadeStopPositions(xs, oy, v0, fy, camH);
+            int[] colors = new int[xs.length];
+            for (int i = 0; i < xs.length; i++) {
+                colors[i] = argbFromAlphaRgb(alphas[i], r, g, b);
+            }
+            float vNear = projV(oy, v0, fy, camH, xs[0], 0f);
+            float vFar = projV(oy, v0, fy, camH, xs[xs.length - 1], 0f);
+            return lgMultiCtor.newInstance(0f, vNear, 0f, vFar, colors, pos, clampMode);
+        }
+
+        /** Gradient stop positions (0 = nearest row, 1 = farthest row), clamped and non-decreasing. */
+        static float[] fadeStopPositions(float[] xs, float oy, float v0, float fy, float camH) {
+            float vNear = projV(oy, v0, fy, camH, xs[0], 0f);
+            float vFar = projV(oy, v0, fy, camH, xs[xs.length - 1], 0f);
+            float span = vNear - vFar;
+            float[] pos = new float[xs.length];
+            float prev = 0f;
+            for (int i = 0; i < xs.length; i++) {
+                float p = (span > 0.0001f) ? (vNear - projV(oy, v0, fy, camH, xs[i], 0f)) / span : (i / (float) Math.max(1, xs.length - 1));
+                p = Math.max(prev, Math.max(0f, Math.min(1f, p)));
+                pos[i] = p;
+                prev = p;
+            }
+            pos[0] = 0f;
+            pos[xs.length - 1] = 1f;
+            return pos;
         }
 
         private static void drawBarFillOnly(
@@ -5945,6 +6251,7 @@ public class TurzxMonitorMain {
             double pollMs;
             double renderMs;
             double encodeMs;
+            double roadMs;
             double txMs;
             double ackMs;
             double slotWaitMs;
@@ -5965,6 +6272,7 @@ public class TurzxMonitorMain {
             p.pollMs = TurzxUsbDriver.getAvgPollMs();
             p.renderMs = TurzxFrameRenderer.getAvgRenderMs();
             p.encodeMs = TurzxFrameRenderer.getAvgEncodeMs();
+            p.roadMs = TurzxFrameRenderer.getAvgRoadMs();
             p.txMs = TurzxUsbDriver.getAvgTxMs();
             p.ackMs = TurzxUsbDriver.getAvgAckMs();
             p.slotWaitMs = TurzxUsbDriver.getAvgSlotWaitMs();
@@ -5974,10 +6282,13 @@ public class TurzxMonitorMain {
             return p;
         }
 
-        /** Which pipeline stage limits the frame rate (render+encode vs USB transfer+panel ACK). */
+        /**
+         * Which pipeline stage limits the frame rate. Since v1.4.4 render and encode run on separate threads,
+         * so the producer cost is max(render, encode), not their sum.
+         */
         static String describeBottleneck(DashboardStats p) {
             if (!p.usbConnected) return "USB 미연결";
-            double produce = p.renderMs + p.encodeMs;
+            double produce = Math.max(p.renderMs, p.encodeMs);
             double consume = p.txMs + p.ackMs;
             if (produce <= 0.0 || consume <= 0.0) return "측정 중...";
             if (p.targetFps > 0 && p.fps >= p.targetFps * 0.9) {
@@ -5987,9 +6298,11 @@ public class TurzxMonitorMain {
                 return String.format(Locale.US, "병목: USB·패널 %.0fms", consume);
             }
             if (produce > consume * 1.15) {
-                return String.format(Locale.US, "병목: 렌더 %.0fms", produce);
+                return (p.renderMs >= p.encodeMs)
+                        ? String.format(Locale.US, "병목: 렌더 %.0fms", p.renderMs)
+                        : String.format(Locale.US, "병목: 인코딩 %.0fms", p.encodeMs);
             }
-            return String.format(Locale.US, "렌더 %.0f ≈ 전송 %.0f", produce, consume);
+            return String.format(Locale.US, "생성 %.0f ≈ 전송 %.0f", produce, consume);
         }
 
         private static String d1(double v, boolean valid) {
@@ -6008,7 +6321,7 @@ public class TurzxMonitorMain {
             b[0] = cut(p.usbStatus.replace("TURZX ", ""), 22) + "\n"
                     + String.format(Locale.US, "FPS %.1f / 목표 %d\n", p.fps, p.targetFps)
                     + "JPEG " + d1(p.jpegKb, p.jpegKb > 0.0) + "KB · 누적 " + p.frames + "\n"
-                    + String.format(Locale.US, "렌더 %.0f · 인코딩 %.0fms\n", p.renderMs, p.encodeMs)
+                    + String.format(Locale.US, "렌더 %.0f(도로 %.0f) · 인코딩 %.0f\n", p.renderMs, p.roadMs, p.encodeMs)
                     + String.format(Locale.US, "전송 %.0f · 응답 %.0fms\n", p.txMs, p.ackMs)
                     + String.format(Locale.US, "수집 %.0fms · 대기 %.0fms\n", p.pollMs, p.slotWaitMs)
                     + "→ " + describeBottleneck(p);
@@ -6298,8 +6611,8 @@ public class TurzxMonitorMain {
 
                 Object actRow = llCls.getConstructor(ctxCls).newInstance(sysContext);
                 setOrientation.invoke(actRow, 0);
-                String[] actLabels = new String[]{" ▶ 측정 ", " 💾 저장 ", " ↺ 복원 "};
-                int[] actStrokes = new int[]{0xFF22D3EE, 0xFF0D9488, 0xFF64748B};
+                String[] actLabels = new String[]{" ▶측정 ", " 💾저장 ", " ↺복원 ", " 🧪RST "};
+                int[] actStrokes = new int[]{0xFF22D3EE, 0xFF0D9488, 0xFF64748B, 0xFFD9A441};
                 Runnable[] actRuns = new Runnable[]{
                         new Runnable() {
                             @Override
@@ -6325,13 +6638,21 @@ public class TurzxMonitorMain {
                                 FpsBench.restart(LiveTuning.label(), System.currentTimeMillis());
                                 showBannerMessage("↺ 저장된 설정으로 복원", 3000L);
                             }
+                        },
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                // v1.4.4: panel JPEG restart-marker (DRI/RST) support test, A/B/C 6s each on the panel
+                                showBannerMessage("🧪 " + PanelRstTest.start(System.currentTimeMillis()), 5000L);
+                                refreshOnUiThread();
+                            }
                         }
                 };
                 for (int i = 0; i < actLabels.length; i++) {
                     Object lpAct = llLpCtor.newInstance(-2, -2);
-                    setMargins.invoke(lpAct, i > 0 ? 10 : 0, 0, 0, 0);
+                    setMargins.invoke(lpAct, i > 0 ? 8 : 0, 0, 0, 0);
                     addView.invoke(actRow, createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls,
-                            actLabels[i], actStrokes[i], 20f, actRuns[i]), lpAct);
+                            actLabels[i], actStrokes[i], 19f, actRuns[i]), lpAct);
                 }
                 Object actLp = llLpCtor.newInstance(-1, -2);
                 setMargins.invoke(actLp, 0, 12, 0, 0);
@@ -6510,7 +6831,12 @@ public class TurzxMonitorMain {
         }
 
         static String buildBenchText(long nowMs) {
+            String rst = PanelRstTest.statusLine(nowMs);
+            if (PanelRstTest.isRunning(nowMs)) return rst;
             StringBuilder sb = new StringBuilder(FpsBench.statusLine(nowMs));
+            if (!rst.isEmpty()) {
+                sb.append("\n").append(rst);
+            }
             List<String[]> rec = FpsBench.recent(3);
             for (int i = 0; i < rec.size(); i++) {
                 sb.append("\n").append(rec.get(i)[0]).append("\n   ").append(rec.get(i)[1]);
@@ -6687,6 +7013,122 @@ public class TurzxMonitorMain {
      * Windowed benchmark for the experiment panel: 2s warm-up after a change, then 5s of plain averages
      * (the EMA values in /status.json lag several seconds and would blur A/B comparisons).
      */
+    /**
+     * v1.4.4: checks whether the TURZX panel's hardware JPEG decoder honours restart markers (DRI/RSTn) - the
+     * prerequisite for an encoder that re-compresses only the changed 16-row MCU strips. Shows three bundled
+     * 464x1920 frames (tools/make_panel_test_jpegs.py) for PHASE_MS each instead of the HUD:
+     *   A = no restart markers (control), B = RST after every MCU row, C = RST after every MCU.
+     * ACKed / failed sends are counted per phase; the visual verdict (B and C identical to A?) comes from the driver.
+     */
+    public static final class PanelRstTest {
+        static final String[] ASSETS = {"panel_test_a_base.jpg", "panel_test_b_rst_row.jpg", "panel_test_c_rst_mcu.jpg"};
+        static final String[] NAMES = {"A 기준(RST 없음)", "B RST 행 단위", "C RST 블록 단위"};
+        static final long PHASE_MS = 6000L;
+
+        private static byte[][] frames = null;
+        private static long startMs = 0L;
+        private static final int[] okCount = new int[3];
+        private static final int[] failCount = new int[3];
+        private static final double[] ackSumMs = new double[3];
+        private static String lastResult = "";
+
+        /** Dashboard button: loads the frames once and starts the A -> B -> C sequence. Returns a banner text. */
+        static synchronized String start(long nowMs) {
+            if (!TurzxUsbDriver.isConnected()) return "패널 테스트: USB 미연결";
+            if (frames == null) {
+                byte[][] f = new byte[ASSETS.length][];
+                for (int i = 0; i < ASSETS.length; i++) {
+                    f[i] = TurzxFrameRenderer.readJarAssetBytesPublic(ASSETS[i]);
+                    if (f[i] == null || f[i].length < 1024) return "패널 테스트: 이미지 누락 (" + ASSETS[i] + ")";
+                }
+                frames = f;
+            }
+            beginLocked(nowMs);
+            DebugManager.logEvent("RSTTEST", "Started: A(no RST) / B(RST per MCU row) / C(RST per MCU), "
+                    + (PHASE_MS / 1000L) + "s each, sizes " + frames[0].length + "/" + frames[1].length + "/" + frames[2].length + "B");
+            return "패널 테스트 시작: A→B→C 각 " + (PHASE_MS / 1000L) + "초, 패널 화면을 비교하세요";
+        }
+
+        /** Self-test hook: same as start() with given frames and no USB requirement. */
+        static synchronized void startForTest(byte[][] testFrames, long nowMs) {
+            frames = testFrames;
+            beginLocked(nowMs);
+        }
+
+        private static void beginLocked(long nowMs) {
+            for (int i = 0; i < 3; i++) {
+                okCount[i] = 0;
+                failCount[i] = 0;
+                ackSumMs[i] = 0.0;
+            }
+            lastResult = "";
+            startMs = Math.max(1L, nowMs);
+        }
+
+        /** Phase 0..2 while running, -1 otherwise (finishes the test once the last phase has elapsed). */
+        static synchronized int phase(long nowMs) {
+            if (startMs <= 0L) return -1;
+            long el = Math.max(0L, nowMs - startMs);
+            int p = (int) (el / PHASE_MS);
+            if (p >= ASSETS.length) {
+                startMs = 0L;
+                lastResult = summaryLocked();
+                DebugManager.logEvent("RSTTEST", "Finished: " + lastResult);
+                return -1;
+            }
+            return p;
+        }
+
+        static boolean isRunning(long nowMs) {
+            return phase(nowMs) >= 0;
+        }
+
+        static synchronized byte[] frameFor(int phase) {
+            return (frames != null && phase >= 0 && phase < frames.length) ? frames[phase] : null;
+        }
+
+        /** Sender thread: result of one test-frame transmission. */
+        static synchronized void record(int phase, boolean ok, double ackMs) {
+            if (phase < 0 || phase >= 3) return;
+            if (ok) {
+                okCount[phase]++;
+                ackSumMs[phase] += ackMs;
+            } else {
+                failCount[phase]++;
+            }
+        }
+
+        private static String summaryLocked() {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 3; i++) {
+                if (i > 0) sb.append(" · ");
+                sb.append("ABC".charAt(i)).append(' ').append(okCount[i]).append("✓ ").append(failCount[i]).append('✗');
+                if (okCount[i] > 0) {
+                    sb.append(String.format(Locale.US, " %.0fms", ackSumMs[i] / okCount[i]));
+                }
+            }
+            return sb.toString();
+        }
+
+        /** Dashboard experiment panel text: live phase while running, last result afterwards ("" if never run). */
+        static synchronized String statusLine(long nowMs) {
+            int p = phase(nowMs);
+            if (p >= 0) {
+                long remainMs = (p + 1) * PHASE_MS - Math.max(0L, nowMs - startMs);
+                return "🧪 패널 테스트 " + (p + 1) + "/3 · " + NAMES[p] + " · " + ((remainMs + 999L) / 1000L) + "초\n"
+                        + "지금 TURZX 패널 화면을 보세요\n"
+                        + "전송 " + okCount[p] + " · 실패 " + failCount[p] + "\n"
+                        + "B·C가 A와 똑같이 깨끗하면 = RST 지원";
+            }
+            return lastResult.isEmpty() ? "" : "🧪 RST 결과: " + lastResult;
+        }
+
+        static synchronized String reportLine() {
+            if (startMs > 0L) return "running · " + summaryLocked();
+            return lastResult.isEmpty() ? "not run" : lastResult;
+        }
+    }
+
     public static final class FpsBench {
         static final long WARMUP_MS = 2000L;
         static final long MEASURE_MS = 5000L;
@@ -7287,16 +7729,18 @@ public class TurzxMonitorMain {
                     .append(String.format(Locale.US, " (Live FPS: %.1f)\n", TurzxUsbDriver.getLiveFps()));
             sb.append("JPEG Encoder    : ").append(TurzxFrameRenderer.getLastEncoderName())
                     .append(" | native=").append(NativeJpeg.getInfo())
-                    .append(String.format(Locale.US, " | render %.1fms, encode %.1fms (avg)\n",
-                            TurzxFrameRenderer.getAvgRenderMs(), TurzxFrameRenderer.getAvgEncodeMs()));
+                    .append(String.format(Locale.US, " | render %.1fms (road %.1fms), encode %.1fms (avg, parallel threads)\n",
+                            TurzxFrameRenderer.getAvgRenderMs(), TurzxFrameRenderer.getAvgRoadMs(),
+                            TurzxFrameRenderer.getAvgEncodeMs()));
             sb.append(String.format(Locale.US,
-                    "Pipeline (avg)  : poll %.1fms (5Hz thread) | usb tx %.1fms | panel ack %.1fms | slot wait %.1fms | jpeg %.1fKB\n",
+                    "Pipeline (avg)  : poll %.1fms | usb tx %.1fms | panel ack %.1fms | slot wait %.1fms | encoder wait %.1fms | jpeg %.1fKB\n",
                     TurzxUsbDriver.getAvgPollMs(), TurzxUsbDriver.getAvgTxMs(), TurzxUsbDriver.getAvgAckMs(),
-                    TurzxUsbDriver.getAvgSlotWaitMs(), TurzxUsbDriver.getAvgJpegKb()));
+                    TurzxUsbDriver.getAvgSlotWaitMs(), TurzxUsbDriver.getAvgEncodeWaitMs(), TurzxUsbDriver.getAvgJpegKb()));
             sb.append("MAP Hotkey      : ").append(HotkeyWatcher.getInfo())
                     .append(" | dashboard=").append(TurzxOverlayController.isDashboardVisible() ? "shown" : "hidden").append("\n");
             sb.append("Recent Keys     : ").append(HotkeyWatcher.getRecentKeysText()).append("\n");
             sb.append("Live Tuning     : ").append(LiveTuning.label()).append("\n");
+            sb.append("Panel RST test  : ").append(PanelRstTest.reportLine()).append("\n");
             List<String[]> bench = FpsBench.recent(FpsBench.MAX_HISTORY);
             for (int i = bench.size() - 1; i >= 0; i--) {
                 sb.append("  FPS bench     : ").append(bench.get(i)[0]).append("  ").append(bench.get(i)[1]).append("\n");
@@ -8895,8 +9339,9 @@ public class TurzxMonitorMain {
         sb.append(",\"frames\":").append(TurzxUsbDriver.getPushedFrames());
         sb.append(String.format(Locale.US, ",\"fps\":%.1f", TurzxUsbDriver.getLiveFps()));
         sb.append(",\"jpeg_encoder\":\"").append(escapeJson(TurzxFrameRenderer.getLastEncoderName())).append("\"");
-        sb.append(String.format(Locale.US, ",\"render_ms\":%.1f,\"encode_ms\":%.1f",
-                TurzxFrameRenderer.getAvgRenderMs(), TurzxFrameRenderer.getAvgEncodeMs()));
+        sb.append(String.format(Locale.US, ",\"render_ms\":%.1f,\"road_ms\":%.1f,\"encode_ms\":%.1f,\"encode_wait_ms\":%.1f",
+                TurzxFrameRenderer.getAvgRenderMs(), TurzxFrameRenderer.getAvgRoadMs(),
+                TurzxFrameRenderer.getAvgEncodeMs(), TurzxUsbDriver.getAvgEncodeWaitMs()));
         sb.append(String.format(Locale.US, ",\"poll_ms\":%.1f,\"usb_tx_ms\":%.1f,\"ack_ms\":%.1f,\"slot_wait_ms\":%.1f,\"jpeg_kb\":%.1f",
                 TurzxUsbDriver.getAvgPollMs(), TurzxUsbDriver.getAvgTxMs(), TurzxUsbDriver.getAvgAckMs(),
                 TurzxUsbDriver.getAvgSlotWaitMs(), TurzxUsbDriver.getAvgJpegKb()));
@@ -11556,6 +12001,80 @@ public class TurzxMonitorMain {
             tuneCfg.delete();
         } catch (Exception e) {
             throw new RuntimeException("v1.4.3 hotkey / dashboard self-test failed", e);
+        }
+
+        // v1.4.4: render || encode pipeline handoff + batched road strips
+        try {
+            assertTrue(TurzxUsbDriver.pickFreeBuffer(-1, -1, 2) == 0
+                    && TurzxUsbDriver.pickFreeBuffer(0, -1, 2) == 1
+                    && TurzxUsbDriver.pickFreeBuffer(1, -1, 2) == 0
+                    && TurzxUsbDriver.pickFreeBuffer(0, 1, 2) == -1, "pipeline: free buffer selection");
+
+            // Render draws A while nothing is encoding, encoder takes A, render must then get the OTHER buffer
+            int bufA = TurzxUsbDriver.acquireRenderBuffer(10L);
+            assertTrue(bufA == 0, "pipeline: first buffer");
+            TurzxUsbDriver.queueEncodeJob(bufA, true, false);
+            assertTrue(TurzxUsbDriver.acquireRenderBuffer(30L) == -1, "pipeline: render waits while a frame is queued");
+            int[] job = TurzxUsbDriver.takeEncodeJob(10L);
+            assertTrue(job != null && job[0] == bufA && job[1] == 1 && job[2] == 0, "pipeline: encoder takes the queued job");
+            int bufB = TurzxUsbDriver.acquireRenderBuffer(10L);
+            assertTrue(bufB >= 0 && bufB != bufA, "pipeline: render never draws the buffer being encoded");
+            assertTrue(TurzxUsbDriver.takeEncodeJob(10L) == null, "pipeline: no job without a queue");
+            TurzxUsbDriver.finishEncodeJob();
+            assertTrue(TurzxUsbDriver.acquireRenderBuffer(10L) == 0, "pipeline: buffer free again after encode");
+
+            // Batched strips cover exactly the same segments as the old per-segment loop
+            float[] xs = TurzxFrameRenderer.ROAD_X_STEPS;
+            int[] solid = TurzxFrameRenderer.stripRuns(xs, false, 0f);
+            assertTrue(solid.length == 2 && solid[0] == 0 && solid[1] == xs.length - 1, "road: solid strip is one run");
+            float[] phases = new float[]{0f, 1.3f, 2.9f, 4.5f, 17.2f};
+            for (int pi = 0; pi < phases.length; pi++) {
+                int[] runs = TurzxFrameRenderer.stripRuns(xs, true, phases[pi]);
+                boolean[] covered = new boolean[xs.length - 1];
+                for (int r = 0; r + 1 < runs.length; r += 2) {
+                    assertTrue(runs[r] < runs[r + 1], "road: run has at least one segment");
+                    for (int k = runs[r]; k < runs[r + 1]; k++) covered[k] = true;
+                }
+                for (int i = 0; i < xs.length - 1; i++) {
+                    boolean on = ((((int) Math.floor((xs[i] + phases[pi]) / 3.0f)) & 1) == 0);
+                    assertTrue(covered[i] == on, "road: dashed segment " + i + " phase " + phases[pi]);
+                }
+            }
+            float[] pos = TurzxFrameRenderer.fadeStopPositions(xs, 14f, 130f, 950f, 1.35f);
+            assertTrue(pos[0] == 0f && pos[pos.length - 1] == 1f, "road: gradient stops span 0..1");
+            for (int i = 1; i < pos.length; i++) {
+                assertTrue(pos[i] >= pos[i - 1], "road: gradient stops non-decreasing");
+            }
+
+            TurzxOverlayController.DashboardStats ds2 = new TurzxOverlayController.DashboardStats();
+            ds2.usbConnected = true;
+            ds2.targetFps = 20;
+            ds2.fps = 9.0;
+            ds2.renderMs = 27.0;
+            ds2.encodeMs = 77.0;
+            ds2.txMs = 3.0;
+            ds2.ackMs = 10.0;
+            assertTrue(TurzxOverlayController.describeBottleneck(ds2).contains("병목: 인코딩 77"),
+                    "dashboard: encode-bound pipeline names the encoder");
+
+            // Panel RST test sequencing: A -> B -> C (PHASE_MS each), then finished with a summary
+            assertTrue(PanelRstTest.reportLine().equals("not run"), "rst: idle before start");
+            byte[][] tf = new byte[][]{new byte[]{1}, new byte[]{2}, new byte[]{3}};
+            long t0 = 100000L;
+            PanelRstTest.startForTest(tf, t0);
+            assertTrue(PanelRstTest.phase(t0) == 0 && PanelRstTest.frameFor(0)[0] == 1, "rst: phase A first");
+            PanelRstTest.record(0, true, 10.0);
+            PanelRstTest.record(0, true, 14.0);
+            assertTrue(PanelRstTest.phase(t0 + PanelRstTest.PHASE_MS + 1) == 1, "rst: phase B");
+            PanelRstTest.record(1, false, 0.0);
+            assertTrue(PanelRstTest.phase(t0 + 2 * PanelRstTest.PHASE_MS + 1) == 2, "rst: phase C");
+            assertTrue(PanelRstTest.statusLine(t0 + 2 * PanelRstTest.PHASE_MS + 1).contains("3/3"), "rst: live status");
+            assertTrue(PanelRstTest.phase(t0 + 3 * PanelRstTest.PHASE_MS) == -1 && !PanelRstTest.isRunning(t0 + 3 * PanelRstTest.PHASE_MS + 5),
+                    "rst: finished after three phases");
+            String rr = PanelRstTest.reportLine();
+            assertTrue(rr.startsWith("A 2✓ 0✗ 12ms · B 0✓ 1✗ · C 0✓ 0✗"), "rst: summary " + rr);
+        } catch (Exception e) {
+            throw new RuntimeException("v1.4.4 pipeline / road self-test failed", e);
         }
 
         System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + Chromium 1:1 HUD Assets + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");

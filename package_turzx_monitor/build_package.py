@@ -25,7 +25,7 @@ PKG_STAGE_DIR = BUILD_DIR / "pkg_stage"
 USB_ROOT_DIR = BUILD_DIR / "usb_root"
 
 OUTER_ZIP_PATH = REPO_ROOT / "HKG_5W_TurzxMonitor_USB.zip"
-MONITOR_VERSION = "1.4.3"
+MONITOR_VERSION = "1.4.4"
 
 PUBLIC_SANS_FONTS = {
     "PublicSans-Bold.ttf": "https://fonts.gstatic.com/s/publicsans/v21/ijwGs572Xtc6ZYQws9YVwllKVG8qX1oyOymu8Z65ww.ttf",
@@ -479,6 +479,13 @@ def build() -> None:
         generate_hud_assets(ASSETS_DIR)
     # 1c. libjpeg-turbo NEON JNI encoder (.so) as jar asset — extracted at runtime by NativeJpeg
     stage_native_encoder(ASSETS_DIR)
+    # 1d. Panel JPEG restart-marker test frames (committed; regenerate with tools/make_panel_test_jpegs.py)
+    panel_test_dir = BASE_DIR / "panel_test"
+    panel_test_jpegs = sorted(panel_test_dir.glob("panel_test_*.jpg"))
+    if len(panel_test_jpegs) != 3:
+        raise RuntimeError(f"Expected 3 panel test JPEGs in {panel_test_dir}, found {len(panel_test_jpegs)}")
+    for jpg in panel_test_jpegs:
+        shutil.copy2(jpg, ASSETS_DIR / jpg.name)
     classes_assets_dir = CLASSES_DIR / "assets"
     classes_assets_dir.mkdir(parents=True, exist_ok=True)
     for asset_file in sorted(ASSETS_DIR.iterdir()):

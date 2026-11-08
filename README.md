@@ -47,6 +47,8 @@
     - `TurzxOverlayController`: 헤드유닛 전체 화면(1920×720) 진단 대시보드 (`TYPE_VOLUME_OVERLAY = 2020`). USB·프레임 파이프라인(단계별 ms + 병목 판정) / 배터리 / 전력·주행 / 공조 / 미디어 / 연결·시스템 6개 카드, `[☁️ 업데이트]` / `[💾 로그저장]` / `[✖ 닫기]` 버튼. 부팅 시 숨김 상태로 시작하며 후진(R)·후방카메라·화면 꺼짐 시 자동으로 숨겨집니다. 내장 웹 서버 (`:8766`) 포함
     - `HotkeyWatcher`: **MAP 버튼을 3초 길게 누르면** 대시보드를 열고 닫습니다. D-Audio 키 입력 장치(`/dev/input/eventN`)를 비독점으로 읽으므로 MAP 키 본래 동작(내비 실행)은 그대로 유지됩니다. MAP 키 코드는 `/system/usr/keylayout/daudio*.kl`의 `SHORTCUT_MAP` 라벨에서 자동으로 찾으며, 찾지 못하면 대시보드의 `최근 키` 항목에서 코드를 확인해 `monitor.conf`에 `overlay_hotkey_code=<코드>`로 지정할 수 있습니다
     - `LiveTuning` / `FpsBench`: 대시보드 왼쪽 **실험 패널**에서 JPEG 품질, 목표 FPS, 패널 FPS(`CMD 0x0F`), ADAS 도로 그리기 ON/OFF, 텔레메트리 수집 주기를 `[－]/[＋]`로 즉시 바꿀 수 있습니다. 값을 바꾸면 2초 안정화 후 5초 동안 구간 평균(FPS, 렌더/인코딩/전송/응답/수집 ms, JPEG KB)을 자동 측정해 결과를 쌓습니다. 바꾼 값은 `[💾 저장]`을 누를 때만 `monitor.conf`에 기록되고(그 전에는 재시작하면 원래대로), `[↺ 복원]`으로 저장된 값으로 돌아갑니다. 측정 기록은 로그 저장 리포트의 `FPS bench` 줄에도 남습니다
+    - `PanelRstTest`: 실험 패널의 `[🧪RST]` 버튼은 TURZX 패널의 JPEG restart marker(DRI/RST) 지원 여부를 확인합니다. 패널에 A(마커 없음, 기준) → B(MCU 행마다 RST) → C(MCU마다 RST) 테스트 화면을 6초씩 보여주고 전송 성공/실패·응답 시간을 기록합니다(리포트의 `Panel RST test` 줄). B·C가 A와 똑같이 보이면 '바뀐 띠만 재압축' 인코더를 적용할 수 있습니다. 테스트 이미지는 `package_turzx_monitor/panel_test/`에 있고 `tools/make_panel_test_jpegs.py`로 다시 만들 수 있습니다
+    - 렌더 파이프라인(v1.4.4): 텔레메트리 수집 / Canvas 렌더 / JPEG 인코딩 / USB 전송이 각각 별도 스레드이고, 랜드스케이프 버퍼 2개를 번갈아 써서 렌더와 인코딩이 동시에 진행됩니다(프레임 시간 = 가장 느린 단계)
     - `DebugManager` & `OtaUpdateManager`: 진단 로그 덤프 수집기 및 GitHub `TLSv1.2` OTA 자동 업데이트 매니저
   - `build_package.py`: JDK 8 컴파일 + 호스트 자체 검증 테스트(`test-self`) + Android API 19 Dalvik DEX(`035`) 변환 + `ota/` 생성 및 패키징 스크립트
 - **웹 시안 및 라이브 뷰어**: `turzx_92_mockup.html`
@@ -67,7 +69,7 @@ python package_turzx_monitor/build_package.py
 2. 설치 후 `hkg-turzxmonitor` 백그라운드 서비스가 자동 실행되며, 유선 USB 허브에 연결된 **TURZX 9.2인치 모니터(`1cbe:0092`)**를 감지하여 자동으로 `1920 × 462` 클러스터 HUD 화면을 전송합니다.
 3. 내장 웹 서버(`http://<헤드유닛_IP>:8766/`)에서 다음 엔드포인트를 사용할 수 있습니다:
    - `/`: 실시간 클러스터 HUD 웹 뷰어
-   - `/status.json`: 4대 도메인 텔레메트리 + USB + OTA 상태 JSON (`fps`, `jpeg_encoder`, `render_ms`, `encode_ms`, `poll_ms`, `usb_tx_ms`, `ack_ms`, `slot_wait_ms`, `jpeg_kb` 포함)
+   - `/status.json`: 4대 도메인 텔레메트리 + USB + OTA 상태 JSON (`fps`, `jpeg_encoder`, `render_ms`, `road_ms`, `encode_ms`, `encode_wait_ms`, `poll_ms`, `usb_tx_ms`, `ack_ms`, `slot_wait_ms`, `jpeg_kb` 포함)
    - 실험 옵션: `config/monitor.conf`에 `usb_panel_fps=<1~60>`을 넣으면 연결 시 TURZX `CMD 0x0F`(프레임레이트)를 전송합니다 (기본 `0` = 전송 안 함). `hud_road=0`이면 ADAS 3D 도로를 그리지 않고, `telemetry_poll_ms`(기본 `200`)로 텔레메트리 수집 주기를 정합니다
    - `/frame.jpg`: 실시간 렌더링된 `1920 × 462` JPEG 프레임 (요청이 있을 때만 생성, 첫 요청은 최대 0.8초 대기)
    - `/albumart.jpg`: 현재 재생 곡의 원본 앨범 커버 이미지
