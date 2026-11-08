@@ -25,7 +25,7 @@ PKG_STAGE_DIR = BUILD_DIR / "pkg_stage"
 USB_ROOT_DIR = BUILD_DIR / "usb_root"
 
 OUTER_ZIP_PATH = REPO_ROOT / "HKG_5W_TurzxMonitor_USB.zip"
-MONITOR_VERSION = "1.4.2"
+MONITOR_VERSION = "1.4.3"
 
 PUBLIC_SANS_FONTS = {
     "PublicSans-Bold.ttf": "https://fonts.gstatic.com/s/publicsans/v21/ijwGs572Xtc6ZYQws9YVwllKVG8qX1oyOymu8Z65ww.ttf",
@@ -504,10 +504,14 @@ def build() -> None:
     )
 
     # 4. Convert only com.hkg.turzxmonitor .class files to Dalvik DEX (--min-api 19 -> DEX 035 for Android 4.4.2)
+    # The class files go to d8 inside one jar: passing every .class path exceeds the Windows command-line limit.
     app_classes_dir = CLASSES_DIR / "com" / "hkg" / "turzxmonitor"
-    class_files = [str(p) for p in sorted(app_classes_dir.rglob("*.class"))]
+    app_classes_jar = BUILD_DIR / "app_classes.jar"
+    with zipfile.ZipFile(app_classes_jar, "w", compression=zipfile.ZIP_STORED) as zf:
+        for p in sorted(app_classes_dir.rglob("*.class")):
+            zf.write(p, p.relative_to(CLASSES_DIR).as_posix())
     subprocess.run(
-        [d8, "--min-api", "19", "--no-desugaring", "--output", str(DEX_DIR), *class_files],
+        [d8, "--min-api", "19", "--no-desugaring", "--output", str(DEX_DIR), str(app_classes_jar)],
         check=True,
     )
 

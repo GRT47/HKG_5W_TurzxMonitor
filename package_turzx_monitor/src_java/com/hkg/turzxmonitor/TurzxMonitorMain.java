@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.4.2";
+    public static final String MONITOR_VERSION = "1.4.3";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -172,6 +172,14 @@ public class TurzxMonitorMain {
         public int usbRotation = 270;     // 270 or 90 (1920x462 -> 462x1920 portrait scanout)
         public int usbJpegQuality = 70;
         public int usbFps = 12;
+        // TURZX CMD 0x0F (frame rate) sent once on connect; 0 = never send (panel firmware default)
+        public int usbPanelFps = 0;
+        // Linux key code that toggles the full-screen dashboard on a 3s long press; 0 = auto (MAP key from .kl)
+        public int overlayHotkeyCode = 0;
+        // Column 2 3D ADAS road (largest render cost); false = static background only
+        public boolean hudRoadEnabled = true;
+        // Telemetry (Binder/CAN) poll period of the separate poll thread
+        public int telemetryPollMs = 200;
         public String commaIp = "";
         public boolean autoUpdate = true;
         public int x = 24;
@@ -370,6 +378,7 @@ public class TurzxMonitorMain {
         }
         TurzxOverlayController.init(installDir);
         TurzxUsbDriver.startUsbPusherLoop(installDir);
+        HotkeyWatcher.start();
         OtaUpdateManager.startAutoUpdateWorker(installDir);
 
         final File cmdFile = new File(CMD_FILE_PATH);
@@ -427,6 +436,9 @@ public class TurzxMonitorMain {
      * - Encrypted with DES/CBC/NoPadding using key "slv3tuzx" and IV "slv3tuzx".
      * - Trailer at packet[510..511]: 0xA1, 0x1A (161, 26).
      */
+    private static final Object TURZX_CIPHER_LOCK = new Object();
+    private static Cipher turzxEncryptCipher = null;
+
     public static byte[] buildTurzxCommandPacket(int cmdId, int payloadOrArg) {
         try {
             byte[] plain = new byte[504];
@@ -450,11 +462,18 @@ public class TurzxMonitorMain {
                 plain[11] = (byte) (payloadOrArg & 0xFF);
             }
 
-            SecretKeySpec keySpec = new SecretKeySpec(TURZX_DES_KEY_BYTES, "DES");
-            IvParameterSpec ivSpec = new IvParameterSpec(TURZX_DES_KEY_BYTES);
-            Cipher cipher = Cipher.getInstance("DES/CBC/NoPadding");
-            cipher.init(Cipher.ENCRYPT_MODE, keySpec, ivSpec);
-            byte[] encrypted = cipher.doFinal(plain);
+            byte[] encrypted;
+            synchronized (TURZX_CIPHER_LOCK) {
+                // Cipher.getInstance() is a provider lookup (several ms on Dalvik) -> created once and reused.
+                // doFinal() resets the cipher to its init state (same key + IV), so every packet encrypts identically.
+                if (turzxEncryptCipher == null) {
+                    Cipher cipher = Cipher.getInstance("DES/CBC/NoPadding");
+                    cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(TURZX_DES_KEY_BYTES, "DES"),
+                            new IvParameterSpec(TURZX_DES_KEY_BYTES));
+                    turzxEncryptCipher = cipher;
+                }
+                encrypted = turzxEncryptCipher.doFinal(plain);
+            }
 
             byte[] packet = new byte[512];
             System.arraycopy(encrypted, 0, packet, 0, 504);
@@ -462,6 +481,9 @@ public class TurzxMonitorMain {
             packet[511] = (byte) 0x1A;
             return packet;
         } catch (Exception e) {
+            synchronized (TURZX_CIPHER_LOCK) {
+                turzxEncryptCipher = null; // rebuild on next packet
+            }
             throw new RuntimeException("DES-CBC TURZX packet encryption failed", e);
         }
     }
@@ -769,7 +791,70 @@ public class TurzxMonitorMain {
             }
         }
 
+        // ---- Pipeline (v1.4.3) ----
+        // The old single loop ran poll -> render -> encode -> USB send -> panel ACK back to back, so the frame time was
+        // the SUM of all stages (~200-250ms = 4-5 FPS). Now three threads:
+        //   Turzx-TelemetryPoll : Binder/CAN polling at ~5Hz, publishes the latest snapshot (off the frame path)
+        //   TurzxUsbPusher      : render + JPEG encode of frame N+1 while frame N is on the wire
+        //   TurzxUsbSender      : USB connect, bulk send and panel ACK wait
+        // A one-slot mailbox with back-pressure links render and send, so throughput ~ the SLOWEST stage
+        // and no frame is rendered just to be dropped.
+        private static final long TELEMETRY_POLL_PERIOD_SCREEN_OFF_MS = 400L;
+        private static final Object FRAME_SLOT_LOCK = new Object();
+        private static byte[] pendingPanelJpeg = null; // guarded by FRAME_SLOT_LOCK
+        private static volatile TelemetrySnapshot latestPolledSnap = null;
+        private static volatile boolean screenOffActive = false;
+
+        // Per-stage timing (EMA, ms) for /status.json + debug report
+        private static volatile double avgPollMs = 0.0;
+        private static volatile double avgTxMs = 0.0;
+        private static volatile double avgAckMs = 0.0;
+        private static volatile double avgJpegKb = 0.0;
+        private static volatile double avgSlotWaitMs = 0.0;
+
+        public static double getAvgPollMs() {
+            return avgPollMs;
+        }
+
+        public static double getAvgTxMs() {
+            return avgTxMs;
+        }
+
+        public static double getAvgAckMs() {
+            return avgAckMs;
+        }
+
+        public static double getAvgJpegKb() {
+            return avgJpegKb;
+        }
+
+        public static double getAvgSlotWaitMs() {
+            return avgSlotWaitMs;
+        }
+
+        private static double emaMs(double prev, double sample) {
+            return (prev <= 0.0) ? sample : (prev * 0.9 + sample * 0.1);
+        }
+
         public static void startUsbPusherLoop(final String installDir) {
+            Thread poll = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    runTelemetryPollLoop();
+                }
+            }, "Turzx-TelemetryPoll");
+            poll.setDaemon(true);
+            poll.start();
+
+            Thread sender = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    runSenderLoop();
+                }
+            }, "TurzxUsbSender");
+            sender.setDaemon(true);
+            sender.start();
+
             Thread t = new Thread(new Runnable() {
                 @Override
                 public void run() {
@@ -780,22 +865,91 @@ public class TurzxMonitorMain {
             t.start();
         }
 
-        private static void runLoop(String installDir) {
-            long fpsWinStartMs = System.currentTimeMillis();
-            int fpsWinCount = 0;
+        private static void runTelemetryPollLoop() {
+            while (true) {
+                try {
+                    long t0 = System.currentTimeMillis();
+                    TelemetrySnapshot snap = TelemetryCollector.pollSnapshot(TurzxOverlayController.getSysContext());
+                    long dt = System.currentTimeMillis() - t0;
+                    avgPollMs = emaMs(avgPollMs, dt);
+                    FpsBench.addPoll(dt);
+                    if (snap != null) {
+                        latestPolledSnap = snap;
+                    }
+                    long period = TelemetryCollector.isVehicleScreenOff()
+                            ? Math.max(TELEMETRY_POLL_PERIOD_SCREEN_OFF_MS, LiveTuning.pollMs) : LiveTuning.pollMs;
+                    Thread.sleep(Math.max(20L, period - dt));
+                } catch (Throwable t) {
+                    try {
+                        Thread.sleep(1000L);
+                    } catch (InterruptedException ignored) {
+                    }
+                }
+            }
+        }
 
+        /** Render thread: blocks until the sender has taken the previous frame (it is being transmitted now). */
+        private static void waitForFrameSlotFree(long maxWaitMs) throws InterruptedException {
+            long t0 = System.currentTimeMillis();
+            synchronized (FRAME_SLOT_LOCK) {
+                long deadline = t0 + maxWaitMs;
+                while (pendingPanelJpeg != null) {
+                    long remain = deadline - System.currentTimeMillis();
+                    if (remain <= 0L) break; // sender stuck: the next offer simply replaces the stale frame
+                    FRAME_SLOT_LOCK.wait(remain);
+                }
+            }
+            avgSlotWaitMs = emaMs(avgSlotWaitMs, System.currentTimeMillis() - t0);
+        }
+
+        private static void offerPanelFrame(byte[] jpeg) {
+            synchronized (FRAME_SLOT_LOCK) {
+                pendingPanelJpeg = jpeg;
+                FRAME_SLOT_LOCK.notifyAll();
+            }
+        }
+
+        private static byte[] takePanelFrame(long maxWaitMs) throws InterruptedException {
+            synchronized (FRAME_SLOT_LOCK) {
+                if (pendingPanelJpeg == null && maxWaitMs > 0L) {
+                    FRAME_SLOT_LOCK.wait(maxWaitMs);
+                }
+                byte[] f = pendingPanelJpeg;
+                if (f != null) {
+                    pendingPanelJpeg = null;
+                    FRAME_SLOT_LOCK.notifyAll();
+                }
+                return f;
+            }
+        }
+
+        private static void clearPendingFrame() {
+            synchronized (FRAME_SLOT_LOCK) {
+                pendingPanelJpeg = null;
+                FRAME_SLOT_LOCK.notifyAll();
+            }
+        }
+
+        /** Render/encode producer. Never touches the USB device except the synchronized blank/close paths. */
+        private static void runLoop(String installDir) {
             while (true) {
                 try {
                     MonitorConfig cfg = TurzxOverlayController.getConfig();
                     long frameStartMs = System.currentTimeMillis();
-                    TelemetrySnapshot snap = TelemetryCollector.pollSnapshot(TurzxOverlayController.getSysContext());
+                    TelemetrySnapshot snap = latestPolledSnap;
+                    if (snap == null) {
+                        Thread.sleep(50L); // first telemetry poll still running
+                        continue;
+                    }
 
                     boolean screenOff = "1".equals(getSystemProperty("tcc.hwc.lcd.disable", "0"))
                             || "false".equalsIgnoreCase(getSystemProperty("sys.boot.show_screen", "true"))
                             || TelemetryCollector.isVehicleScreenOff();
+                    screenOffActive = screenOff;
                     if (screenOff) {
                         if (connected) {
                             DebugManager.logEvent("USB", "Vehicle ignition/screen OFF detected -> blanking TURZX panel and setting brightness=0");
+                            clearPendingFrame();
                             blankDisplayAndClose();
                         }
                         statusText = "시동 OFF · 화면 절전 대기 중";
@@ -803,67 +957,111 @@ public class TurzxMonitorMain {
                         continue;
                     }
 
-                    if (cfg.usbPushEnabled) {
-                        if (!connected && (frameStartMs - lastOpenAttemptMs) >= 500L) {
-                            lastOpenAttemptMs = frameStartMs;
-                            tryOpenTurzxUsbDevice();
+                    if (!cfg.usbPushEnabled) {
+                        if (connected) {
+                            closeUsbConnection();
                         }
-                    } else if (connected) {
-                        closeUsbConnection();
+                        statusText = "USB 출력 일시정지 (웹 :8766 활성)";
                     }
 
                     // Only render/encode what has a consumer: the panel when connected, the landscape JPEG
                     // only while someone polls /frame.jpg (the web viewer itself uses /status.json).
                     boolean needPanel = cfg.usbPushEnabled && connected;
+                    if (needPanel) {
+                        waitForFrameSlotFree(600L);
+                        needPanel = connected;
+                    }
                     boolean needLandscape = (System.currentTimeMillis() - lastLandscapeDemandMs) < LANDSCAPE_DEMAND_WINDOW_MS;
+                    // Freshest telemetry after the (possible) wait above
+                    TelemetrySnapshot fresh = latestPolledSnap;
                     byte[][] jpegs = TurzxFrameRenderer.renderHudJpegPair(
-                            snap, cfg.usbRotation, cfg.usbJpegQuality, needPanel, needLandscape);
+                            fresh != null ? fresh : snap, cfg.usbRotation, LiveTuning.jpegQuality, needPanel, needLandscape);
                     if (jpegs != null && jpegs.length == 2) {
                         if (jpegs[0] != null) {
                             latestLandscapeJpeg = jpegs[0];
                             latestLandscapeJpegMs = System.currentTimeMillis();
                         }
                         byte[] panelJpeg = jpegs[1];
-
-                        if (cfg.usbPushEnabled) {
-                            if (connected && panelJpeg != null && panelJpeg.length > 0) {
-                                if (lastAppliedBrightness != cfg.usbBrightness) {
-                                    if (sendBrightnessCommand(cfg.usbBrightness)) {
-                                        lastAppliedBrightness = cfg.usbBrightness;
-                                    }
-                                }
-                                if (sendJpegFrame(panelJpeg)) {
-                                    pushedFrames++;
-                                    fpsWinCount++;
-                                    long now = System.currentTimeMillis();
-                                    if (now - fpsWinStartMs >= 1000L) {
-                                        liveFps = (fpsWinCount * 1000.0) / Math.max(1L, now - fpsWinStartMs);
-                                        fpsWinCount = 0;
-                                        fpsWinStartMs = now;
-                                    }
-                                    statusText = String.format(Locale.US, "TURZX 연결됨 (%s · %.1f FPS)", connectedDevPath, liveFps);
-                                } else {
-                                    statusText = "USB 전송 오류 · 재연결 대기";
-                                    closeUsbConnection();
-                                }
-                            }
-                        } else {
-                            if (connected) {
-                                closeUsbConnection();
-                            }
-                            statusText = "USB 출력 일시정지 (웹 :8766 활성)";
+                        if (needPanel && connected && panelJpeg != null && panelJpeg.length > 0) {
+                            offerPanelFrame(panelJpeg);
                         }
                     }
 
-                    int targetFps = Math.max(2, Math.min(25, cfg.usbFps));
+                    int targetFps = Math.max(2, Math.min(25, LiveTuning.targetFps));
                     long targetPeriodMs = 1000L / targetFps;
                     long elapsedMs = System.currentTimeMillis() - frameStartMs;
-                    long sleepMs = Math.max(15L, targetPeriodMs - elapsedMs);
+                    long sleepMs = Math.max(5L, targetPeriodMs - elapsedMs);
                     Thread.sleep(sleepMs);
                 } catch (Throwable t) {
+                    clearPendingFrame();
                     closeUsbConnection();
                     try {
                         Thread.sleep(1500L);
+                    } catch (InterruptedException ignored) {
+                    }
+                }
+            }
+        }
+
+        /** USB owner: connects to the panel and transmits frames handed over by the render thread. */
+        private static void runSenderLoop() {
+            long fpsWinStartMs = System.currentTimeMillis();
+            int fpsWinCount = 0;
+            while (true) {
+                try {
+                    FpsBench.tick(System.currentTimeMillis());
+                    MonitorConfig cfg = TurzxOverlayController.getConfig();
+                    if (cfg.usbPushEnabled && !connected && !screenOffActive && latestPolledSnap != null) {
+                        long now = System.currentTimeMillis();
+                        if ((now - lastOpenAttemptMs) >= 500L) {
+                            lastOpenAttemptMs = now;
+                            tryOpenTurzxUsbDevice();
+                        }
+                    }
+
+                    byte[] frame = takePanelFrame(connected ? 500L : 250L);
+                    if (frame == null) {
+                        continue;
+                    }
+
+                    boolean sent = false;
+                    boolean attempted = false;
+                    synchronized (TurzxUsbDriver.class) {
+                        if (connected) {
+                            attempted = true;
+                            if (LiveTuning.panelFpsDirty) {
+                                LiveTuning.panelFpsDirty = false;
+                                sendPanelFpsCommand(LiveTuning.panelFps);
+                            }
+                            if (lastAppliedBrightness != cfg.usbBrightness) {
+                                if (sendBrightnessCommand(cfg.usbBrightness)) {
+                                    lastAppliedBrightness = cfg.usbBrightness;
+                                }
+                            }
+                            sent = sendJpegFrame(frame);
+                            if (!sent) {
+                                statusText = "USB 전송 오류 · 재연결 대기";
+                                closeUsbConnection();
+                            }
+                        }
+                    }
+                    if (attempted && sent) {
+                        pushedFrames++;
+                        fpsWinCount++;
+                        long now = System.currentTimeMillis();
+                        if (now - fpsWinStartMs >= 1000L) {
+                            liveFps = (fpsWinCount * 1000.0) / Math.max(1L, now - fpsWinStartMs);
+                            fpsWinCount = 0;
+                            fpsWinStartMs = now;
+                        }
+                        statusText = String.format(Locale.US, "TURZX 연결됨 (%s · %.1f FPS)", connectedDevPath, liveFps);
+                    } else if (attempted) {
+                        fpsWinCount = 0;
+                        fpsWinStartMs = System.currentTimeMillis();
+                    }
+                } catch (Throwable t) {
+                    try {
+                        Thread.sleep(200L);
                     } catch (InterruptedException ignored) {
                     }
                 }
@@ -1032,8 +1230,12 @@ public class TurzxMonitorMain {
                 boolean stopOk = bulkTransferOut(stopVideoPkt, 0, stopVideoPkt.length, 600);
                 drainBulkIn(250);
 
-                // 3. Send initial brightness (CMD 14)
+                // 2b. Optional CMD 15 (frame rate) — experimental, only when usb_panel_fps > 0
                 MonitorConfig cfg = TurzxOverlayController.getConfig();
+                LiveTuning.panelFpsDirty = false;
+                sendPanelFpsCommand(LiveTuning.panelFps);
+
+                // 3. Send initial brightness (CMD 14)
                 boolean brOk = sendBrightnessCommand(cfg.usbBrightness);
                 if (brOk) {
                     lastAppliedBrightness = cfg.usbBrightness;
@@ -1083,6 +1285,8 @@ public class TurzxMonitorMain {
         private static synchronized void closeUsbConnection() {
             connected = false;
             connectedDevPath = "";
+            liveFps = 0.0; // was left at the last value after a disconnect
+            clearPendingFrame();
             if (usbDevConn != null) {
                 if (releaseIfcMethod != null) {
                     try {
@@ -1126,12 +1330,23 @@ public class TurzxMonitorMain {
             return drainBulkIn(200) > 0;
         }
 
+        /** CMD 0x0F frame rate (experimental). 0 = not sent (a previously sent value stays until reconnect). */
+        private static void sendPanelFpsCommand(int fps) {
+            if (fps <= 0) return;
+            byte[] fpsPkt = buildTurzxCommandPacket(TURZX_CMD_FPS, fps);
+            boolean fpsOk = bulkTransferOut(fpsPkt, 0, fpsPkt.length, 400);
+            int fpsReply = drainBulkIn(200);
+            DebugManager.logEvent("USB", "Sent TURZX CMD 0x0F frame rate=" + fps
+                    + " (out=" + fpsOk + ", reply=" + fpsReply + "B)");
+        }
+
         private static boolean sendJpegFrame(byte[] jpegBytes) {
             return sendPayloadFrame(TURZX_CMD_SEND_JPEG, jpegBytes);
         }
 
         private static boolean sendPayloadFrame(int cmdId, byte[] payloadBytes) {
             if (payloadBytes == null || payloadBytes.length == 0) return false;
+            long tTx0 = System.nanoTime();
             byte[] hdr = buildTurzxCommandPacket(cmdId, payloadBytes.length);
             if (!bulkTransferOut(hdr, 0, hdr.length, 500)) {
                 return false;
@@ -1145,7 +1360,15 @@ public class TurzxMonitorMain {
                 }
                 offset += len;
             }
-            return drainBulkIn(350) > 0;
+            long tAck0 = System.nanoTime();
+            boolean acked = drainBulkIn(350) > 0;
+            if (cmdId == TURZX_CMD_SEND_JPEG && acked) {
+                avgTxMs = emaMs(avgTxMs, (tAck0 - tTx0) / 1e6);
+                avgAckMs = emaMs(avgAckMs, (System.nanoTime() - tAck0) / 1e6);
+                avgJpegKb = emaMs(avgJpegKb, payloadBytes.length / 1024.0);
+                FpsBench.addFrame((tAck0 - tTx0) / 1e6, (System.nanoTime() - tAck0) / 1e6, payloadBytes.length / 1024.0);
+            }
+            return acked;
         }
 
         private static boolean bulkTransferOut(byte[] buf, int offset, int length, int timeoutMs) {
@@ -1492,6 +1715,7 @@ public class TurzxMonitorMain {
             }
         }
 
+        private static Class<?>[] gfxClasses = null;
         private static volatile String lastEncoderName = "-";
         private static volatile double avgRenderMs = 0.0;
         private static volatile double avgEncodeMs = 0.0;
@@ -1508,6 +1732,11 @@ public class TurzxMonitorMain {
             return avgEncodeMs;
         }
 
+        private static void recordEncodeMs(double ms) {
+            avgEncodeMs = ema(avgEncodeMs, ms);
+            FpsBench.addEncode(ms);
+        }
+
         private static double ema(double prev, double sample) {
             return (prev <= 0.0) ? sample : (prev * 0.9 + sample * 0.1);
         }
@@ -1522,18 +1751,29 @@ public class TurzxMonitorMain {
                                                               boolean needPanel, boolean needLandscape) {
             if (!needPanel && !needLandscape) return null;
             try {
-                Class<?> bmpCls = Class.forName("android.graphics.Bitmap");
-                Class<?> cfgCls = Class.forName("android.graphics.Bitmap$Config");
-                Class<?> canvasCls = Class.forName("android.graphics.Canvas");
-                Class<?> paintCls = Class.forName("android.graphics.Paint");
-                Class<?> styleCls = Class.forName("android.graphics.Paint$Style");
-                Class<?> alignCls = Class.forName("android.graphics.Paint$Align");
-                Class<?> tfCls = Class.forName("android.graphics.Typeface");
-                Class<?> rectFCls = Class.forName("android.graphics.RectF");
-                Class<?> rectCls = Class.forName("android.graphics.Rect");
-                Class<?> pathCls = Class.forName("android.graphics.Path");
-                Class<?> matrixCls = Class.forName("android.graphics.Matrix");
-                Class<?> fmtCls = Class.forName("android.graphics.Bitmap$CompressFormat");
+                if (gfxClasses == null) {
+                    String[] names = new String[]{
+                            "android.graphics.Bitmap", "android.graphics.Bitmap$Config", "android.graphics.Canvas",
+                            "android.graphics.Paint", "android.graphics.Paint$Style", "android.graphics.Paint$Align",
+                            "android.graphics.Typeface", "android.graphics.RectF", "android.graphics.Rect",
+                            "android.graphics.Path", "android.graphics.Matrix", "android.graphics.Bitmap$CompressFormat"
+                    };
+                    Class<?>[] loaded = new Class<?>[names.length];
+                    for (int i = 0; i < names.length; i++) loaded[i] = Class.forName(names[i]);
+                    gfxClasses = loaded;
+                }
+                Class<?> bmpCls = gfxClasses[0];
+                Class<?> cfgCls = gfxClasses[1];
+                Class<?> canvasCls = gfxClasses[2];
+                Class<?> paintCls = gfxClasses[3];
+                Class<?> styleCls = gfxClasses[4];
+                Class<?> alignCls = gfxClasses[5];
+                Class<?> tfCls = gfxClasses[6];
+                Class<?> rectFCls = gfxClasses[7];
+                Class<?> rectCls = gfxClasses[8];
+                Class<?> pathCls = gfxClasses[9];
+                Class<?> matrixCls = gfxClasses[10];
+                Class<?> fmtCls = gfxClasses[11];
 
                 if (landscapeBitmap == null) {
                     Object argb8888 = cfgCls.getField("ARGB_8888").get(null);
@@ -1583,6 +1823,7 @@ public class TurzxMonitorMain {
                         bmpCls, canvasCls, paintCls, alignCls, rectFCls, rectCls, pathCls, s);
                 long tEncode0 = System.nanoTime();
                 avgRenderMs = ema(avgRenderMs, (tEncode0 - tRender0) / 1e6);
+                FpsBench.addRender((tEncode0 - tRender0) / 1e6);
 
                 int q = Math.max(50, Math.min(95, jpegQuality));
                 int nativeRot = (rotationDeg == 90) ? 90 : 270;
@@ -1601,7 +1842,7 @@ public class TurzxMonitorMain {
                     }
                     if (ok) {
                         lastEncoderName = NativeJpeg.getInfo();
-                        avgEncodeMs = ema(avgEncodeMs, (System.nanoTime() - tEncode0) / 1e6);
+                        recordEncodeMs((System.nanoTime() - tEncode0) / 1e6);
                         return new byte[][]{landBytes, panelBytes};
                     }
                 }
@@ -1617,7 +1858,7 @@ public class TurzxMonitorMain {
                     landBytes = baosLand.toByteArray();
                 }
                 if (!needPanel) {
-                    avgEncodeMs = ema(avgEncodeMs, (System.nanoTime() - tEncode0) / 1e6);
+                    recordEncodeMs((System.nanoTime() - tEncode0) / 1e6);
                     return new byte[][]{landBytes, null};
                 }
 
@@ -1640,7 +1881,7 @@ public class TurzxMonitorMain {
                 compressM.invoke(panelBitmap, jpegFmt, Integer.valueOf(q), baosPanel);
                 panelBytes = baosPanel.toByteArray();
 
-                avgEncodeMs = ema(avgEncodeMs, (System.nanoTime() - tEncode0) / 1e6);
+                recordEncodeMs((System.nanoTime() - tEncode0) / 1e6);
                 return new byte[][]{landBytes, panelBytes};
             } catch (Throwable t) {
                 return null;
@@ -1763,6 +2004,18 @@ public class TurzxMonitorMain {
             drawBmpRect.invoke(c, srcBmp, sRect, dRect, null);
         }
 
+        // Render-thread-only reflection caches (renderHudJpegPair is synchronized)
+        private static Method[] hudMethods = null;
+        private static Object[] hudAligns = null;
+        private static Method[] roadMethods = null;
+        private static Constructor<?>[] roadCtors = null;
+        private static Object roadClampMode = null;
+        private static Object roadPath = null;
+        private static Object artShaderBitmap = null;
+        private static Object artShader = null;
+        private static int artBmpW = 0;
+        private static int artBmpH = 0;
+
         private static void drawHudToCanvas(
                 Object c,
                 Object pFill,
@@ -1784,26 +2037,52 @@ public class TurzxMonitorMain {
                 Class<?> pathCls,
                 TelemetrySnapshot s
         ) throws Exception {
-            Method setColor = paintCls.getMethod("setColor", int.class);
-            Method setStrokeW = paintCls.getMethod("setStrokeWidth", float.class);
-            Method setTextSize = paintCls.getMethod("setTextSize", float.class);
-            Method setTextAlign = paintCls.getMethod("setTextAlign", alignCls);
-            Method measureText = paintCls.getMethod("measureText", String.class);
-            Object alignLeft = alignCls.getField("LEFT").get(null);
-            Object alignCenter = alignCls.getField("CENTER").get(null);
-            Object alignRight = alignCls.getField("RIGHT").get(null);
+            if (hudMethods == null) {
+                // Resolved once: these ~20 getMethod() lookups used to run on every frame
+                hudAligns = new Object[]{
+                        alignCls.getField("LEFT").get(null),
+                        alignCls.getField("CENTER").get(null),
+                        alignCls.getField("RIGHT").get(null)
+                };
+                hudMethods = new Method[]{
+                        paintCls.getMethod("setColor", int.class),
+                        paintCls.getMethod("setStrokeWidth", float.class),
+                        paintCls.getMethod("setTextSize", float.class),
+                        paintCls.getMethod("setTextAlign", alignCls),
+                        paintCls.getMethod("measureText", String.class),
+                        rectFCls.getMethod("set", float.class, float.class, float.class, float.class),
+                        rectCls.getMethod("set", int.class, int.class, int.class, int.class),
+                        canvasCls.getMethod("drawRoundRect", rectFCls, float.class, float.class, paintCls),
+                        canvasCls.getMethod("drawRect", float.class, float.class, float.class, float.class, paintCls),
+                        canvasCls.getMethod("drawOval", rectFCls, paintCls),
+                        canvasCls.getMethod("drawLine", float.class, float.class, float.class, float.class, paintCls),
+                        canvasCls.getMethod("drawText", String.class, float.class, float.class, paintCls),
+                        canvasCls.getMethod("drawPath", pathCls, paintCls),
+                        canvasCls.getMethod("drawBitmap", bmpCls, float.class, float.class, paintCls),
+                        canvasCls.getMethod("drawBitmap", bmpCls, rectCls, rectCls, paintCls),
+                        canvasCls.getMethod("drawBitmap", bmpCls, rectCls, rectFCls, paintCls)
+                };
+            }
+            Method setColor = hudMethods[0];
+            Method setStrokeW = hudMethods[1];
+            Method setTextSize = hudMethods[2];
+            Method setTextAlign = hudMethods[3];
+            Method measureText = hudMethods[4];
+            Object alignLeft = hudAligns[0];
+            Object alignCenter = hudAligns[1];
+            Object alignRight = hudAligns[2];
 
-            Method setRf = rectFCls.getMethod("set", float.class, float.class, float.class, float.class);
-            Method setRect = rectCls.getMethod("set", int.class, int.class, int.class, int.class);
-            Method drawRoundRect = canvasCls.getMethod("drawRoundRect", rectFCls, float.class, float.class, paintCls);
-            Method drawRect = canvasCls.getMethod("drawRect", float.class, float.class, float.class, float.class, paintCls);
-            Method drawOval = canvasCls.getMethod("drawOval", rectFCls, paintCls);
-            Method drawLine = canvasCls.getMethod("drawLine", float.class, float.class, float.class, float.class, paintCls);
-            Method drawText = canvasCls.getMethod("drawText", String.class, float.class, float.class, paintCls);
-            Method drawPath = canvasCls.getMethod("drawPath", pathCls, paintCls);
-            Method drawBmpXY = canvasCls.getMethod("drawBitmap", bmpCls, float.class, float.class, paintCls);
-            Method drawBmpRect = canvasCls.getMethod("drawBitmap", bmpCls, rectCls, rectCls, paintCls);
-            Method drawBmpRectF = canvasCls.getMethod("drawBitmap", bmpCls, rectCls, rectFCls, paintCls);
+            Method setRf = hudMethods[5];
+            Method setRect = hudMethods[6];
+            Method drawRoundRect = hudMethods[7];
+            Method drawRect = hudMethods[8];
+            Method drawOval = hudMethods[9];
+            Method drawLine = hudMethods[10];
+            Method drawText = hudMethods[11];
+            Method drawPath = hudMethods[12];
+            Method drawBmpXY = hudMethods[13];
+            Method drawBmpRect = hudMethods[14];
+            Method drawBmpRectF = hudMethods[15];
 
             // =================================================================
             // 1. BASE CHROMIUM LAYER (1920x462) FROM turzx_92_mockup.html
@@ -1925,10 +2204,16 @@ public class TurzxMonitorMain {
             // =================================================================
             // 3. COLUMN 2: 1:1 3D PERSPECTIVE ADAS ROAD + CHROMIUM HUD OVERLAY
             // =================================================================
-            drawCommaAdasRoad3D(c, rf, pFill, pStroke, pShader, pPubBold, pPubMed, pSysBold, pSysMed,
-                    setRf, drawRoundRect, drawRect, drawOval, drawLine, drawPath, drawText,
-                    setColor, setStrokeW, setTextSize, setTextAlign, measureText, alignCenter,
-                    canvasCls, paintCls, pathCls, s);
+            if (LiveTuning.roadEnabled) {
+                drawCommaAdasRoad3D(c, rf, pFill, pStroke, pShader, pPubBold, pPubMed, pSysBold, pSysMed,
+                        setRf, drawRoundRect, drawRect, drawOval, drawLine, drawPath, drawText,
+                        setColor, setStrokeW, setTextSize, setTextAlign, measureText, alignCenter,
+                        canvasCls, paintCls, pathCls, s);
+            } else {
+                // Experiment: plain dark column instead of the ~400-path 3D road (measures its render cost)
+                setColor.invoke(pFill, Integer.valueOf(0xFF0E1118));
+                drawRect.invoke(c, 610f, 14f, 1188f, 448f, pFill);
+            }
 
             // Determine SDI mode: "section" (구간단속), "traffic" (신호·과속), or "none" (일반 제한속도)
             String sdiMode;
@@ -2045,8 +2330,15 @@ public class TurzxMonitorMain {
             // =================================================================
             if (s.albumArtBitmap != null && bmpCls.isInstance(s.albumArtBitmap)) {
                 try {
-                    int bw = ((Integer) bmpCls.getMethod("getWidth").invoke(s.albumArtBitmap)).intValue();
-                    int bh = ((Integer) bmpCls.getMethod("getHeight").invoke(s.albumArtBitmap)).intValue();
+                    if (s.albumArtBitmap != artShaderBitmap) {
+                        // New artwork: size it once; the rounded-corner shader below is built once per bitmap
+                        artShaderBitmap = s.albumArtBitmap;
+                        artShader = null;
+                        artBmpW = ((Integer) bmpCls.getMethod("getWidth").invoke(s.albumArtBitmap)).intValue();
+                        artBmpH = ((Integer) bmpCls.getMethod("getHeight").invoke(s.albumArtBitmap)).intValue();
+                    }
+                    int bw = artBmpW;
+                    int bh = artBmpH;
                     if (bw > 0 && bh > 0) {
                         float ax0 = 1234f, ay0 = 32f, ax1 = 1406f, ay1 = 204f, aRad = 18f;
                         float dstW = ax1 - ax0;
@@ -2055,22 +2347,26 @@ public class TurzxMonitorMain {
                         boolean drawnRounded = false;
                         try {
                             Class<?> shaderCls = Class.forName("android.graphics.Shader");
-                            Class<?> tileCls = Class.forName("android.graphics.Shader$TileMode");
-                            Class<?> bsCls = Class.forName("android.graphics.BitmapShader");
-                            Class<?> matCls = Class.forName("android.graphics.Matrix");
-                            Object clamp = tileCls.getField("CLAMP").get(null);
-                            Object bs = bsCls.getConstructor(bmpCls, tileCls, tileCls)
-                                    .newInstance(s.albumArtBitmap, clamp, clamp);
-                            Object mat = matCls.getConstructor().newInstance();
-                            float scale = Math.max(dstW / (float) bw, dstH / (float) bh);
-                            float dx = ax0 + (dstW - bw * scale) * 0.5f;
-                            float dy = ay0 + (dstH - bh * scale) * 0.5f;
-                            matCls.getMethod("setScale", float.class, float.class)
-                                    .invoke(mat, Float.valueOf(scale), Float.valueOf(scale));
-                            matCls.getMethod("postTranslate", float.class, float.class)
-                                    .invoke(mat, Float.valueOf(dx), Float.valueOf(dy));
-                            shaderCls.getMethod("setLocalMatrix", matCls).invoke(bs, mat);
-                            Method setShaderM = paintCls.getMethod("setShader", shaderCls);
+                            if (artShader == null) {
+                                Class<?> tileCls = Class.forName("android.graphics.Shader$TileMode");
+                                Class<?> bsCls = Class.forName("android.graphics.BitmapShader");
+                                Class<?> matCls = Class.forName("android.graphics.Matrix");
+                                Object clamp = tileCls.getField("CLAMP").get(null);
+                                Object bs = bsCls.getConstructor(bmpCls, tileCls, tileCls)
+                                        .newInstance(s.albumArtBitmap, clamp, clamp);
+                                Object mat = matCls.getConstructor().newInstance();
+                                float scale = Math.max(dstW / (float) bw, dstH / (float) bh);
+                                float dx = ax0 + (dstW - bw * scale) * 0.5f;
+                                float dy = ay0 + (dstH - bh * scale) * 0.5f;
+                                matCls.getMethod("setScale", float.class, float.class)
+                                        .invoke(mat, Float.valueOf(scale), Float.valueOf(scale));
+                                matCls.getMethod("postTranslate", float.class, float.class)
+                                        .invoke(mat, Float.valueOf(dx), Float.valueOf(dy));
+                                shaderCls.getMethod("setLocalMatrix", matCls).invoke(bs, mat);
+                                artShader = bs;
+                            }
+                            Object bs = artShader;
+                            Method setShaderM = roadMethods != null ? roadMethods[3] : paintCls.getMethod("setShader", shaderCls);
                             setColor.invoke(pShader, Integer.valueOf(0xFFFFFFFF));
                             setShaderM.invoke(pShader, bs);
                             drawRoundRect.invoke(c, rf, Float.valueOf(aRad), Float.valueOf(aRad), pShader);
@@ -2087,6 +2383,9 @@ public class TurzxMonitorMain {
                     }
                 } catch (Throwable ignored) {
                 }
+            } else if (artShaderBitmap != null) {
+                artShaderBitmap = null; // release the cached artwork shader once the art is gone
+                artShader = null;
             }
 
             boolean hasRealMedia = s.mediaTitle != null
@@ -2255,29 +2554,48 @@ public class TurzxMonitorMain {
                 Class<?> pathCls,
                 TelemetrySnapshot s
         ) throws Exception {
-            Method saveM = canvasCls.getMethod("save");
-            Method restoreToCountM = canvasCls.getMethod("restoreToCount", int.class);
-            Method clipRectM = canvasCls.getMethod("clipRect", float.class, float.class, float.class, float.class);
+            if (roadMethods == null) {
+                Class<?> shaderCls = Class.forName("android.graphics.Shader");
+                Class<?> tileCls = Class.forName("android.graphics.Shader$TileMode");
+                Class<?> lgCls = Class.forName("android.graphics.LinearGradient");
+                Class<?> rgCls = Class.forName("android.graphics.RadialGradient");
+                roadClampMode = tileCls.getField("CLAMP").get(null);
+                roadCtors = new Constructor<?>[]{
+                        lgCls.getConstructor(
+                                float.class, float.class, float.class, float.class, int.class, int.class, tileCls),
+                        lgCls.getConstructor(
+                                float.class, float.class, float.class, float.class, int[].class, float[].class, tileCls),
+                        rgCls.getConstructor(
+                                float.class, float.class, float.class, int[].class, float[].class, tileCls)
+                };
+                roadMethods = new Method[]{
+                        canvasCls.getMethod("save"),
+                        canvasCls.getMethod("restoreToCount", int.class),
+                        canvasCls.getMethod("clipRect", float.class, float.class, float.class, float.class),
+                        paintCls.getMethod("setShader", shaderCls),
+                        pathCls.getMethod("reset"),
+                        pathCls.getMethod("moveTo", float.class, float.class),
+                        pathCls.getMethod("lineTo", float.class, float.class),
+                        pathCls.getMethod("quadTo", float.class, float.class, float.class, float.class),
+                        pathCls.getMethod("close")
+                };
+                roadPath = pathCls.getConstructor().newInstance();
+            }
+            Method saveM = roadMethods[0];
+            Method restoreToCountM = roadMethods[1];
+            Method clipRectM = roadMethods[2];
+            Object clampMode = roadClampMode;
+            Method setShaderM = roadMethods[3];
+            Constructor<?> lgTwoCtor = roadCtors[0];
+            Constructor<?> lgMultiCtor = roadCtors[1];
+            Constructor<?> rgMultiCtor = roadCtors[2];
 
-            Class<?> shaderCls = Class.forName("android.graphics.Shader");
-            Class<?> tileCls = Class.forName("android.graphics.Shader$TileMode");
-            Class<?> lgCls = Class.forName("android.graphics.LinearGradient");
-            Class<?> rgCls = Class.forName("android.graphics.RadialGradient");
-            Object clampMode = tileCls.getField("CLAMP").get(null);
-            Method setShaderM = paintCls.getMethod("setShader", shaderCls);
-            Constructor<?> lgTwoCtor = lgCls.getConstructor(
-                    float.class, float.class, float.class, float.class, int.class, int.class, tileCls);
-            Constructor<?> lgMultiCtor = lgCls.getConstructor(
-                    float.class, float.class, float.class, float.class, int[].class, float[].class, tileCls);
-            Constructor<?> rgMultiCtor = rgCls.getConstructor(
-                    float.class, float.class, float.class, int[].class, float[].class, tileCls);
-
-            Method resetP = pathCls.getMethod("reset");
-            Method moveTo = pathCls.getMethod("moveTo", float.class, float.class);
-            Method lineTo = pathCls.getMethod("lineTo", float.class, float.class);
-            Method quadTo = pathCls.getMethod("quadTo", float.class, float.class, float.class, float.class);
-            Method closeP = pathCls.getMethod("close");
-            Object path = pathCls.getConstructor().newInstance();
+            Method resetP = roadMethods[4];
+            Method moveTo = roadMethods[5];
+            Method lineTo = roadMethods[6];
+            Method quadTo = roadMethods[7];
+            Method closeP = roadMethods[8];
+            Object path = roadPath;
 
             int saveCount = ((Integer) saveM.invoke(c)).intValue();
             clipRectM.invoke(c, 609f, 13f, 1189f, 449f);
@@ -3956,7 +4274,12 @@ public class TurzxMonitorMain {
 
         public static TelemetrySnapshot pollSnapshot(Object sysContext) {
             pollTick++;
-            ensureBinderConnections(sysContext);
+            // Service (re)connection: absent services cost a ServiceManager IPC per call, so at most 1Hz
+            long ensureNowMs = System.currentTimeMillis();
+            if (lastEnsureBinderMs == 0L || ensureNowMs - lastEnsureBinderMs >= 1000L || ensureNowMs < lastEnsureBinderMs) {
+                lastEnsureBinderMs = ensureNowMs;
+                ensureBinderConnections(sysContext);
+            }
             startBackgroundThreadsIfNeeded();
 
             synchronized (liveSnapshot) {
@@ -4021,6 +4344,8 @@ public class TurzxMonitorMain {
                 return snap;
             }
         }
+
+        private static long lastEnsureBinderMs = 0L;
 
         private static void ensureBinderConnections(Object sysContext) {
             try {
@@ -4679,26 +5004,41 @@ public class TurzxMonitorMain {
             return -1.0;
         }
 
+        // getMethod() per poll was a per-frame reflection lookup; Method objects are cached per class + name.
+        private static final HashMap<String, Method> NO_ARG_METHOD_CACHE = new HashMap<String, Method>();
+
+        private static Method cachedNoArgMethod(Class<?> cls, String name) throws NoSuchMethodException {
+            String key = cls.getName() + "#" + name;
+            synchronized (NO_ARG_METHOD_CACHE) {
+                Method m = NO_ARG_METHOD_CACHE.get(key);
+                if (m == null) {
+                    m = cls.getMethod(name);
+                    NO_ARG_METHOD_CACHE.put(key, m);
+                }
+                return m;
+            }
+        }
+
         private static void pollTmHscanServiceLocked() {
             Object svc = tmHscanService;
             if (svc == null) return;
             try {
                 Class<?> sc = svc.getClass();
                 if (liveSnapshot.displaySocPct < 0.0) {
-                    float soc = ((Float) sc.getMethod("remainBatteryPercentage").invoke(svc)).floatValue();
+                    float soc = ((Float) cachedNoArgMethod(sc, "remainBatteryPercentage").invoke(svc)).floatValue();
                     if (soc > 0.0f && soc <= 100.0f) liveSnapshot.displaySocPct = soc;
                 }
                 if (liveSnapshot.sohPct < 0.0) {
-                    int soh = ((Integer) sc.getMethod("getXEV_Bms_GDS_SOH").invoke(svc)).intValue();
+                    int soh = ((Integer) cachedNoArgMethod(sc, "getXEV_Bms_GDS_SOH").invoke(svc)).intValue();
                     if (soh > 0 && soh <= 110) liveSnapshot.sohPct = soh;
                 }
                 if (!isValidDteValue(liveSnapshot.dteKm)) {
-                    int dte = ((Integer) sc.getMethod("realTimeAbleDriveDistance").invoke(svc)).intValue();
+                    int dte = ((Integer) cachedNoArgMethod(sc, "realTimeAbleDriveDistance").invoke(svc)).intValue();
                     if (isValidDteValue(dte)) liveSnapshot.dteKm = dte;
                 }
 
-                int acRaw = ((Integer) sc.getMethod("airConEleConsum").invoke(svc)).intValue();
-                int htrRaw = ((Integer) sc.getMethod("heaterEleConsum").invoke(svc)).intValue();
+                int acRaw = ((Integer) cachedNoArgMethod(sc, "airConEleConsum").invoke(svc)).intValue();
+                int htrRaw = ((Integer) cachedNoArgMethod(sc, "heaterEleConsum").invoke(svc)).intValue();
                 double acKw = parseTmPowerWattsToKw(acRaw, 10210);
                 double htrKw = parseTmPowerWattsToKw(htrRaw, 10210);
                 if (acKw >= 0.0 || htrKw >= 0.0) {
@@ -5474,8 +5814,6 @@ public class TurzxMonitorMain {
         private static volatile Object sysContext = null;
         private static volatile Object rootView = null;
         private static volatile Object currentWmLp = null;
-        private static volatile Object statusTv = null;
-        private static volatile String lastStatusText = "";
         private static volatile boolean isVisible = false;
         private static volatile String bannerMsg = "";
         private static volatile long bannerUntilMs = 0L;
@@ -5526,6 +5864,11 @@ public class TurzxMonitorMain {
             config.usbRotation = loaded.usbRotation;
             config.usbJpegQuality = loaded.usbJpegQuality;
             config.usbFps = loaded.usbFps;
+            config.usbPanelFps = loaded.usbPanelFps;
+            config.overlayHotkeyCode = loaded.overlayHotkeyCode;
+            config.hudRoadEnabled = loaded.hudRoadEnabled;
+            config.telemetryPollMs = loaded.telemetryPollMs;
+            LiveTuning.loadFrom(config);
             config.commaIp = loaded.commaIp;
             config.autoUpdate = loaded.autoUpdate;
             config.x = loaded.x;
@@ -5546,14 +5889,7 @@ public class TurzxMonitorMain {
                         uiHandler = handlerCls.getConstructor(looperCls).newInstance(myLooper);
                         uiLatch.countDown();
 
-                        if (config.overlayEnabled) {
-                            postToUi(new Runnable() {
-                                @Override
-                                public void run() {
-                                    showOnUiThread();
-                                }
-                            });
-                        }
+                        // v1.4.3: the full-screen dashboard starts hidden (MAP 3s long press / launcher to open)
 
                         Method loopMethod = looperCls.getMethod("loop");
                         while (true) {
@@ -5577,17 +5913,179 @@ public class TurzxMonitorMain {
             }
         }
 
+        // =================================================================
+        // Full-screen diagnostic dashboard (v1.4.3). Hidden at boot; MAP held 3s (HotkeyWatcher), the launcher
+        // "show"/"toggle" commands or the ✖ button change it. Auto-hidden while reversing / rear camera / screen off.
+        // =================================================================
+        static final String[] CARD_TITLES = new String[]{
+                "USB · 프레임 파이프라인", "배터리", "전력 · 주행", "공조", "미디어", "연결 · 시스템"
+        };
+        private static final int CARD_COUNT = 6;
+        private static final long REFRESH_MS = 500L;
+        private static final Object[] cardBodyTvs = new Object[CARD_COUNT];
+        private static final String[] lastCardTexts = new String[CARD_COUNT];
+        private static volatile Object subtitleTv = null;
+        private static final Object[] controlValueTvs = new Object[5];
+        private static final String[] lastControlTexts = new String[5];
+        private static volatile Object benchTv = null;
+        private static final String[] lastBenchText = new String[]{""};
+        private static String lastSubtitle = "";
+        private static volatile boolean wantVisible = false;
+        private static boolean lastShownState = true;
+
+        /** Pipeline / system values shown on the dashboard (filled from the live getters, or by self-tests). */
+        static final class DashboardStats {
+            boolean usbConnected;
+            String usbStatus = "";
+            double fps;
+            int frames;
+            int targetFps;
+            double jpegKb;
+            String encoder = "";
+            double pollMs;
+            double renderMs;
+            double encodeMs;
+            double txMs;
+            double ackMs;
+            double slotWaitMs;
+            String otaStatus = "";
+            String hotkeyInfo = "";
+            String recentKeys = "";
+        }
+
+        static DashboardStats collectDashboardStats() {
+            DashboardStats p = new DashboardStats();
+            p.usbConnected = TurzxUsbDriver.isConnected();
+            p.usbStatus = TurzxUsbDriver.getStatusText();
+            p.fps = TurzxUsbDriver.getLiveFps();
+            p.frames = TurzxUsbDriver.getPushedFrames();
+            p.targetFps = Math.max(2, Math.min(25, LiveTuning.targetFps));
+            p.jpegKb = TurzxUsbDriver.getAvgJpegKb();
+            p.encoder = TurzxFrameRenderer.getLastEncoderName();
+            p.pollMs = TurzxUsbDriver.getAvgPollMs();
+            p.renderMs = TurzxFrameRenderer.getAvgRenderMs();
+            p.encodeMs = TurzxFrameRenderer.getAvgEncodeMs();
+            p.txMs = TurzxUsbDriver.getAvgTxMs();
+            p.ackMs = TurzxUsbDriver.getAvgAckMs();
+            p.slotWaitMs = TurzxUsbDriver.getAvgSlotWaitMs();
+            p.otaStatus = OtaUpdateManager.getStatusText();
+            p.hotkeyInfo = HotkeyWatcher.getInfo();
+            p.recentKeys = HotkeyWatcher.getRecentKeysText();
+            return p;
+        }
+
+        /** Which pipeline stage limits the frame rate (render+encode vs USB transfer+panel ACK). */
+        static String describeBottleneck(DashboardStats p) {
+            if (!p.usbConnected) return "USB 미연결";
+            double produce = p.renderMs + p.encodeMs;
+            double consume = p.txMs + p.ackMs;
+            if (produce <= 0.0 || consume <= 0.0) return "측정 중...";
+            if (p.targetFps > 0 && p.fps >= p.targetFps * 0.9) {
+                return "목표 FPS 도달";
+            }
+            if (p.slotWaitMs > 15.0 || consume > produce * 1.15) {
+                return String.format(Locale.US, "병목: USB·패널 %.0fms", consume);
+            }
+            if (produce > consume * 1.15) {
+                return String.format(Locale.US, "병목: 렌더 %.0fms", produce);
+            }
+            return String.format(Locale.US, "렌더 %.0f ≈ 전송 %.0f", produce, consume);
+        }
+
+        private static String d1(double v, boolean valid) {
+            return valid ? String.format(Locale.US, "%.1f", v) : "--";
+        }
+
+        private static String cut(String s, int max) {
+            if (s == null || s.isEmpty()) return "--";
+            return s.length() <= max ? s : s.substring(0, Math.max(1, max - 1)) + "…";
+        }
+
+        /** Card texts: at most 7 short lines each (cards are ~390px wide at 19px). */
+        static String[] buildDashboardBodies(TelemetrySnapshot s, DashboardStats p) {
+            String[] b = new String[CARD_COUNT];
+
+            b[0] = cut(p.usbStatus.replace("TURZX ", ""), 22) + "\n"
+                    + String.format(Locale.US, "FPS %.1f / 목표 %d\n", p.fps, p.targetFps)
+                    + "JPEG " + d1(p.jpegKb, p.jpegKb > 0.0) + "KB · 누적 " + p.frames + "\n"
+                    + String.format(Locale.US, "렌더 %.0f · 인코딩 %.0fms\n", p.renderMs, p.encodeMs)
+                    + String.format(Locale.US, "전송 %.0f · 응답 %.0fms\n", p.txMs, p.ackMs)
+                    + String.format(Locale.US, "수집 %.0fms · 대기 %.0fms\n", p.pollMs, p.slotWaitMs)
+                    + "→ " + describeBottleneck(p);
+
+            double soc = s.getEffectiveSocPct();
+            b[1] = "SOC " + d1(soc, soc >= 0.0) + "% · BMS " + d1(s.bmsSocPct, s.bmsSocPct >= 0.0) + "%\n"
+                    + "SOH " + d1(s.sohPct, s.sohPct >= 0.0) + "% · 잔여 "
+                    + d1(s.remainEnergyKwh, s.remainEnergyKwh > 0.0) + "kWh\n"
+                    + "주행가능 " + (isValidDteValue(s.dteKm) ? String.valueOf(s.dteKm) : "--") + "km"
+                    + (s.dteAirconOffDeltaKm > 0 ? " (공조OFF +" + s.dteAirconOffDeltaKm + ")" : "") + "\n"
+                    + "전비 " + d1(s.avgEconomyKmKwh, s.avgEconomyKmKwh > 0.0) + " km/kWh\n"
+                    + "팩 " + d1(s.packVoltV, s.packVoltV > 0.0) + "V · " + d1(s.packCurrA, s.hasPackCurrent) + "A\n"
+                    + "셀 " + (s.cellMaxVoltV > 0.0 ? String.format(Locale.US, "%.2f", s.cellMaxVoltV) : "--") + "/"
+                    + (s.cellMinVoltV > 0.0 ? String.format(Locale.US, "%.2f", s.cellMinVoltV) : "--") + "V · 편차 "
+                    + (s.cellDiffMv >= 0 ? String.valueOf(s.cellDiffMv) : "--") + "mV\n"
+                    + "온도 " + (s.battMinTempC != null ? String.valueOf(s.battMinTempC) : "--") + " ~ "
+                    + (s.battMaxTempC != null ? String.valueOf(s.battMaxTempC) : "--") + "°C";
+
+            double total = s.getTotalPowerKw();
+            String chg = s.fastCharging ? "급속 충전 중" : (s.stdCharging ? "완속 충전 중" : (s.charging ? "충전 중" : "충전 안 함"));
+            b[2] = String.format(Locale.US, "총 %+.1fkW%s\n", total, total < -0.05 ? " (회생)" : "")
+                    + String.format(Locale.US, "구동 %.1f · 공조 %.1f\n",
+                    s.getEffectiveDriveMotorKw(), Math.max(0.0, s.climatePowerKw))
+                    + String.format(Locale.US, "전장 %.1f · 배터리 %.1f\n",
+                    Math.max(0.0, s.electronicsPowerKw), Math.max(0.0, s.batteryCarePowerKw))
+                    + "기어 " + (s.gearPos != null && !s.gearPos.isEmpty() ? s.gearPos : "--")
+                    + " · Ready " + (s.evReady ? "ON" : "OFF") + "\n"
+                    + chg + (s.batteryConditioning ? " · 컨디셔닝" : "") + "\n"
+                    + "속도 " + Math.max(0, s.carrotSpeedKph) + " · 크루즈 "
+                    + (s.carrotCruiseKph > 0 ? String.valueOf(s.carrotCruiseKph) : "--") + "\n"
+                    + String.format(Locale.US, "조향 %+.1f°", s.steeringAngleDeg);
+
+            StringBuilder flags = new StringBuilder();
+            if (s.hvacAuto) flags.append(" AUTO");
+            if (s.hvacAc) flags.append(" A/C");
+            if (s.hvacHeat) flags.append(" HEAT");
+            if (s.hvacSync) flags.append(" SYNC");
+            b[3] = (s.hvacOn ? "ON ·" + flags : "OFF") + "\n"
+                    + (s.hvacRecirc ? "내기" : "외기") + " · 풍량 "
+                    + (s.hvacBlowerStep >= 0 ? s.hvacBlowerStep + "단" : "--") + "\n"
+                    + "운전석 " + d1(s.hvacDrTempC, s.hvacOn) + "° · 동승석 "
+                    + (s.hvacDriverOnly ? "DRV" : d1(s.hvacPsTempC, s.hvacOn) + "°") + "\n"
+                    + "실내 " + d1(s.inCarTempC, s.inCarTempC > -50.0) + "° · 실외 "
+                    + d1(s.outdoorTempC, s.outdoorTempC > -50.0) + "°\n"
+                    + "모드 " + formatBlowerModeText(s.hvacBlowerMode) + "\n"
+                    + "앞유리 " + (s.hvacFrontDefog ? "ON" : "OFF") + " · 뒷유리 " + (s.hvacRearDefog ? "ON" : "OFF")
+                    + (s.hasClimateData ? "" : "\n(공조 데이터 미수신)");
+
+            b[4] = "소스 " + cut(s.mediaSource, 16) + "\n"
+                    + "제목 " + cut(s.mediaTitle, 16) + "\n"
+                    + "가수 " + cut(s.mediaArtist, 16) + "\n"
+                    + "앨범 " + cut(s.mediaAlbum, 16) + "\n"
+                    + (s.mediaPlaying ? "▶ 재생 " : "❚❚ 정지 ") + TurzxFrameRenderer.formatSecMinTwoDigit(s.mediaPositionSec)
+                    + " / " + TurzxFrameRenderer.formatSecMinTwoDigit(s.mediaDurationSec) + "\n"
+                    + "앨범아트 " + (s.albumArtBitmap != null ? cut(s.albumArtSource, 14) : "없음");
+
+            String recent = p.recentKeys;
+            int comma = recent != null ? recent.indexOf(", ") : -1;
+            if (comma > 0) recent = recent.substring(0, comma); // newest key only
+            b[5] = "Comma " + (s.carrotConnected ? cut(s.carrotIp, 16) : "미연결") + "\n"
+                    + String.format(Locale.US, "TPMS %.0f/%.0f/%.0f/%.0f psi\n",
+                    s.tpmsFlPsi, s.tpmsFrPsi, s.tpmsRlPsi, s.tpmsRrPsi)
+                    + "OTA " + cut(p.otaStatus, 18) + "\n"
+                    + "MAP " + cut(p.hotkeyInfo, 20) + "\n"
+                    + "최근 키 " + cut(recent, 18);
+            return b;
+        }
+
         public static void toggle() {
             postToUi(new Runnable() {
                 @Override
                 public void run() {
-                    if (isVisible) {
-                        config.overlayEnabled = false;
-                        saveMonitorConfig(configFile, config);
+                    if (wantVisible) {
+                        wantVisible = false;
                         hideOnUiThread();
                     } else {
-                        config.overlayEnabled = true;
-                        saveMonitorConfig(configFile, config);
+                        wantVisible = true;
                         showOnUiThread();
                     }
                 }
@@ -5598,12 +6096,15 @@ public class TurzxMonitorMain {
             postToUi(new Runnable() {
                 @Override
                 public void run() {
-                    config.overlayEnabled = enable;
-                    saveMonitorConfig(configFile, config);
+                    wantVisible = enable;
                     if (enable) showOnUiThread();
                     else hideOnUiThread();
                 }
             });
+        }
+
+        public static boolean isDashboardVisible() {
+            return wantVisible;
         }
 
         private static void postToUi(Runnable r) {
@@ -5643,13 +6144,39 @@ public class TurzxMonitorMain {
             return sysContext != null && windowManager != null;
         }
 
+        // ---- View helpers (reflection; pixel units: COMPLEX_UNIT_PX = 0) ----
+        private static Object newText(Class<?> ctxCls, Class<?> tvCls, Class<?> viewCls, String text, float sizePx,
+                                      int color, boolean bold) throws Exception {
+            Object tv = tvCls.getConstructor(ctxCls).newInstance(sysContext);
+            tvCls.getMethod("setText", CharSequence.class).invoke(tv, text);
+            tvCls.getMethod("setTextSize", int.class, float.class).invoke(tv, 0, sizePx);
+            tvCls.getMethod("setTextColor", int.class).invoke(tv, color);
+            if (bold) {
+                Class<?> tfCls = Class.forName("android.graphics.Typeface");
+                tvCls.getMethod("setTypeface", tfCls).invoke(tv, tfCls.getField("DEFAULT_BOLD").get(null));
+            }
+            return tv;
+        }
+
+        private static Object newRoundBg(Class<?> gdCls, int fill, float radius, int strokeW, int strokeColor) throws Exception {
+            Object gd = gdCls.getConstructor().newInstance();
+            gdCls.getMethod("setColor", int.class).invoke(gd, fill);
+            gdCls.getMethod("setCornerRadius", float.class).invoke(gd, radius);
+            if (strokeW > 0) gdCls.getMethod("setStroke", int.class, int.class).invoke(gd, strokeW, strokeColor);
+            return gd;
+        }
+
         private static void showOnUiThread() {
-            if (isVisible && rootView != null) return;
+            if (!wantVisible) return;
+            if (rootView != null) {
+                refreshOnUiThread();
+                return;
+            }
             if (!ensureUiContext()) {
                 postDelayedToUi(new Runnable() {
                     @Override
                     public void run() {
-                        if (config.overlayEnabled && !isVisible) showOnUiThread();
+                        if (wantVisible && rootView == null) showOnUiThread();
                     }
                 }, 1500L);
                 return;
@@ -5664,85 +6191,231 @@ public class TurzxMonitorMain {
                 Class<?> tvCls = Class.forName("android.widget.TextView");
                 Class<?> gdCls = Class.forName("android.graphics.drawable.GradientDrawable");
                 Class<?> drawableCls = Class.forName("android.graphics.drawable.Drawable");
-
-                Object root = llCls.getConstructor(ctxCls).newInstance(sysContext);
-                llCls.getMethod("setOrientation", int.class).invoke(root, 0); // HORIZONTAL
-                llCls.getMethod("setGravity", int.class).invoke(root, 16);    // CENTER_VERTICAL
-                viewCls.getMethod("setPadding", int.class, int.class, int.class, int.class).invoke(root, 16, 8, 16, 8);
-
-                Object gd = gdCls.getConstructor().newInstance();
-                gdCls.getMethod("setColor", int.class).invoke(gd, 0xEE0B111E);
-                gdCls.getMethod("setCornerRadius", float.class).invoke(gd, 14f);
-                gdCls.getMethod("setStroke", int.class, int.class).invoke(gd, 2, 0xFF38BDF8);
-                viewCls.getMethod("setBackgroundDrawable", drawableCls).invoke(root, gd);
-
-                Object tv = tvCls.getConstructor(ctxCls).newInstance(sysContext);
-                tvCls.getMethod("setText", CharSequence.class).invoke(tv, "🖥️ TURZX 9.2 HUD · 초기화 중...");
-                tvCls.getMethod("setTextSize", int.class, float.class).invoke(tv, 2, 13.5f);
-                tvCls.getMethod("setTextColor", int.class).invoke(tv, 0xFFF8FAFC);
-                viewCls.getMethod("setPadding", int.class, int.class, int.class, int.class).invoke(tv, 4, 6, 10, 6);
-
+                Method setOrientation = llCls.getMethod("setOrientation", int.class);
+                Method setGravity = llCls.getMethod("setGravity", int.class);
+                Method setPadding = viewCls.getMethod("setPadding", int.class, int.class, int.class, int.class);
+                Method setBg = viewCls.getMethod("setBackgroundDrawable", drawableCls);
+                Method addView = vgCls.getMethod("addView", viewCls, vgLpCls);
+                Method setMargins = llLpCls.getMethod("setMargins", int.class, int.class, int.class, int.class);
                 Constructor<?> llLpCtor = llLpCls.getConstructor(int.class, int.class);
+                Constructor<?> llLpWCtor = llLpCls.getConstructor(int.class, int.class, float.class);
+                Method setLineSpacing = tvCls.getMethod("setLineSpacing", float.class, float.class);
 
-                // Place action buttons FIRST on the left so 1Hz statusTv text updates never shift button coordinates!
-                Object btnUpdate = createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls,
-                        " ☁️ 업데이트 ", 0xFF0284C7, new Runnable() {
+                // Root: full screen, vertical
+                Object root = llCls.getConstructor(ctxCls).newInstance(sysContext);
+                setOrientation.invoke(root, 1); // VERTICAL
+                setPadding.invoke(root, 28, 18, 28, 14);
+                setBg.invoke(root, newRoundBg(gdCls, 0xF6070B14, 0f, 0, 0));
+
+                // Header: title · subtitle (version/time/banner) · buttons
+                Object header = llCls.getConstructor(ctxCls).newInstance(sysContext);
+                setOrientation.invoke(header, 0);
+                setGravity.invoke(header, 16); // CENTER_VERTICAL
+                addView.invoke(header, newText(ctxCls, tvCls, viewCls, "TURZX 9.2 HUD 진단", 34f, 0xFFF8FAFC, true),
+                        llLpCtor.newInstance(-2, -2));
+                Object sub = newText(ctxCls, tvCls, viewCls, "", 22f, 0xFF94A3B8, false);
+                Object subLp = llLpWCtor.newInstance(0, -2, 1f);
+                setMargins.invoke(subLp, 24, 0, 16, 0);
+                addView.invoke(header, sub, subLp);
+
+                String[] labels = new String[]{" ☁️ 업데이트 ", " 💾 로그저장 ", " ✖ 닫기 "};
+                int[] strokes = new int[]{0xFF0284C7, 0xFF0D9488, 0xFF64748B};
+                Runnable[] actions = new Runnable[]{
+                        new Runnable() {
                             @Override
                             public void run() {
                                 OtaUpdateManager.triggerManualOta(installDir, false);
                             }
-                        });
-                Object lpBtn1 = llLpCtor.newInstance(-2, -2);
-                llLpCls.getMethod("setMargins", int.class, int.class, int.class, int.class).invoke(lpBtn1, 0, 0, 8, 0);
-                vgCls.getMethod("addView", viewCls, vgLpCls).invoke(root, btnUpdate, lpBtn1);
-
-                Object btnLog = createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls,
-                        " 💾 로그저장 ", 0xFF0D9488, new Runnable() {
+                        },
+                        new Runnable() {
                             @Override
                             public void run() {
                                 DebugManager.triggerAsyncDump(installDir);
                             }
-                        });
-                Object lpBtn2 = llLpCtor.newInstance(-2, -2);
-                llLpCls.getMethod("setMargins", int.class, int.class, int.class, int.class).invoke(lpBtn2, 0, 0, 12, 0);
-                vgCls.getMethod("addView", viewCls, vgLpCls).invoke(root, btnLog, lpBtn2);
-
-                // Status text in the middle (drag handle)
-                vgCls.getMethod("addView", viewCls, vgLpCls).invoke(root, tv, llLpCtor.newInstance(-2, -2));
-
-                Object btnHide = createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls,
-                        " ✖ ", 0xFF334155, new Runnable() {
+                        },
+                        new Runnable() {
                             @Override
                             public void run() {
                                 setEnabledAndShow(false);
                             }
-                        });
-                Object lpBtn3 = llLpCtor.newInstance(-2, -2);
-                llLpCls.getMethod("setMargins", int.class, int.class, int.class, int.class).invoke(lpBtn3, 8, 0, 0, 0);
-                vgCls.getMethod("addView", viewCls, vgLpCls).invoke(root, btnHide, lpBtn3);
+                        }
+                };
+                for (int i = 0; i < labels.length; i++) {
+                    Object btn = createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls, labels[i], strokes[i], actions[i]);
+                    Object lpBtn = llLpCtor.newInstance(-2, -2);
+                    setMargins.invoke(lpBtn, 12, 0, 0, 0);
+                    addView.invoke(header, btn, lpBtn);
+                }
+                addView.invoke(root, header, llLpCtor.newInstance(-1, -2));
 
-                // Attach drag listener to status text view so button touches are never intercepted by drag!
-                attachDragAndHideTouchListener(tv);
+                // Body: experiment panel (left, full height) + 2 x 3 card grid (right)
+                Object bodyRow = llCls.getConstructor(ctxCls).newInstance(sysContext);
+                setOrientation.invoke(bodyRow, 0);
+                Object bodyRowLp = llLpWCtor.newInstance(-1, 0, 1f);
+                setMargins.invoke(bodyRowLp, 0, 14, 0, 0);
+
+                Object panel = llCls.getConstructor(ctxCls).newInstance(sysContext);
+                setOrientation.invoke(panel, 1);
+                setPadding.invoke(panel, 20, 14, 20, 12);
+                setBg.invoke(panel, newRoundBg(gdCls, 0xFF0B1A24, 16f, 2, 0xFF0E7490));
+                addView.invoke(panel, newText(ctxCls, tvCls, viewCls, "실험 패널 · 저장 전까지 임시 적용", 21f, 0xFF22D3EE, true),
+                        llLpCtor.newInstance(-1, -2));
+                Method setTvGravity = tvCls.getMethod("setGravity", int.class);
+                Method setTvWidth = tvCls.getMethod("setWidth", int.class);
+                for (int row = 0; row < LiveTuning.ROW_LABELS.length; row++) {
+                    final int r = row;
+                    Object ctl = llCls.getConstructor(ctxCls).newInstance(sysContext);
+                    setOrientation.invoke(ctl, 0);
+                    setGravity.invoke(ctl, 16);
+                    addView.invoke(ctl, newText(ctxCls, tvCls, viewCls, LiveTuning.ROW_LABELS[row], 20f, 0xFFCBD5E1, false),
+                            llLpWCtor.newInstance(0, -2, 1f));
+                    addView.invoke(ctl, createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls, " － ", 0xFF475569, 22f,
+                            new Runnable() {
+                                @Override
+                                public void run() {
+                                    LiveTuning.adjust(r, -1);
+                                    refreshOnUiThread();
+                                }
+                            }), llLpCtor.newInstance(-2, -2));
+                    Object val = newText(ctxCls, tvCls, viewCls, LiveTuning.valueText(row), 23f, 0xFFF8FAFC, true);
+                    setTvGravity.invoke(val, 17); // CENTER
+                    setTvWidth.invoke(val, 110);
+                    addView.invoke(ctl, val, llLpCtor.newInstance(-2, -2));
+                    addView.invoke(ctl, createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls, " ＋ ", 0xFF475569, 22f,
+                            new Runnable() {
+                                @Override
+                                public void run() {
+                                    LiveTuning.adjust(r, +1);
+                                    refreshOnUiThread();
+                                }
+                            }), llLpCtor.newInstance(-2, -2));
+                    controlValueTvs[row] = val;
+                    lastControlTexts[row] = "";
+                    Object ctlLp = llLpCtor.newInstance(-1, -2);
+                    setMargins.invoke(ctlLp, 0, 8, 0, 0);
+                    addView.invoke(panel, ctl, ctlLp);
+                }
+
+                Object actRow = llCls.getConstructor(ctxCls).newInstance(sysContext);
+                setOrientation.invoke(actRow, 0);
+                String[] actLabels = new String[]{" ▶ 측정 ", " 💾 저장 ", " ↺ 복원 "};
+                int[] actStrokes = new int[]{0xFF22D3EE, 0xFF0D9488, 0xFF64748B};
+                Runnable[] actRuns = new Runnable[]{
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                FpsBench.restart(LiveTuning.label(), System.currentTimeMillis());
+                                refreshOnUiThread();
+                            }
+                        },
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                LiveTuning.saveTo(config);
+                                saveMonitorConfig(configFile, config);
+                                DebugManager.logEvent("BENCH", "Saved experiment values to monitor.conf: " + LiveTuning.label());
+                                showBannerMessage("💾 실험 값 저장: " + LiveTuning.label(), 4000L);
+                            }
+                        },
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                LiveTuning.loadFrom(config);
+                                LiveTuning.panelFpsDirty = LiveTuning.panelFps > 0;
+                                FpsBench.restart(LiveTuning.label(), System.currentTimeMillis());
+                                showBannerMessage("↺ 저장된 설정으로 복원", 3000L);
+                            }
+                        }
+                };
+                for (int i = 0; i < actLabels.length; i++) {
+                    Object lpAct = llLpCtor.newInstance(-2, -2);
+                    setMargins.invoke(lpAct, i > 0 ? 10 : 0, 0, 0, 0);
+                    addView.invoke(actRow, createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls,
+                            actLabels[i], actStrokes[i], 20f, actRuns[i]), lpAct);
+                }
+                Object actLp = llLpCtor.newInstance(-1, -2);
+                setMargins.invoke(actLp, 0, 12, 0, 0);
+                addView.invoke(panel, actRow, actLp);
+
+                Object bench = newText(ctxCls, tvCls, viewCls, "", 19f, 0xFFE2E8F0, false);
+                setLineSpacing.invoke(bench, 0f, 1.08f);
+                Object benchLp = llLpCtor.newInstance(-1, -2);
+                setMargins.invoke(benchLp, 0, 10, 0, 0);
+                addView.invoke(panel, bench, benchLp);
+                benchTv = bench;
+                lastBenchText[0] = "";
+                addView.invoke(bodyRow, panel, llLpCtor.newInstance(520, -1));
+
+                Object grid = llCls.getConstructor(ctxCls).newInstance(sysContext);
+                setOrientation.invoke(grid, 1);
+                for (int row = 0; row < 2; row++) {
+                    Object rowLl = llCls.getConstructor(ctxCls).newInstance(sysContext);
+                    setOrientation.invoke(rowLl, 0);
+                    Object rowLp = llLpWCtor.newInstance(-1, 0, 1f);
+                    setMargins.invoke(rowLp, 0, row > 0 ? 14 : 0, 0, 0);
+                    for (int col = 0; col < 3; col++) {
+                        int idx = row * 3 + col;
+                        Object card = llCls.getConstructor(ctxCls).newInstance(sysContext);
+                        setOrientation.invoke(card, 1);
+                        setPadding.invoke(card, 18, 12, 18, 10);
+                        setBg.invoke(card, newRoundBg(gdCls, 0xFF0F172A, 16f, 2, 0xFF1E293B));
+                        addView.invoke(card, newText(ctxCls, tvCls, viewCls, CARD_TITLES[idx], 20f, 0xFF38BDF8, true),
+                                llLpCtor.newInstance(-1, -2));
+                        Object body = newText(ctxCls, tvCls, viewCls, "", 19f, 0xFFE2E8F0, false);
+                        setLineSpacing.invoke(body, 0f, 1.1f);
+                        Object bodyLp = llLpCtor.newInstance(-1, -2);
+                        setMargins.invoke(bodyLp, 0, 6, 0, 0);
+                        addView.invoke(card, body, bodyLp);
+                        cardBodyTvs[idx] = body;
+                        lastCardTexts[idx] = "";
+
+                        Object cardLp = llLpWCtor.newInstance(0, -1, 1f);
+                        setMargins.invoke(cardLp, col > 0 ? 14 : 0, 0, 0, 0);
+                        addView.invoke(rowLl, card, cardLp);
+                    }
+                    addView.invoke(grid, rowLl, rowLp);
+                }
+                Object gridLp = llLpWCtor.newInstance(0, -1, 1f);
+                setMargins.invoke(gridLp, 14, 0, 0, 0);
+                addView.invoke(bodyRow, grid, gridLp);
+                addView.invoke(root, bodyRow, bodyRowLp);
+
+                Object foot = newText(ctxCls, tvCls, viewCls,
+                        "MAP 버튼 3초: 열기/닫기  ·  실험 값은 [저장] 전까지 재시작하면 원래대로  ·  후진(R)·후방카메라·화면 꺼짐 시 자동 숨김",
+                        18f, 0xFF64748B, false);
+                Object footLp = llLpCtor.newInstance(-2, -2);
+                setMargins.invoke(footLp, 4, 8, 0, 0);
+                addView.invoke(root, foot, footLp);
 
                 Class<?> wmLpCls = Class.forName("android.view.WindowManager$LayoutParams");
                 Constructor<?> lpCtor = wmLpCls.getConstructor(int.class, int.class, int.class, int.class, int.class);
-                final int flags = 0x00000008 | 0x00000020 | 0x00000100 | 0x01000000;
-                Object lp = lpCtor.newInstance(-2, -2, 2020, flags, -3); // TYPE_VOLUME_OVERLAY = 2020
+                // NOT_FOCUSABLE (hard keys keep reaching Android) | LAYOUT_IN_SCREEN | LAYOUT_NO_LIMITS | FULLSCREEN | HW accel
+                final int flags = 0x00000008 | 0x00000100 | 0x00000200 | 0x00000400 | 0x01000000;
+                Object lp = lpCtor.newInstance(-1, -1, 2020, flags, -3); // MATCH_PARENT, TYPE_VOLUME_OVERLAY, TRANSLUCENT
                 wmLpCls.getField("gravity").setInt(lp, 51); // TOP | LEFT
-                wmLpCls.getField("x").setInt(lp, config.x);
-                wmLpCls.getField("y").setInt(lp, config.y);
+                wmLpCls.getField("x").setInt(lp, 0);
+                wmLpCls.getField("y").setInt(lp, 0);
 
                 Class<?> vmCls = Class.forName("android.view.ViewManager");
                 vmCls.getMethod("addView", viewCls, vgLpCls).invoke(windowManager, root, lp);
 
                 rootView = root;
                 currentWmLp = lp;
-                statusTv = tv;
-                lastStatusText = "";
+                subtitleTv = sub;
+                lastSubtitle = "";
+                lastShownState = true;
                 isVisible = true;
+                DebugManager.logEvent("OVERLAY", "Full-screen dashboard shown");
                 refreshOnUiThread();
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
+                DebugManager.logError("OVERLAY", "showOnUiThread", t);
             }
+        }
+
+        private static Object createOverlayButton(Class<?> ctxCls, Class<?> viewCls, Class<?> tvCls, Class<?> gdCls,
+                                                  Class<?> drawableCls, String label, int strokeColor, Runnable onClick)
+                throws Exception {
+            return createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls, label, strokeColor, 24f, onClick);
         }
 
         private static Object createOverlayButton(
@@ -5753,22 +6426,22 @@ public class TurzxMonitorMain {
                 Class<?> drawableCls,
                 String label,
                 final int strokeColor,
+                float textSizePx,
                 final Runnable onClick
         ) throws Exception {
             final Object btn = tvCls.getConstructor(ctxCls).newInstance(sysContext);
             tvCls.getMethod("setText", CharSequence.class).invoke(btn, label);
-            tvCls.getMethod("setTextSize", int.class, float.class).invoke(btn, 2, 13.0f);
+            tvCls.getMethod("setTextSize", int.class, float.class).invoke(btn, 0, textSizePx);
             tvCls.getMethod("setTextColor", int.class).invoke(btn, 0xFFF8FAFC);
-            viewCls.getMethod("setPadding", int.class, int.class, int.class, int.class).invoke(btn, 16, 9, 16, 9);
+            int padH = Math.round(textSizePx * 0.9f);
+            int padV = Math.round(textSizePx * 0.45f);
+            viewCls.getMethod("setPadding", int.class, int.class, int.class, int.class).invoke(btn, padH, padV, padH, padV);
 
-            final Object gd = gdCls.getConstructor().newInstance();
-            gdCls.getMethod("setColor", int.class).invoke(gd, 0xFF1E293B);
-            gdCls.getMethod("setCornerRadius", float.class).invoke(gd, 10f);
-            gdCls.getMethod("setStroke", int.class, int.class).invoke(gd, 2, strokeColor);
+            final Object gd = newRoundBg(gdCls, 0xFF1E293B, 12f, 2, strokeColor);
             viewCls.getMethod("setBackgroundDrawable", drawableCls).invoke(btn, gd);
             viewCls.getMethod("setClickable", boolean.class).invoke(btn, true);
 
-            // Handle touch directly on ACTION_DOWN / ACTION_UP so 1Hz layout refreshes never cancel clicks!
+            // Handle touch directly on ACTION_DOWN / ACTION_UP so periodic text refreshes never cancel clicks
             Class<?> touchIfc = Class.forName("android.view.View$OnTouchListener");
             Object touchProxy = Proxy.newProxyInstance(
                     touchIfc.getClassLoader(),
@@ -5803,20 +6476,52 @@ public class TurzxMonitorMain {
         }
 
         private static void hideOnUiThread() {
+            Object h = uiHandler;
+            if (h != null) {
+                try {
+                    h.getClass().getMethod("removeCallbacks", Runnable.class).invoke(h, REFRESH_TASK);
+                } catch (Throwable ignored) {
+                }
+            }
             Object oldRoot = rootView;
             rootView = null;
             currentWmLp = null;
-            statusTv = null;
-            lastStatusText = "";
+            subtitleTv = null;
+            benchTv = null;
+            lastBenchText[0] = "";
+            for (int i = 0; i < controlValueTvs.length; i++) {
+                controlValueTvs[i] = null;
+                lastControlTexts[i] = "";
+            }
+            for (int i = 0; i < CARD_COUNT; i++) {
+                cardBodyTvs[i] = null;
+                lastCardTexts[i] = "";
+            }
             isVisible = false;
             try {
                 if (oldRoot != null && windowManager != null) {
                     Class<?> viewCls = Class.forName("android.view.View");
                     Class<?> vmCls = Class.forName("android.view.ViewManager");
                     vmCls.getMethod("removeView", viewCls).invoke(windowManager, oldRoot);
+                    DebugManager.logEvent("OVERLAY", "Full-screen dashboard hidden");
                 }
             } catch (Throwable ignored) {
             }
+        }
+
+        static String buildBenchText(long nowMs) {
+            StringBuilder sb = new StringBuilder(FpsBench.statusLine(nowMs));
+            List<String[]> rec = FpsBench.recent(3);
+            for (int i = 0; i < rec.size(); i++) {
+                sb.append("\n").append(rec.get(i)[0]).append("\n   ").append(rec.get(i)[1]);
+            }
+            return sb.toString();
+        }
+
+        private static void setTextIfChanged(Object tv, String text, String[] last, int idx) throws Exception {
+            if (tv == null || text.equals(last[idx])) return;
+            last[idx] = text;
+            tv.getClass().getMethod("setText", CharSequence.class).invoke(tv, text);
         }
 
         private static void refreshOnUiThread() {
@@ -5827,112 +6532,623 @@ public class TurzxMonitorMain {
                 } catch (Throwable ignored) {
                 }
             }
-            boolean screenOff = "1".equals(getSystemProperty("tcc.hwc.lcd.disable", "0"))
-                    || "false".equalsIgnoreCase(getSystemProperty("sys.boot.show_screen", "true"))
-                    || TelemetryCollector.isVehicleScreenOff();
-            if (screenOff) {
-                if (rootView != null) {
-                    try {
-                        rootView.getClass().getMethod("setVisibility", int.class).invoke(rootView, Integer.valueOf(8)); // View.GONE
-                    } catch (Throwable ignored) {
-                    }
-                }
-                postDelayedToUi(REFRESH_TASK, 600L);
-                return;
-            }
-            if (config.overlayEnabled && (!isVisible || rootView == null || statusTv == null)) {
+            if (!wantVisible) return;
+            if (rootView == null) {
                 showOnUiThread();
                 return;
             }
-            if (!isVisible || rootView == null || statusTv == null) return;
             try {
-                rootView.getClass().getMethod("setVisibility", int.class).invoke(rootView, Integer.valueOf(0)); // View.VISIBLE
                 TelemetrySnapshot snap = TelemetryCollector.getLatestSnapshot();
-                long now = System.currentTimeMillis();
-                String extra = "";
-                if (now < bannerUntilMs && bannerMsg != null && !bannerMsg.isEmpty()) {
-                    extra = "   |   " + bannerMsg;
-                } else if (OtaUpdateManager.isUpdating()) {
-                    extra = "   |   ☁️ " + OtaUpdateManager.getStatusText();
+                // Safety: never cover the rear camera / reverse view, and stay out of the way while the screen is off
+                boolean screenOff = "1".equals(getSystemProperty("tcc.hwc.lcd.disable", "0"))
+                        || "false".equalsIgnoreCase(getSystemProperty("sys.boot.show_screen", "true"))
+                        || TelemetryCollector.isVehicleScreenOff();
+                boolean reversing = "1".equals(getSystemProperty("persist.sys.rearcam.open", "0"))
+                        || "R".equals(snap.gearPos);
+                boolean show = !screenOff && !reversing;
+                if (show != lastShownState) {
+                    lastShownState = show;
+                    rootView.getClass().getMethod("setVisibility", int.class)
+                            .invoke(rootView, Integer.valueOf(show ? 0 : 8)); // VISIBLE : GONE
                 }
-                String text = String.format(Locale.US,
-                        "🖥️ v%s · %s   |   ⚡ %.0f%% (%dkm)   |   ❄️ 실내 %.1f°·실외 %.1f°%s",
-                        MONITOR_VERSION,
-                        TurzxUsbDriver.getStatusText(),
-                        snap.getEffectiveSocPct() >= 0 ? snap.getEffectiveSocPct() : 0.0,
-                        snap.dteKm >= 0 ? snap.dteKm : 0,
-                        snap.inCarTempC > -50 ? snap.inCarTempC : 22.5,
-                        snap.outdoorTempC > -50 ? snap.outdoorTempC : 18.0,
-                        extra
-                );
-                if (!text.equals(lastStatusText)) {
-                    lastStatusText = text;
-                    statusTv.getClass().getMethod("setText", CharSequence.class).invoke(statusTv, text);
+                if (show) {
+                    long now = System.currentTimeMillis();
+                    String extra = "";
+                    if (now < bannerUntilMs && bannerMsg != null && !bannerMsg.isEmpty()) {
+                        extra = "   |   " + bannerMsg;
+                    } else if (OtaUpdateManager.isUpdating()) {
+                        extra = "   |   ☁️ " + OtaUpdateManager.getStatusText();
+                    }
+                    String subtitle = "v" + MONITOR_VERSION + " · "
+                            + new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date(now)) + extra;
+                    String[] lastSub = new String[]{lastSubtitle};
+                    setTextIfChanged(subtitleTv, subtitle, lastSub, 0);
+                    lastSubtitle = lastSub[0];
+
+                    String[] bodies = buildDashboardBodies(snap, collectDashboardStats());
+                    for (int i = 0; i < CARD_COUNT; i++) {
+                        setTextIfChanged(cardBodyTvs[i], bodies[i], lastCardTexts, i);
+                    }
+                    for (int i = 0; i < controlValueTvs.length; i++) {
+                        setTextIfChanged(controlValueTvs[i], LiveTuning.valueText(i), lastControlTexts, i);
+                    }
+                    FpsBench.tick(now);
+                    setTextIfChanged(benchTv, buildBenchText(now), lastBenchText, 0);
                 }
             } catch (Throwable ignored) {
             }
-            postDelayedToUi(REFRESH_TASK, 1000L);
+            postDelayedToUi(REFRESH_TASK, REFRESH_MS);
+        }
+    }
+
+    // =========================================================================
+    // 4A-1. LIVE FPS EXPERIMENT PANEL: runtime-tunable values + windowed benchmark
+    // =========================================================================
+
+    /**
+     * Values the dashboard experiment panel changes at runtime. The render/poll/sender threads read these instead of
+     * MonitorConfig, so experiments take effect on the next frame without touching monitor.conf. Only the panel's
+     * [저장] button copies them into the config file; a daemon restart otherwise reverts to the saved config.
+     */
+    public static final class LiveTuning {
+        static final int[] QUALITY_STEPS = new int[]{50, 55, 60, 65, 70, 75, 80, 85, 90, 95};
+        static final int[] TARGET_FPS_STEPS = new int[]{5, 8, 10, 12, 15, 20, 25};
+        static final int[] PANEL_FPS_STEPS = new int[]{0, 10, 15, 20, 25, 30};
+        static final int[] POLL_MS_STEPS = new int[]{100, 150, 200, 300, 500, 1000};
+        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기"};
+
+        static volatile int jpegQuality = 70;
+        static volatile int targetFps = 12;
+        static volatile int panelFps = 0;
+        static volatile boolean roadEnabled = true;
+        static volatile int pollMs = 200;
+        /** Set when panelFps changed: the sender thread pushes CMD 0x0F to the connected panel. */
+        static volatile boolean panelFpsDirty = false;
+
+        static void loadFrom(MonitorConfig c) {
+            jpegQuality = Math.max(50, Math.min(95, c.usbJpegQuality));
+            targetFps = Math.max(2, Math.min(25, c.usbFps));
+            panelFps = Math.max(0, Math.min(60, c.usbPanelFps));
+            roadEnabled = c.hudRoadEnabled;
+            pollMs = Math.max(50, Math.min(2000, c.telemetryPollMs));
         }
 
-        private static void attachDragAndHideTouchListener(final Object view) throws Exception {
-            Class<?> touchListenerCls = Class.forName("android.view.View$OnTouchListener");
-            Class<?> viewCls = Class.forName("android.view.View");
-            viewCls.getMethod("setClickable", boolean.class).invoke(view, true);
+        static void saveTo(MonitorConfig c) {
+            c.usbJpegQuality = jpegQuality;
+            c.usbFps = targetFps;
+            c.usbPanelFps = panelFps;
+            c.hudRoadEnabled = roadEnabled;
+            c.telemetryPollMs = pollMs;
+        }
 
-            Object proxy = Proxy.newProxyInstance(
-                    touchListenerCls.getClassLoader(),
-                    new Class<?>[]{touchListenerCls},
-                    new InvocationHandler() {
-                        private float downRawX = 0f;
-                        private float downRawY = 0f;
-                        private int startX = 0;
-                        private int startY = 0;
-                        private boolean dragging = false;
+        /** Next value above (dir > 0) / below (dir < 0) cur in the step list; stays at the ends. */
+        static int step(int[] list, int cur, int dir) {
+            if (dir > 0) {
+                for (int i = 0; i < list.length; i++) {
+                    if (list[i] > cur) return list[i];
+                }
+                return Math.max(cur, list[list.length - 1]);
+            }
+            for (int i = list.length - 1; i >= 0; i--) {
+                if (list[i] < cur) return list[i];
+            }
+            return Math.min(cur, list[0]);
+        }
 
-                        @Override
-                        public Object invoke(Object proxyObj, Method method, Object[] args) {
-                            if ("onTouch".equals(method.getName()) && args != null && args.length >= 2 && args[1] != null) {
-                                try {
-                                    Object me = args[1];
-                                    Class<?> meCls = me.getClass();
-                                    int act = ((Integer) meCls.getMethod("getAction").invoke(me)).intValue() & 0xFF;
-                                    float rx = ((Float) meCls.getMethod("getRawX").invoke(me)).floatValue();
-                                    float ry = ((Float) meCls.getMethod("getRawY").invoke(me)).floatValue();
-                                    if (act == 0) {
-                                        downRawX = rx;
-                                        downRawY = ry;
-                                        startX = config.x;
-                                        startY = config.y;
-                                        dragging = false;
-                                    } else if (act == 2) {
-                                        int dx = Math.round(rx - downRawX);
-                                        int dy = Math.round(ry - downRawY);
-                                        if (!dragging && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) dragging = true;
-                                        if (dragging && currentWmLp != null && windowManager != null) {
-                                            config.x = Math.max(0, Math.min(1800, startX + dx));
-                                            config.y = Math.max(0, Math.min(680, startY + dy));
-                                            Class<?> wmLpCls = Class.forName("android.view.WindowManager$LayoutParams");
-                                            wmLpCls.getField("x").setInt(currentWmLp, config.x);
-                                            wmLpCls.getField("y").setInt(currentWmLp, config.y);
-                                            Class<?> vgLpCls = Class.forName("android.view.ViewGroup$LayoutParams");
-                                            Class<?> vmCls = Class.forName("android.view.ViewManager");
-                                            vmCls.getMethod("updateViewLayout", Class.forName("android.view.View"), vgLpCls)
-                                                    .invoke(windowManager, rootView, currentWmLp);
-                                        }
-                                    } else if (act == 1 || act == 3) {
-                                        if (dragging) {
-                                            dragging = false;
-                                            saveMonitorConfig(configFile, config);
-                                        }
-                                    }
-                                } catch (Throwable ignored) {
-                                }
-                            }
-                            return Boolean.TRUE;
+        static String valueText(int row) {
+            switch (row) {
+                case 0:
+                    return String.valueOf(jpegQuality);
+                case 1:
+                    return String.valueOf(targetFps);
+                case 2:
+                    return panelFps > 0 ? String.valueOf(panelFps) : "끔";
+                case 3:
+                    return roadEnabled ? "ON" : "OFF";
+                default:
+                    return pollMs + "ms";
+            }
+        }
+
+        static String label() {
+            return "q" + jpegQuality + " · " + targetFps + "fps · 패널" + (panelFps > 0 ? String.valueOf(panelFps) : "끔")
+                    + " · 도로" + (roadEnabled ? "ON" : "OFF") + " · 수집" + pollMs;
+        }
+
+        /** Panel [－]/[＋] handler: applies immediately and restarts the measurement for the new combination. */
+        static void adjust(int row, int dir) {
+            switch (row) {
+                case 0:
+                    jpegQuality = step(QUALITY_STEPS, jpegQuality, dir);
+                    break;
+                case 1:
+                    targetFps = step(TARGET_FPS_STEPS, targetFps, dir);
+                    break;
+                case 2: {
+                    int next = step(PANEL_FPS_STEPS, panelFps, dir);
+                    if (next != panelFps) {
+                        panelFps = next;
+                        panelFpsDirty = true;
+                    }
+                    break;
+                }
+                case 3:
+                    roadEnabled = !roadEnabled;
+                    break;
+                default:
+                    pollMs = step(POLL_MS_STEPS, pollMs, dir);
+                    break;
+            }
+            FpsBench.restart(label(), System.currentTimeMillis());
+        }
+    }
+
+    /**
+     * Windowed benchmark for the experiment panel: 2s warm-up after a change, then 5s of plain averages
+     * (the EMA values in /status.json lag several seconds and would blur A/B comparisons).
+     */
+    public static final class FpsBench {
+        static final long WARMUP_MS = 2000L;
+        static final long MEASURE_MS = 5000L;
+        static final int MAX_HISTORY = 8;
+        private static final int IDLE = 0;
+        private static final int WARMUP = 1;
+        private static final int MEASURING = 2;
+
+        private static int phase = IDLE;
+        private static long phaseStartMs = 0L;
+        private static String label = "";
+        private static int frames = 0;
+        private static double sumRender, sumEncode, sumTx, sumAck, sumKb, sumPoll;
+        private static int nRender, nEncode, nPoll;
+        private static final List<String[]> history = new ArrayList<String[]>(); // {label, result}, oldest first
+
+        private static void clearSums() {
+            frames = 0;
+            sumRender = sumEncode = sumTx = sumAck = sumKb = sumPoll = 0.0;
+            nRender = nEncode = nPoll = 0;
+        }
+
+        static synchronized void restart(String settingsLabel, long nowMs) {
+            phase = WARMUP;
+            phaseStartMs = nowMs;
+            label = settingsLabel != null ? settingsLabel : "";
+            clearSums();
+        }
+
+        static synchronized void addRender(double ms) {
+            if (phase == MEASURING) {
+                sumRender += ms;
+                nRender++;
+            }
+        }
+
+        static synchronized void addEncode(double ms) {
+            if (phase == MEASURING) {
+                sumEncode += ms;
+                nEncode++;
+            }
+        }
+
+        static synchronized void addPoll(double ms) {
+            if (phase == MEASURING) {
+                sumPoll += ms;
+                nPoll++;
+            }
+        }
+
+        /** One panel frame delivered + ACKed. */
+        static synchronized void addFrame(double txMs, double ackMs, double kb) {
+            if (phase == MEASURING) {
+                frames++;
+                sumTx += txMs;
+                sumAck += ackMs;
+                sumKb += kb;
+            }
+        }
+
+        static String formatResult(int frameCount, long durMs, double render, double encode, double tx, double ack,
+                                   double kb, double poll) {
+            if (frameCount <= 0) return "→ 전송된 프레임 없음 (USB 미연결?)";
+            // R=render E=encode T=USB transfer A=panel ACK P=telemetry poll (ms, averages over the window)
+            return String.format(Locale.US, "→ %.1f FPS | R%.0f E%.0f T%.0f A%.0f P%.0f | %.0fKB",
+                    frameCount * 1000.0 / Math.max(1L, durMs), render, encode, tx, ack, poll, kb);
+        }
+
+        /** Advances warm-up -> measuring -> finished. Returns the finished result line (for logging) or null. */
+        static String tick(long nowMs) {
+            String done = null;
+            String doneLabel = null;
+            synchronized (FpsBench.class) {
+                if (phase == WARMUP && nowMs - phaseStartMs >= WARMUP_MS) {
+                    phase = MEASURING;
+                    phaseStartMs = nowMs;
+                    clearSums();
+                } else if (phase == MEASURING && nowMs - phaseStartMs >= MEASURE_MS) {
+                    done = formatResult(frames, nowMs - phaseStartMs,
+                            nRender > 0 ? sumRender / nRender : 0.0,
+                            nEncode > 0 ? sumEncode / nEncode : 0.0,
+                            frames > 0 ? sumTx / frames : 0.0,
+                            frames > 0 ? sumAck / frames : 0.0,
+                            frames > 0 ? sumKb / frames : 0.0,
+                            nPoll > 0 ? sumPoll / nPoll : 0.0);
+                    doneLabel = label;
+                    history.add(new String[]{label, done});
+                    while (history.size() > MAX_HISTORY) history.remove(0);
+                    phase = IDLE;
+                }
+            }
+            if (done != null) {
+                try {
+                    DebugManager.logEvent("BENCH", doneLabel + " " + done);
+                } catch (Throwable ignored) {
+                }
+            }
+            return done;
+        }
+
+        static synchronized String statusLine(long nowMs) {
+            if (phase == WARMUP) {
+                return String.format(Locale.US, "안정화 중... %.1fs", Math.max(0L, WARMUP_MS - (nowMs - phaseStartMs)) / 1000.0);
+            }
+            if (phase == MEASURING) {
+                return String.format(Locale.US, "측정 중... %.1f / %.0fs (프레임 %d)",
+                        (nowMs - phaseStartMs) / 1000.0, MEASURE_MS / 1000.0, frames);
+            }
+            return history.isEmpty() ? "값을 바꾸면 자동으로 7초간 측정합니다" : "측정 완료 · 값을 바꾸거나 [측정]";
+        }
+
+        /** Last n results, newest first: each as two lines {label, result}. */
+        static synchronized List<String[]> recent(int n) {
+            List<String[]> out = new ArrayList<String[]>();
+            for (int i = history.size() - 1; i >= 0 && out.size() < n; i--) out.add(history.get(i));
+            return out;
+        }
+    }
+
+    // =========================================================================
+    // 4A-2. MAP HARD-KEY LONG PRESS WATCHER (raw evdev, non-exclusive)
+    // =========================================================================
+
+    /**
+     * Toggles the full-screen dashboard when the MAP hard key is held for 3 seconds.
+     * Reads /dev/input/eventN of the D-Audio key devices directly (the daemon runs as root). The devices are NOT
+     * grabbed, so Android still receives every key normally (a MAP press keeps opening navigation as before).
+     * The MAP key code is resolved from /system/usr/keylayout/daudio*.kl (label SHORTCUT_MAP / *_MAP), or forced
+     * with overlay_hotkey_code in monitor.conf.
+     */
+    public static final class HotkeyWatcher {
+        static final long LONG_PRESS_MS = 3000L;
+        static final long STUCK_RESET_MS = 20000L; // missed key-up safety
+        private static final int EV_KEY = 1;
+        private static final int INPUT_EVENT_SIZE = 16; // 32-bit userspace struct input_event
+        private static final int MAX_RECENT_KEYS = 6;
+
+        private static volatile boolean started = false;
+        private static volatile String info = "not started";
+        private static volatile int[] mapCodes = new int[0];
+        private static final LongPressDetector detector = new LongPressDetector(LONG_PRESS_MS, STUCK_RESET_MS);
+        private static final List<String> recentKeys = new ArrayList<String>();
+        private static final HashMap<String, Long> keyDownMs = new HashMap<String, Long>();
+        private static final HashMap<String, Thread> readers = new HashMap<String, Thread>();
+
+        /** Pure long-press state machine (time injected for self-tests). */
+        static final class LongPressDetector {
+            private final long holdMs;
+            private final long stuckMs;
+            private long downSinceMs = 0L;
+            private boolean fired = false;
+
+            LongPressDetector(long holdMs, long stuckMs) {
+                this.holdMs = holdMs;
+                this.stuckMs = stuckMs;
+            }
+
+            synchronized void onKey(boolean down, long nowMs) {
+                if (down) {
+                    if (downSinceMs == 0L) {
+                        downSinceMs = Math.max(1L, nowMs);
+                        fired = false;
+                    }
+                } else {
+                    downSinceMs = 0L;
+                    fired = false;
+                }
+            }
+
+            /** True exactly once per press, as soon as the key has been held for holdMs (fires while still held). */
+            synchronized boolean poll(long nowMs) {
+                if (downSinceMs == 0L) return false;
+                long held = nowMs - downSinceMs;
+                if (held > stuckMs || held < 0L) {
+                    downSinceMs = 0L;
+                    fired = false;
+                    return false;
+                }
+                if (!fired && held >= holdMs) {
+                    fired = true;
+                    return true;
+                }
+                return false;
+            }
+        }
+
+        public static String getInfo() {
+            return info;
+        }
+
+        public static String getRecentKeysText() {
+            synchronized (recentKeys) {
+                if (recentKeys.isEmpty()) return "-";
+                StringBuilder sb = new StringBuilder();
+                for (int i = recentKeys.size() - 1; i >= 0; i--) {
+                    if (sb.length() > 0) sb.append(", ");
+                    sb.append(recentKeys.get(i));
+                }
+                return sb.toString();
+            }
+        }
+
+        /** Parses /proc/bus/input/devices -> [name, "/dev/input/eventN"] for keyboard-class D-Audio devices. */
+        static List<String[]> parseInputDevices(String procText) {
+            List<String[]> out = new ArrayList<String[]>();
+            if (procText == null) return out;
+            String name = null;
+            String handlers = null;
+            String[] lines = (procText + "\n\n").split("\n");
+            for (int i = 0; i < lines.length; i++) {
+                String l = lines[i].trim();
+                if (l.isEmpty()) {
+                    if (name != null && handlers != null) {
+                        String ev = null;
+                        boolean kbd = false;
+                        String[] hs = handlers.split("\\s+");
+                        for (int j = 0; j < hs.length; j++) {
+                            if ("kbd".equals(hs[j])) kbd = true;
+                            if (hs[j].startsWith("event")) ev = hs[j];
+                        }
+                        String lower = name.toLowerCase(Locale.US);
+                        if (kbd && ev != null && lower.startsWith("daudio")) {
+                            out.add(new String[]{name, "/dev/input/" + ev});
                         }
                     }
-            );
-            viewCls.getMethod("setOnTouchListener", touchListenerCls).invoke(view, proxy);
+                    name = null;
+                    handlers = null;
+                } else if (l.startsWith("N: Name=")) {
+                    name = l.substring("N: Name=".length()).replace("\"", "").trim();
+                } else if (l.startsWith("H: Handlers=")) {
+                    handlers = l.substring("H: Handlers=".length()).trim();
+                }
+            }
+            return out;
+        }
+
+        static boolean isMapLabel(String label) {
+            if (label == null) return false;
+            String u = label.toUpperCase(Locale.US);
+            return "MAP".equals(u) || u.endsWith("_MAP") || u.startsWith("MAP_");
+        }
+
+        /** Linux key codes whose .kl label is a MAP key ("key 123 SHORTCUT_MAP"). */
+        static List<Integer> parseMapCodesFromKl(String klText) {
+            List<Integer> out = new ArrayList<Integer>();
+            if (klText == null) return out;
+            String[] lines = klText.split("\n");
+            for (int i = 0; i < lines.length; i++) {
+                String l = lines[i].trim();
+                if (!l.startsWith("key ")) continue;
+                String[] t = l.split("\\s+");
+                if (t.length < 3 || "usage".equals(t[1])) continue;
+                int code;
+                try {
+                    code = t[1].startsWith("0x") ? Integer.parseInt(t[1].substring(2), 16) : Integer.parseInt(t[1]);
+                } catch (NumberFormatException e) {
+                    continue;
+                }
+                if (isMapLabel(t[2]) && !out.contains(Integer.valueOf(code))) out.add(Integer.valueOf(code));
+            }
+            return out;
+        }
+
+        /** True when a .kl file belongs to one of the devices (daudio_..._de22ev_base.kl <-> daudio_..._de22ev_kr). */
+        static boolean klMatchesDevice(String klFileName, List<String[]> devices) {
+            String stem = klFileName;
+            if (stem.endsWith(".kl")) stem = stem.substring(0, stem.length() - 3);
+            if (stem.endsWith("_base")) stem = stem.substring(0, stem.length() - 5);
+            for (int i = 0; i < devices.size(); i++) {
+                if (devices.get(i)[0].startsWith(stem)) return true;
+            }
+            return false;
+        }
+
+        private static int[] resolveMapCodes(List<String[]> devices, StringBuilder why) {
+            int forced = TurzxOverlayController.getConfig().overlayHotkeyCode;
+            if (forced > 0) {
+                why.append("forced code=").append(forced);
+                return new int[]{forced};
+            }
+            File[] kls = new File("/system/usr/keylayout").listFiles();
+            List<Integer> matched = new ArrayList<Integer>();
+            List<Integer> anyDaudio = new ArrayList<Integer>();
+            String matchedFiles = "";
+            if (kls != null) {
+                for (int i = 0; i < kls.length; i++) {
+                    String n = kls[i].getName();
+                    if (!n.startsWith("daudio") || !n.endsWith(".kl")) continue;
+                    List<Integer> codes = parseMapCodesFromKl(readAllTextQuick(kls[i]));
+                    for (int j = 0; j < codes.size(); j++) {
+                        if (!anyDaudio.contains(codes.get(j))) anyDaudio.add(codes.get(j));
+                    }
+                    if (klMatchesDevice(n, devices)) {
+                        matchedFiles += (matchedFiles.isEmpty() ? "" : "+") + n;
+                        for (int j = 0; j < codes.size(); j++) {
+                            if (!matched.contains(codes.get(j))) matched.add(codes.get(j));
+                        }
+                    }
+                }
+            }
+            List<Integer> use = !matched.isEmpty() ? matched : anyDaudio;
+            why.append(!matched.isEmpty() ? matchedFiles : (anyDaudio.isEmpty() ? "no MAP label in daudio*.kl" : "all daudio*.kl"));
+            int[] arr = new int[use.size()];
+            for (int i = 0; i < arr.length; i++) arr[i] = use.get(i).intValue();
+            return arr;
+        }
+
+        public static synchronized void start() {
+            if (started) return;
+            started = true;
+            Thread t = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    runWatchLoop();
+                }
+            }, "Turzx-Hotkey");
+            t.setDaemon(true);
+            t.start();
+        }
+
+        private static void runWatchLoop() {
+            long lastScanMs = 0L;
+            while (true) {
+                try {
+                    long now = System.currentTimeMillis();
+                    if (now - lastScanMs >= 15000L || lastScanMs == 0L) {
+                        lastScanMs = now;
+                        scanAndStartReaders();
+                    }
+                    if (detector.poll(System.currentTimeMillis())) {
+                        DebugManager.logEvent("HOTKEY", "MAP held " + (LONG_PRESS_MS / 1000) + "s -> toggle full-screen dashboard");
+                        TurzxOverlayController.toggle();
+                    }
+                    Thread.sleep(100L);
+                } catch (Throwable t) {
+                    try {
+                        Thread.sleep(1000L);
+                    } catch (InterruptedException ignored) {
+                    }
+                }
+            }
+        }
+
+        private static void scanAndStartReaders() {
+            List<String[]> devices = parseInputDevices(readAllTextQuick(new File("/proc/bus/input/devices")));
+            StringBuilder why = new StringBuilder();
+            int[] codes = resolveMapCodes(devices, why);
+            boolean changed = codes.length != mapCodes.length;
+            for (int i = 0; !changed && i < codes.length; i++) changed = codes[i] != mapCodes[i];
+            mapCodes = codes;
+
+            StringBuilder devText = new StringBuilder();
+            synchronized (readers) {
+                for (int i = 0; i < devices.size(); i++) {
+                    final String devName = devices.get(i)[0];
+                    final String path = devices.get(i)[1];
+                    if (devText.length() > 0) devText.append(", ");
+                    devText.append(path.substring(path.lastIndexOf('/') + 1));
+                    Thread existing = readers.get(path);
+                    if (existing != null && existing.isAlive()) continue;
+                    Thread r = new Thread(new Runnable() {
+                        @Override
+                        public void run() {
+                            readDevice(devName, path);
+                        }
+                    }, "Turzx-Key-" + path.substring(path.lastIndexOf('/') + 1));
+                    r.setDaemon(true);
+                    readers.put(path, r);
+                    r.start();
+                }
+            }
+            String codeText = codes.length == 0 ? "MAP 코드 미확인" : ("MAP 코드 " + joinInts(codes));
+            String newInfo = devices.isEmpty()
+                    ? "입력 장치 없음 (/proc/bus/input/devices)"
+                    : (codeText + " · " + devText + " (" + why + ")");
+            if (changed || !newInfo.equals(info)) {
+                DebugManager.logEvent("HOTKEY", "MAP long-press watcher: " + newInfo);
+            }
+            info = newInfo;
+        }
+
+        private static String joinInts(int[] a) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < a.length; i++) {
+                if (i > 0) sb.append("/");
+                sb.append(a[i]);
+            }
+            return sb.toString();
+        }
+
+        private static boolean isMapCode(int code) {
+            int[] c = mapCodes;
+            for (int i = 0; i < c.length; i++) {
+                if (c[i] == code) return true;
+            }
+            return false;
+        }
+
+        private static void readDevice(String devName, String path) {
+            FileInputStream in = null;
+            String shortDev = path.substring(path.lastIndexOf('/') + 1);
+            try {
+                in = new FileInputStream(path);
+                byte[] buf = new byte[INPUT_EVENT_SIZE * 16];
+                int have = 0;
+                while (true) {
+                    int n = in.read(buf, have, buf.length - have);
+                    if (n <= 0) break;
+                    have += n;
+                    int off = 0;
+                    while (have - off >= INPUT_EVENT_SIZE) {
+                        int type = (buf[off + 8] & 0xFF) | ((buf[off + 9] & 0xFF) << 8);
+                        int code = (buf[off + 10] & 0xFF) | ((buf[off + 11] & 0xFF) << 8);
+                        int value = (buf[off + 12] & 0xFF) | ((buf[off + 13] & 0xFF) << 8)
+                                | ((buf[off + 14] & 0xFF) << 16) | ((buf[off + 15] & 0xFF) << 24);
+                        if (type == EV_KEY) {
+                            onKeyEvent(shortDev, code, value);
+                        }
+                        off += INPUT_EVENT_SIZE;
+                    }
+                    if (off > 0) {
+                        System.arraycopy(buf, off, buf, 0, have - off);
+                        have -= off;
+                    }
+                }
+            } catch (Throwable t) {
+                DebugManager.logEvent("HOTKEY", "Key reader stopped on " + path + " (" + devName + "): "
+                        + t.getClass().getSimpleName());
+            } finally {
+                if (in != null) {
+                    try {
+                        in.close();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }
+
+        private static void onKeyEvent(String dev, int code, int value) {
+            long now = System.currentTimeMillis();
+            boolean map = isMapCode(code);
+            if (map && (value == 1 || value == 2)) detector.onKey(true, now);
+            else if (map && value == 0) detector.onKey(false, now);
+
+            // Recent key log (debug report / dashboard) so an unknown MAP code can be identified on the car
+            String key = dev + ":" + code;
+            if (value == 1) {
+                synchronized (keyDownMs) {
+                    keyDownMs.put(key, Long.valueOf(now));
+                }
+            } else if (value == 0) {
+                Long down;
+                synchronized (keyDownMs) {
+                    down = keyDownMs.remove(key);
+                }
+                String entry = dev + " code " + code + (map ? "(MAP)" : "")
+                        + (down != null ? " " + (now - down.longValue()) + "ms" : "");
+                synchronized (recentKeys) {
+                    recentKeys.add(entry);
+                    while (recentKeys.size() > MAX_RECENT_KEYS) recentKeys.remove(0);
+                }
+            }
         }
     }
 
@@ -6055,6 +7271,10 @@ public class TurzxMonitorMain {
                         .append(", usb_rotation=").append(cfg.usbRotation)
                         .append(", usb_jpeg_quality=").append(cfg.usbJpegQuality)
                         .append(", usb_fps=").append(cfg.usbFps)
+                        .append(", usb_panel_fps=").append(cfg.usbPanelFps)
+                        .append(", overlay_hotkey_code=").append(cfg.overlayHotkeyCode)
+                        .append(", hud_road=").append(cfg.hudRoadEnabled)
+                        .append(", telemetry_poll_ms=").append(cfg.telemetryPollMs)
                         .append(", comma_ip=").append(cfg.commaIp)
                         .append(", auto_update=").append(cfg.autoUpdate)
                         .append(", pos=(").append(cfg.x).append(",").append(cfg.y).append(")\n");
@@ -6069,6 +7289,18 @@ public class TurzxMonitorMain {
                     .append(" | native=").append(NativeJpeg.getInfo())
                     .append(String.format(Locale.US, " | render %.1fms, encode %.1fms (avg)\n",
                             TurzxFrameRenderer.getAvgRenderMs(), TurzxFrameRenderer.getAvgEncodeMs()));
+            sb.append(String.format(Locale.US,
+                    "Pipeline (avg)  : poll %.1fms (5Hz thread) | usb tx %.1fms | panel ack %.1fms | slot wait %.1fms | jpeg %.1fKB\n",
+                    TurzxUsbDriver.getAvgPollMs(), TurzxUsbDriver.getAvgTxMs(), TurzxUsbDriver.getAvgAckMs(),
+                    TurzxUsbDriver.getAvgSlotWaitMs(), TurzxUsbDriver.getAvgJpegKb()));
+            sb.append("MAP Hotkey      : ").append(HotkeyWatcher.getInfo())
+                    .append(" | dashboard=").append(TurzxOverlayController.isDashboardVisible() ? "shown" : "hidden").append("\n");
+            sb.append("Recent Keys     : ").append(HotkeyWatcher.getRecentKeysText()).append("\n");
+            sb.append("Live Tuning     : ").append(LiveTuning.label()).append("\n");
+            List<String[]> bench = FpsBench.recent(FpsBench.MAX_HISTORY);
+            for (int i = bench.size() - 1; i >= 0; i--) {
+                sb.append("  FPS bench     : ").append(bench.get(i)[0]).append("  ").append(bench.get(i)[1]).append("\n");
+            }
             File sysUsb = new File("/sys/bus/usb/devices");
             File[] usbDirs = sysUsb.listFiles();
             if (usbDirs != null) {
@@ -7665,6 +8897,9 @@ public class TurzxMonitorMain {
         sb.append(",\"jpeg_encoder\":\"").append(escapeJson(TurzxFrameRenderer.getLastEncoderName())).append("\"");
         sb.append(String.format(Locale.US, ",\"render_ms\":%.1f,\"encode_ms\":%.1f",
                 TurzxFrameRenderer.getAvgRenderMs(), TurzxFrameRenderer.getAvgEncodeMs()));
+        sb.append(String.format(Locale.US, ",\"poll_ms\":%.1f,\"usb_tx_ms\":%.1f,\"ack_ms\":%.1f,\"slot_wait_ms\":%.1f,\"jpeg_kb\":%.1f",
+                TurzxUsbDriver.getAvgPollMs(), TurzxUsbDriver.getAvgTxMs(), TurzxUsbDriver.getAvgAckMs(),
+                TurzxUsbDriver.getAvgSlotWaitMs(), TurzxUsbDriver.getAvgJpegKb()));
         sb.append(",\"status\":\"").append(escapeJson(TurzxUsbDriver.getStatusText())).append("\"");
         sb.append("},\"ota\":{");
         sb.append("\"updating\":").append(OtaUpdateManager.isUpdating());
@@ -9281,6 +10516,10 @@ public class TurzxMonitorMain {
                 else if ("usb_jpeg_quality".equals(k)) cfg.usbJpegQuality = Math.max(50, Math.min(95, parseIntSafe(v, 70)));
                 else if ("config_rev".equals(k)) configRev = parseIntSafe(v, 1);
                 else if ("usb_fps".equals(k)) cfg.usbFps = Math.max(2, Math.min(25, parseIntSafe(v, 12)));
+                else if ("usb_panel_fps".equals(k)) cfg.usbPanelFps = Math.max(0, Math.min(60, parseIntSafe(v, 0)));
+                else if ("overlay_hotkey_code".equals(k)) cfg.overlayHotkeyCode = Math.max(0, Math.min(767, parseIntSafe(v, 0)));
+                else if ("hud_road".equals(k)) cfg.hudRoadEnabled = !"0".equals(v) && !"false".equalsIgnoreCase(v);
+                else if ("telemetry_poll_ms".equals(k)) cfg.telemetryPollMs = Math.max(50, Math.min(2000, parseIntSafe(v, 200)));
                 else if ("comma_ip".equals(k)) cfg.commaIp = v;
                 else if ("auto_update".equals(k)) cfg.autoUpdate = !"0".equals(v) && !"false".equalsIgnoreCase(v);
                 else if ("x".equals(k)) cfg.x = parseIntSafe(v, 24);
@@ -9308,6 +10547,10 @@ public class TurzxMonitorMain {
                     + "usb_rotation=" + cfg.usbRotation + "\n"
                     + "usb_jpeg_quality=" + cfg.usbJpegQuality + "\n"
                     + "usb_fps=" + cfg.usbFps + "\n"
+                    + "usb_panel_fps=" + cfg.usbPanelFps + "\n"
+                    + "overlay_hotkey_code=" + cfg.overlayHotkeyCode + "\n"
+                    + "hud_road=" + (cfg.hudRoadEnabled ? 1 : 0) + "\n"
+                    + "telemetry_poll_ms=" + cfg.telemetryPollMs + "\n"
                     + "comma_ip=" + (cfg.commaIp != null ? cfg.commaIp : "") + "\n"
                     + "auto_update=" + (cfg.autoUpdate ? 1 : 0) + "\n"
                     + "x=" + cfg.x + "\n"
@@ -9475,10 +10718,16 @@ public class TurzxMonitorMain {
         return json.substring(q1 + 1, q2);
     }
 
+    private static volatile Method sysPropGetMethod = null;
+
     private static String getSystemProperty(String key, String def) {
         try {
-            Class<?> spCls = Class.forName("android.os.SystemProperties");
-            String val = (String) spCls.getMethod("get", String.class, String.class).invoke(null, key, def);
+            Method m = sysPropGetMethod;
+            if (m == null) {
+                m = Class.forName("android.os.SystemProperties").getMethod("get", String.class, String.class);
+                sysPropGetMethod = m;
+            }
+            String val = (String) m.invoke(null, key, def);
             return (val == null || val.isEmpty()) ? def : val;
         } catch (Throwable ignored) {
             return def;
@@ -9736,11 +10985,13 @@ public class TurzxMonitorMain {
             c1.usbBrightness = 92;
             c1.usbRotation = 90;
             c1.usbFps = 15;
+            c1.usbPanelFps = 20;
             c1.commaIp = "192.168.43.10";
             c1.autoUpdate = false;
             saveMonitorConfig(tmpCfg, c1);
             MonitorConfig c2 = loadMonitorConfig(tmpCfg);
-            assertTrue(c2.usbBrightness == 92 && c2.usbRotation == 90 && c2.usbFps == 15
+            assertTrue(new MonitorConfig().usbPanelFps == 0, "Expected usb_panel_fps default 0 (CMD 0x0F not sent)");
+            assertTrue(c2.usbBrightness == 92 && c2.usbRotation == 90 && c2.usbFps == 15 && c2.usbPanelFps == 20
                     && "192.168.43.10".equals(c2.commaIp) && !c2.autoUpdate,
                     "Expected MonitorConfig roundtrip match");
             tmpCfg.delete();
@@ -10175,6 +11426,9 @@ public class TurzxMonitorMain {
             File current = File.createTempFile("turzx_cfg_rev2", ".conf");
             legacy.deleteOnExit();
             current.deleteOnExit();
+            // createTempFile leaves empty files; File.renameTo cannot replace an existing file on a Windows host
+            legacy.delete();
+            current.delete();
             writeBytesNoSync(legacy, "usb_jpeg_quality=85\nusb_fps=12\n".getBytes(UTF8));
             assertTrue(loadMonitorConfig(legacy).usbJpegQuality == 70, "Expected legacy q85 config to migrate to 70");
             writeBytesNoSync(current, "usb_jpeg_quality=85\nconfig_rev=2\n".getBytes(UTF8));
@@ -10198,6 +11452,110 @@ public class TurzxMonitorMain {
             assertTrue(NativeJpeg.previousGuardAttempts("garbage", "abc123") == 0, "guard: malformed -> 0");
         } catch (Exception e) {
             throw new RuntimeException("v1.4.0 config migration / native encoder self-test failed", e);
+        }
+
+        // v1.4.3: MAP long-press hotkey (evdev) + full-screen dashboard text
+        try {
+            String proc = "I: Bus=0019 Vendor=0001 Product=0001 Version=0100\n"
+                    + "N: Name=\"gpio_keys_polled\"\nH: Handlers=kbd event0\nB: EV=3\n\n"
+                    + "I: Bus=0006 Vendor=0123 Product=1234 Version=0000\n"
+                    + "N: Name=\"daudio_wp_daudioplus_de22ev_kr\"\nP: Phys=\nH: Handlers=kbd event1 \nB: EV=3\n\n"
+                    + "N: Name=\"daudio_wp_daudioplus_de22ev_kr_can\"\nH: Handlers=kbd event2\n\n"
+                    + "N: Name=\"MELFAS_MIT401_Touchscreen\"\nH: Handlers=event3\n";
+            List<String[]> devs = HotkeyWatcher.parseInputDevices(proc);
+            assertTrue(devs.size() == 2 && "/dev/input/event1".equals(devs.get(0)[1])
+                            && "/dev/input/event2".equals(devs.get(1)[1]),
+                    "hotkey: expected daudio kbd devices event1/event2 only, got " + devs.size());
+            String kl = "# D-Audio\nkey 158   BACK\nkey 217   SHORTCUT_MAP\nkey usage 0x0c0067 MAP\nkey 0x2f0 MAP_SEARCH\nkey 116 POWER WAKE\n";
+            List<Integer> codes = HotkeyWatcher.parseMapCodesFromKl(kl);
+            assertTrue(codes.size() == 2 && codes.contains(Integer.valueOf(217)) && codes.contains(Integer.valueOf(0x2f0)),
+                    "hotkey: expected MAP codes 217 and 0x2f0, got " + codes);
+            assertTrue(!HotkeyWatcher.isMapLabel("KEYMAP") && HotkeyWatcher.isMapLabel("SHORTCUT_MAP"), "hotkey: MAP label rule");
+            assertTrue(HotkeyWatcher.klMatchesDevice("daudio_wp_daudioplus_de22ev_base.kl", devs)
+                            && !HotkeyWatcher.klMatchesDevice("daudio_wp_daudioplus_cvev_base.kl", devs),
+                    "hotkey: .kl file must match its own vehicle's device");
+
+            HotkeyWatcher.LongPressDetector lp = new HotkeyWatcher.LongPressDetector(3000L, 20000L);
+            lp.onKey(true, 1000L);
+            assertTrue(!lp.poll(3900L), "long press: 2.9s must not fire");
+            lp.onKey(true, 3950L); // autorepeat must not restart the hold timer
+            assertTrue(lp.poll(4000L), "long press: fires at 3.0s while still held");
+            assertTrue(!lp.poll(6000L), "long press: fires only once per press");
+            lp.onKey(false, 6100L);
+            lp.onKey(true, 7000L);
+            lp.onKey(false, 8000L);
+            assertTrue(!lp.poll(11000L), "long press: short press (1s) never fires");
+            lp.onKey(true, 12000L);
+            assertTrue(!lp.poll(40000L), "long press: missed key-up (stuck) is reset, not fired");
+
+            TurzxOverlayController.DashboardStats ds = new TurzxOverlayController.DashboardStats();
+            ds.usbConnected = true;
+            ds.targetFps = 12;
+            ds.fps = 6.0;
+            ds.renderMs = 60.0;
+            ds.encodeMs = 20.0;
+            ds.txMs = 10.0;
+            ds.ackMs = 140.0;
+            ds.slotWaitMs = 60.0;
+            assertTrue(TurzxOverlayController.describeBottleneck(ds).contains("병목: USB"),
+                    "dashboard: slow ACK must be reported as USB bottleneck");
+            ds.ackMs = 20.0;
+            ds.slotWaitMs = 0.0;
+            assertTrue(TurzxOverlayController.describeBottleneck(ds).contains("렌더"),
+                    "dashboard: slow render must be reported as render bottleneck");
+            ds.fps = 11.5;
+            assertTrue(TurzxOverlayController.describeBottleneck(ds).contains("목표 FPS"), "dashboard: target reached");
+            ds.usbConnected = false;
+            assertTrue(TurzxOverlayController.describeBottleneck(ds).contains("미연결"), "dashboard: disconnected");
+
+            String[] bodies = TurzxOverlayController.buildDashboardBodies(new TelemetrySnapshot(), ds);
+            assertTrue(bodies.length == TurzxOverlayController.CARD_TITLES.length, "dashboard: one body per card");
+            for (int i = 0; i < bodies.length; i++) {
+                assertTrue(bodies[i] != null && !bodies[i].isEmpty() && bodies[i].split("\n").length <= 7,
+                        "dashboard: card " + i + " must have 1..7 lines");
+            }
+            // Live tuning step lists + windowed FPS bench
+            assertTrue(LiveTuning.step(LiveTuning.QUALITY_STEPS, 70, +1) == 75
+                    && LiveTuning.step(LiveTuning.QUALITY_STEPS, 70, -1) == 65
+                    && LiveTuning.step(LiveTuning.QUALITY_STEPS, 95, +1) == 95
+                    && LiveTuning.step(LiveTuning.QUALITY_STEPS, 50, -1) == 50, "tuning: quality steps");
+            assertTrue(LiveTuning.step(LiveTuning.TARGET_FPS_STEPS, 13, +1) == 15
+                    && LiveTuning.step(LiveTuning.TARGET_FPS_STEPS, 13, -1) == 12, "tuning: off-list value snaps to neighbours");
+            assertTrue(LiveTuning.step(LiveTuning.PANEL_FPS_STEPS, 0, +1) == 10, "tuning: panel fps off -> 10");
+            MonitorConfig tc = new MonitorConfig();
+            tc.usbJpegQuality = 60;
+            tc.usbFps = 20;
+            tc.hudRoadEnabled = false;
+            tc.telemetryPollMs = 300;
+            LiveTuning.loadFrom(tc);
+            assertTrue(LiveTuning.label().equals("q60 · 20fps · 패널끔 · 도로OFF · 수집300"), "tuning: label " + LiveTuning.label());
+            MonitorConfig tc2 = new MonitorConfig();
+            LiveTuning.saveTo(tc2);
+            assertTrue(tc2.usbJpegQuality == 60 && tc2.usbFps == 20 && !tc2.hudRoadEnabled && tc2.telemetryPollMs == 300,
+                    "tuning: saveTo copies live values");
+            LiveTuning.loadFrom(new MonitorConfig());
+
+            FpsBench.restart("test", 1000L);
+            FpsBench.addFrame(10.0, 50.0, 40.0); // during warm-up: ignored
+            assertTrue(FpsBench.tick(2500L) == null, "bench: still warming up");
+            assertTrue(FpsBench.tick(3000L) == null, "bench: warm-up -> measuring");
+            for (int i = 0; i < 40; i++) FpsBench.addFrame(10.0, 50.0, 40.0);
+            FpsBench.addRender(60.0);
+            FpsBench.addEncode(20.0);
+            String res = FpsBench.tick(8000L);
+            assertTrue(res != null && res.startsWith("→ 8.0 FPS") && res.contains("R60 E20 T10 A50 P0") && res.endsWith("| 40KB"),
+                    "bench: 40 frames / 5s = 8.0 FPS, got " + res);
+            assertTrue(FpsBench.recent(1).size() == 1 && "test".equals(FpsBench.recent(1).get(0)[0]), "bench: history");
+            assertTrue(FpsBench.formatResult(0, 5000L, 0, 0, 0, 0, 0, 0).contains("없음"), "bench: no frames");
+
+            File tuneCfg = File.createTempFile("turzx_cfg_tuning", ".conf");
+            tuneCfg.deleteOnExit();
+            saveMonitorConfig(tuneCfg, tc);
+            MonitorConfig tc3 = loadMonitorConfig(tuneCfg);
+            assertTrue(!tc3.hudRoadEnabled && tc3.telemetryPollMs == 300, "tuning: hud_road / telemetry_poll_ms roundtrip");
+            tuneCfg.delete();
+        } catch (Exception e) {
+            throw new RuntimeException("v1.4.3 hotkey / dashboard self-test failed", e);
         }
 
         System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + Chromium 1:1 HUD Assets + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");
