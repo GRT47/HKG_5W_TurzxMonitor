@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.4.6";
+    public static final String MONITOR_VERSION = "1.4.7";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -6328,8 +6328,9 @@ public class TurzxMonitorMain {
         private static final Object[] cardBodyTvs = new Object[CARD_COUNT];
         private static final String[] lastCardTexts = new String[CARD_COUNT];
         private static volatile Object subtitleTv = null;
-        private static final Object[] controlValueTvs = new Object[5];
-        private static final String[] lastControlTexts = new String[5];
+        // Sized from the experiment panel rows (v1.4.7: a fixed size of 5 broke the dashboard when rows 6-7 were added)
+        static final Object[] controlValueTvs = new Object[LiveTuning.ROW_LABELS.length];
+        static final String[] lastControlTexts = new String[LiveTuning.ROW_LABELS.length];
         private static volatile Object benchTv = null;
         private static final String[] lastBenchText = new String[]{""};
         private static String lastSubtitle = "";
@@ -12187,6 +12188,14 @@ public class TurzxMonitorMain {
             assertTrue(lp.poll(113100L), "long press: fresh press fires after its own 3s");
             lp.onKey(true, true, 113500L); // autorepeat does not re-arm
             assertTrue(!lp.poll(117000L), "long press: still once per press");
+
+            assertTrue(TurzxOverlayController.controlValueTvs.length == LiveTuning.ROW_LABELS.length
+                            && TurzxOverlayController.lastControlTexts.length == LiveTuning.ROW_LABELS.length,
+                    "dashboard: one value slot per experiment panel row");
+            for (int row = 0; row < LiveTuning.ROW_LABELS.length; row++) {
+                assertTrue(LiveTuning.valueText(row) != null && !LiveTuning.valueText(row).isEmpty(),
+                        "dashboard: value text for row " + row);
+            }
 
             TurzxOverlayController.DashboardStats ds = new TurzxOverlayController.DashboardStats();
             ds.usbConnected = true;
