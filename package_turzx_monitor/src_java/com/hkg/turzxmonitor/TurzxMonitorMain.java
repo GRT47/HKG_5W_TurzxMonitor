@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.4.4";
+    public static final String MONITOR_VERSION = "1.4.5";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -178,6 +178,7 @@ public class TurzxMonitorMain {
         public int overlayHotkeyCode = 0;
         // Column 2 3D ADAS road (largest render cost); false = static background only
         public boolean hudRoadEnabled = true;
+        public boolean usbIncrementalEncode = true; // v1.4.5: re-encode only changed MCU rows (RST-per-row JPEG)
         // Telemetry (Binder/CAN) poll period of the separate poll thread
         public int telemetryPollMs = 200;
         public String commaIp = "";
@@ -1584,6 +1585,47 @@ public class TurzxMonitorMain {
 
         static native String nInfo();
 
+        static native byte[] nEncodeIncremental(Object bitmap, int rotation, int padWidth, int quality,
+                                                boolean forceFull, int[] stats);
+
+        private static volatile boolean incrementalAvailable = true;
+        private static int incrementalFailures = 0;
+
+        public static boolean isIncrementalAvailable() {
+            return available && incrementalAvailable;
+        }
+
+        /**
+         * v1.4.5: portrait JPEG with a restart marker after every MCU row, re-encoding only the rows whose landscape
+         * strip changed since the previous call (output identical to a full RESTARTROWS=1 encode).
+         * stats[0] = rows re-encoded, [1] = encoder calls, [2] = total rows. Null on failure (caller encodes in full).
+         */
+        public static byte[] encodeIncremental(Object bitmap, int rotation, int padWidth, int quality,
+                                               boolean forceFull, int[] stats) {
+            if (!isIncrementalAvailable()) return null;
+            byte[] out = null;
+            try {
+                out = nEncodeIncremental(bitmap, rotation, padWidth, quality, forceFull, stats);
+            } catch (UnsatisfiedLinkError e) {
+                incrementalAvailable = false; // older .so without the symbol
+                DebugManager.logEvent("RENDER", "Incremental JPEG encoder unavailable (" + e.getMessage() + ") -> full encode");
+                return null;
+            } catch (Throwable t) {
+                DebugManager.logError("RENDER", "NativeJpeg.encodeIncremental", t);
+            }
+            if (out == null || out.length == 0) {
+                if (++incrementalFailures >= MAX_CONSECUTIVE_FAILURES) {
+                    incrementalAvailable = false;
+                    DebugManager.logEvent("RENDER", "Incremental JPEG encoder disabled after " + incrementalFailures
+                            + " failures -> full encode");
+                }
+                return null;
+            }
+            incrementalFailures = 0;
+            countWarmupEncode();
+            return out;
+        }
+
         public static boolean isAvailable() {
             return available;
         }
@@ -1680,11 +1722,16 @@ public class TurzxMonitorMain {
                 return null;
             }
             consecutiveFailures = 0;
+            countWarmupEncode();
+            return out;
+        }
+
+        /** Crash guard: the in-flight marker is cleared after WARMUP_ENCODES successful native encodes (any entry point). */
+        private static synchronized void countWarmupEncode() {
             if (warmupRemaining > 0 && --warmupRemaining == 0) {
                 clearInflight();
                 DebugManager.logEvent("RENDER", "Native JPEG encoder passed " + WARMUP_ENCODES + "-frame warmup; crash guard cleared");
             }
-            return out;
         }
     }
 
@@ -1882,6 +1929,22 @@ public class TurzxMonitorMain {
             return avgRoadMs;
         }
 
+        // v1.4.5 incremental encoder stats (encoder thread writes, UI/report read)
+        private static final int[] incStats = new int[3];
+        private static volatile double avgDirtyRows = 0.0;
+        private static volatile int lastTotalRows = 0;
+        private static volatile boolean incrementalActive = false;
+
+        public static boolean isIncrementalActive() {
+            return incrementalActive;
+        }
+
+        /** "37/120" style average re-encoded MCU rows, or "" when the full-frame encoder is in use. */
+        public static String getDirtyRowsText() {
+            return (incrementalActive && lastTotalRows > 0)
+                    ? String.format(Locale.US, "%.0f/%d", avgDirtyRows, lastTotalRows) : "";
+        }
+
         /** Lazily creates the bitmaps, canvases and paints (render thread, under the class lock). */
         private static void ensureRenderResources() throws Exception {
             if (gfxClasses == null) {
@@ -2011,7 +2074,22 @@ public class TurzxMonitorMain {
                     if (NativeJpeg.ensureLoaded()) {
                         boolean ok = true;
                         if (needPanel) {
-                            panelBytes = NativeJpeg.encode(src, nativeRot, PANEL_JPEG_WIDTH, q);
+                            boolean inc = false;
+                            if (LiveTuning.incrementalEncode && NativeJpeg.isIncrementalAvailable()) {
+                                int[] st = incStats;
+                                panelBytes = NativeJpeg.encodeIncremental(src, nativeRot, PANEL_JPEG_WIDTH, q, false, st);
+                                if (panelBytes != null && st[2] > 0) {
+                                    inc = true;
+                                    avgDirtyRows = ema(avgDirtyRows, st[0]);
+                                    lastTotalRows = st[2];
+                                }
+                            }
+                            if (!inc) {
+                                panelBytes = NativeJpeg.encode(src, nativeRot, PANEL_JPEG_WIDTH, q);
+                                avgDirtyRows = 0.0;
+                                lastTotalRows = 0;
+                            }
+                            incrementalActive = inc;
                             ok = panelBytes != null;
                         }
                         if (ok && needLandscape) {
@@ -2019,7 +2097,7 @@ public class TurzxMonitorMain {
                             ok = landBytes != null;
                         }
                         if (ok) {
-                            lastEncoderName = NativeJpeg.getInfo();
+                            lastEncoderName = NativeJpeg.getInfo() + (incrementalActive ? " +incremental" : "");
                             recordEncodeMs((System.nanoTime() - tEncode0) / 1e6);
                             return new byte[][]{landBytes, panelBytes};
                         }
@@ -6173,6 +6251,7 @@ public class TurzxMonitorMain {
             config.usbPanelFps = loaded.usbPanelFps;
             config.overlayHotkeyCode = loaded.overlayHotkeyCode;
             config.hudRoadEnabled = loaded.hudRoadEnabled;
+            config.usbIncrementalEncode = loaded.usbIncrementalEncode;
             config.telemetryPollMs = loaded.telemetryPollMs;
             LiveTuning.loadFrom(config);
             config.commaIp = loaded.commaIp;
@@ -6252,6 +6331,7 @@ public class TurzxMonitorMain {
             double renderMs;
             double encodeMs;
             double roadMs;
+            String dirtyRows = "";
             double txMs;
             double ackMs;
             double slotWaitMs;
@@ -6273,6 +6353,7 @@ public class TurzxMonitorMain {
             p.renderMs = TurzxFrameRenderer.getAvgRenderMs();
             p.encodeMs = TurzxFrameRenderer.getAvgEncodeMs();
             p.roadMs = TurzxFrameRenderer.getAvgRoadMs();
+            p.dirtyRows = TurzxFrameRenderer.getDirtyRowsText();
             p.txMs = TurzxUsbDriver.getAvgTxMs();
             p.ackMs = TurzxUsbDriver.getAvgAckMs();
             p.slotWaitMs = TurzxUsbDriver.getAvgSlotWaitMs();
@@ -6320,7 +6401,8 @@ public class TurzxMonitorMain {
 
             b[0] = cut(p.usbStatus.replace("TURZX ", ""), 22) + "\n"
                     + String.format(Locale.US, "FPS %.1f / 목표 %d\n", p.fps, p.targetFps)
-                    + "JPEG " + d1(p.jpegKb, p.jpegKb > 0.0) + "KB · 누적 " + p.frames + "\n"
+                    + "JPEG " + d1(p.jpegKb, p.jpegKb > 0.0) + "KB · "
+                    + (p.dirtyRows.isEmpty() ? "누적 " + p.frames : "갱신 " + p.dirtyRows + "행") + "\n"
                     + String.format(Locale.US, "렌더 %.0f(도로 %.0f) · 인코딩 %.0f\n", p.renderMs, p.roadMs, p.encodeMs)
                     + String.format(Locale.US, "전송 %.0f · 응답 %.0fms\n", p.txMs, p.ackMs)
                     + String.format(Locale.US, "수집 %.0fms · 대기 %.0fms\n", p.pollMs, p.slotWaitMs)
@@ -6837,7 +6919,7 @@ public class TurzxMonitorMain {
             if (!rst.isEmpty()) {
                 sb.append("\n").append(rst);
             }
-            List<String[]> rec = FpsBench.recent(3);
+            List<String[]> rec = FpsBench.recent(2);
             for (int i = 0; i < rec.size(); i++) {
                 sb.append("\n").append(rec.get(i)[0]).append("\n   ").append(rec.get(i)[1]);
             }
@@ -6921,13 +7003,14 @@ public class TurzxMonitorMain {
         static final int[] TARGET_FPS_STEPS = new int[]{5, 8, 10, 12, 15, 20, 25};
         static final int[] PANEL_FPS_STEPS = new int[]{0, 10, 15, 20, 25, 30};
         static final int[] POLL_MS_STEPS = new int[]{100, 150, 200, 300, 500, 1000};
-        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기"};
+        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기", "부분 인코딩"};
 
         static volatile int jpegQuality = 70;
         static volatile int targetFps = 12;
         static volatile int panelFps = 0;
         static volatile boolean roadEnabled = true;
         static volatile int pollMs = 200;
+        static volatile boolean incrementalEncode = true;
         /** Set when panelFps changed: the sender thread pushes CMD 0x0F to the connected panel. */
         static volatile boolean panelFpsDirty = false;
 
@@ -6937,6 +7020,7 @@ public class TurzxMonitorMain {
             panelFps = Math.max(0, Math.min(60, c.usbPanelFps));
             roadEnabled = c.hudRoadEnabled;
             pollMs = Math.max(50, Math.min(2000, c.telemetryPollMs));
+            incrementalEncode = c.usbIncrementalEncode;
         }
 
         static void saveTo(MonitorConfig c) {
@@ -6945,6 +7029,7 @@ public class TurzxMonitorMain {
             c.usbPanelFps = panelFps;
             c.hudRoadEnabled = roadEnabled;
             c.telemetryPollMs = pollMs;
+            c.usbIncrementalEncode = incrementalEncode;
         }
 
         /** Next value above (dir > 0) / below (dir < 0) cur in the step list; stays at the ends. */
@@ -6971,14 +7056,17 @@ public class TurzxMonitorMain {
                     return panelFps > 0 ? String.valueOf(panelFps) : "끔";
                 case 3:
                     return roadEnabled ? "ON" : "OFF";
-                default:
+                case 4:
                     return pollMs + "ms";
+                default:
+                    return incrementalEncode ? "ON" : "OFF";
             }
         }
 
         static String label() {
             return "q" + jpegQuality + " · " + targetFps + "fps · 패널" + (panelFps > 0 ? String.valueOf(panelFps) : "끔")
-                    + " · 도로" + (roadEnabled ? "ON" : "OFF") + " · 수집" + pollMs;
+                    + " · 도로" + (roadEnabled ? "ON" : "OFF") + " · 수집" + pollMs
+                    + " · 부분" + (incrementalEncode ? "ON" : "OFF");
         }
 
         /** Panel [－]/[＋] handler: applies immediately and restarts the measurement for the new combination. */
@@ -7001,18 +7089,17 @@ public class TurzxMonitorMain {
                 case 3:
                     roadEnabled = !roadEnabled;
                     break;
-                default:
+                case 4:
                     pollMs = step(POLL_MS_STEPS, pollMs, dir);
+                    break;
+                default:
+                    incrementalEncode = !incrementalEncode;
                     break;
             }
             FpsBench.restart(label(), System.currentTimeMillis());
         }
     }
 
-    /**
-     * Windowed benchmark for the experiment panel: 2s warm-up after a change, then 5s of plain averages
-     * (the EMA values in /status.json lag several seconds and would blur A/B comparisons).
-     */
     /**
      * v1.4.4: checks whether the TURZX panel's hardware JPEG decoder honours restart markers (DRI/RSTn) - the
      * prerequisite for an encoder that re-compresses only the changed 16-row MCU strips. Shows three bundled
@@ -7129,6 +7216,10 @@ public class TurzxMonitorMain {
         }
     }
 
+    /**
+     * Windowed benchmark for the experiment panel: 2s warm-up after a change, then 5s of plain averages
+     * (the EMA values in /status.json lag several seconds and would blur A/B comparisons).
+     */
     public static final class FpsBench {
         static final long WARMUP_MS = 2000L;
         static final long MEASURE_MS = 5000L;
@@ -7716,6 +7807,7 @@ public class TurzxMonitorMain {
                         .append(", usb_panel_fps=").append(cfg.usbPanelFps)
                         .append(", overlay_hotkey_code=").append(cfg.overlayHotkeyCode)
                         .append(", hud_road=").append(cfg.hudRoadEnabled)
+                        .append(", usb_incremental_encode=").append(cfg.usbIncrementalEncode)
                         .append(", telemetry_poll_ms=").append(cfg.telemetryPollMs)
                         .append(", comma_ip=").append(cfg.commaIp)
                         .append(", auto_update=").append(cfg.autoUpdate)
@@ -7732,6 +7824,10 @@ public class TurzxMonitorMain {
                     .append(String.format(Locale.US, " | render %.1fms (road %.1fms), encode %.1fms (avg, parallel threads)\n",
                             TurzxFrameRenderer.getAvgRenderMs(), TurzxFrameRenderer.getAvgRoadMs(),
                             TurzxFrameRenderer.getAvgEncodeMs()));
+            sb.append("Incremental     : ").append(LiveTuning.incrementalEncode ? "on" : "off")
+                    .append(" | available=").append(NativeJpeg.isIncrementalAvailable())
+                    .append(" | active=").append(TurzxFrameRenderer.isIncrementalActive())
+                    .append(" | re-encoded MCU rows (avg) ").append(TurzxFrameRenderer.getDirtyRowsText()).append("\n");
             sb.append(String.format(Locale.US,
                     "Pipeline (avg)  : poll %.1fms | usb tx %.1fms | panel ack %.1fms | slot wait %.1fms | encoder wait %.1fms | jpeg %.1fKB\n",
                     TurzxUsbDriver.getAvgPollMs(), TurzxUsbDriver.getAvgTxMs(), TurzxUsbDriver.getAvgAckMs(),
@@ -9339,6 +9435,8 @@ public class TurzxMonitorMain {
         sb.append(",\"frames\":").append(TurzxUsbDriver.getPushedFrames());
         sb.append(String.format(Locale.US, ",\"fps\":%.1f", TurzxUsbDriver.getLiveFps()));
         sb.append(",\"jpeg_encoder\":\"").append(escapeJson(TurzxFrameRenderer.getLastEncoderName())).append("\"");
+        sb.append(",\"incremental\":").append(TurzxFrameRenderer.isIncrementalActive());
+        sb.append(",\"dirty_rows\":\"").append(TurzxFrameRenderer.getDirtyRowsText()).append("\"");
         sb.append(String.format(Locale.US, ",\"render_ms\":%.1f,\"road_ms\":%.1f,\"encode_ms\":%.1f,\"encode_wait_ms\":%.1f",
                 TurzxFrameRenderer.getAvgRenderMs(), TurzxFrameRenderer.getAvgRoadMs(),
                 TurzxFrameRenderer.getAvgEncodeMs(), TurzxUsbDriver.getAvgEncodeWaitMs()));
@@ -10964,6 +11062,7 @@ public class TurzxMonitorMain {
                 else if ("usb_panel_fps".equals(k)) cfg.usbPanelFps = Math.max(0, Math.min(60, parseIntSafe(v, 0)));
                 else if ("overlay_hotkey_code".equals(k)) cfg.overlayHotkeyCode = Math.max(0, Math.min(767, parseIntSafe(v, 0)));
                 else if ("hud_road".equals(k)) cfg.hudRoadEnabled = !"0".equals(v) && !"false".equalsIgnoreCase(v);
+                else if ("usb_incremental_encode".equals(k)) cfg.usbIncrementalEncode = !"0".equals(v) && !"false".equalsIgnoreCase(v);
                 else if ("telemetry_poll_ms".equals(k)) cfg.telemetryPollMs = Math.max(50, Math.min(2000, parseIntSafe(v, 200)));
                 else if ("comma_ip".equals(k)) cfg.commaIp = v;
                 else if ("auto_update".equals(k)) cfg.autoUpdate = !"0".equals(v) && !"false".equalsIgnoreCase(v);
@@ -10995,6 +11094,7 @@ public class TurzxMonitorMain {
                     + "usb_panel_fps=" + cfg.usbPanelFps + "\n"
                     + "overlay_hotkey_code=" + cfg.overlayHotkeyCode + "\n"
                     + "hud_road=" + (cfg.hudRoadEnabled ? 1 : 0) + "\n"
+                    + "usb_incremental_encode=" + (cfg.usbIncrementalEncode ? 1 : 0) + "\n"
                     + "telemetry_poll_ms=" + cfg.telemetryPollMs + "\n"
                     + "comma_ip=" + (cfg.commaIp != null ? cfg.commaIp : "") + "\n"
                     + "auto_update=" + (cfg.autoUpdate ? 1 : 0) + "\n"
@@ -11973,7 +12073,7 @@ public class TurzxMonitorMain {
             tc.hudRoadEnabled = false;
             tc.telemetryPollMs = 300;
             LiveTuning.loadFrom(tc);
-            assertTrue(LiveTuning.label().equals("q60 · 20fps · 패널끔 · 도로OFF · 수집300"), "tuning: label " + LiveTuning.label());
+            assertTrue(LiveTuning.label().equals("q60 · 20fps · 패널끔 · 도로OFF · 수집300 · 부분ON"), "tuning: label " + LiveTuning.label());
             MonitorConfig tc2 = new MonitorConfig();
             LiveTuning.saveTo(tc2);
             assertTrue(tc2.usbJpegQuality == 60 && tc2.usbFps == 20 && !tc2.hudRoadEnabled && tc2.telemetryPollMs == 300,
@@ -11998,6 +12098,13 @@ public class TurzxMonitorMain {
             saveMonitorConfig(tuneCfg, tc);
             MonitorConfig tc3 = loadMonitorConfig(tuneCfg);
             assertTrue(!tc3.hudRoadEnabled && tc3.telemetryPollMs == 300, "tuning: hud_road / telemetry_poll_ms roundtrip");
+            tc.usbIncrementalEncode = false;
+            saveMonitorConfig(tuneCfg, tc);
+            assertTrue(!loadMonitorConfig(tuneCfg).usbIncrementalEncode, "tuning: usb_incremental_encode roundtrip");
+            LiveTuning.loadFrom(tc);
+            LiveTuning.adjust(5, +1);
+            assertTrue(LiveTuning.incrementalEncode && LiveTuning.valueText(5).equals("ON"), "tuning: incremental toggle");
+            LiveTuning.loadFrom(new MonitorConfig());
             tuneCfg.delete();
         } catch (Exception e) {
             throw new RuntimeException("v1.4.3 hotkey / dashboard self-test failed", e);

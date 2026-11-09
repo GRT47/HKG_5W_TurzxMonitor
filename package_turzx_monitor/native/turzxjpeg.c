@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "turbojpeg.h"
+#include "turzx_inc.c"   /* v1.4.5 incremental (dirty MCU row) encoder core */
 
 /* Internal libjpeg-turbo SIMD capability probe (exported from the static library). */
 extern int jsimd_can_rgb_ycc(void);
@@ -159,6 +160,52 @@ Java_com_hkg_turzxmonitor_TurzxMonitorMain_00024NativeJpeg_nEncode(
     }
 unlock:
     pthread_mutex_unlock(&g_lock);
+    return out;
+}
+
+static tz_inc_t g_inc;  /* guarded by g_lock */
+
+/*
+ * byte[] nEncodeIncremental(Object bitmap, int rotation, int padWidth, int quality, boolean forceFull, int[] stats)
+ * Rotated portrait JPEG with a restart marker after every MCU row; only MCU rows whose landscape strip changed
+ * since the previous call are re-encoded (see turzx_inc.c). stats (length >= 3, may be null):
+ * [0] rows re-encoded, [1] encoder calls, [2] total rows. Returns null on failure (caller falls back).
+ */
+JNIEXPORT jbyteArray JNICALL
+Java_com_hkg_turzxmonitor_TurzxMonitorMain_00024NativeJpeg_nEncodeIncremental(
+        JNIEnv *env, jclass clazz, jobject bitmap, jint rotation, jint padWidth, jint quality,
+        jboolean forceFull, jintArray stats) {
+    AndroidBitmapInfo info;
+    void *pixels = NULL;
+    jbyteArray out = NULL;
+    const uint8_t *jpeg = NULL;
+    size_t jpegLen = 0;
+    int st[3] = {0, 0, 0};
+    int rc;
+    (void) clazz;
+
+    if (bitmap == NULL) return NULL;
+    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) return NULL;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return NULL;
+
+    pthread_mutex_lock(&g_lock);
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || pixels == NULL) {
+        pthread_mutex_unlock(&g_lock);
+        return NULL;
+    }
+    rc = tz_inc_encode(&g_inc, (const uint8_t *) pixels, info.stride, (int) info.width, (int) info.height,
+                       rotation, padWidth, quality, forceFull ? 1 : 0, &jpeg, &jpegLen, st);
+    AndroidBitmap_unlockPixels(env, bitmap);
+    if (rc == 0 && jpegLen > 0) {
+        out = (*env)->NewByteArray(env, (jsize) jpegLen);
+        if (out != NULL) {
+            (*env)->SetByteArrayRegion(env, out, 0, (jsize) jpegLen, (const jbyte *) jpeg);
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (stats != NULL && (*env)->GetArrayLength(env, stats) >= 3) {
+        (*env)->SetIntArrayRegion(env, stats, 0, 3, (const jint *) st);
+    }
     return out;
 }
 

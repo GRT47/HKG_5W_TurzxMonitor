@@ -29,6 +29,7 @@
   - 전체 화면 진단 대시보드의 `[💾 로그저장]` 버튼, 웹 `http://<헤드유닛_IP>:8766/debug.txt?save=1`, 또는 **USB 메모리를 새로 꽂았을 때 1회** `/storage/usb0/HKG_TurzxMonitor_Log/` 폴더에 상세 진단 리포트(`HKG_TurzxMonitor_Debug.txt`), 데몬 로그(`hkg_turzxmonitor.log`), USB 커널 로그(`dmesg_usb.txt`), 연결된 USB 장치 목록(`usb_devices.txt`)을 저장합니다.
   - v1.4.0부터 주기적(30초) 동기화와 서비스 종료 시 동기화는 제거되었습니다. 시동 OFF 순간의 쓰기로 FAT32 USB가 손상되는 것을 막기 위함입니다. 부팅·QuickBoot 복귀 직후 90초 안에 다시 마운트되는 USB는 "새로 꽂음"으로 보지 않습니다.
 - **JPEG 인코딩 (v1.4.0)**: libjpeg-turbo 3.0.4 NEON SIMD 네이티브 인코더(`libturzxjpeg.so`, jar에 포함되어 실행 시 추출)로 패널 회전과 인코딩을 한 번에 처리합니다. 로드나 인코딩에 실패하면 자동으로 Skia `Bitmap.compress()`로 대체됩니다. 네이티브 로드나 첫 50프레임 도중 프로세스가 연속 2회 죽으면 해당 `.so` 버전의 네이티브 인코딩을 꺼서(`/data/local/tmp/hkg_turzxjpeg_disabled_<hash>`) HUD와 OTA가 계속 동작하게 합니다. 이 파일을 지우면 다시 시도합니다. 웹 `/frame.jpg`용 가로 JPEG는 누군가 요청할 때만 생성하고, TURZX가 연결되지 않은 동안에는 렌더링하지 않습니다. 기본 JPEG 품질은 85에서 70으로 낮췄습니다(이전 기본값 85로 저장된 설정은 자동으로 70으로 이전).
+- **부분 인코딩 (v1.4.5)**: 패널 JPEG에 MCU 행(16픽셀)마다 restart marker를 넣고, 직전 프레임과 비교해 바뀐 16열 띠에 해당하는 행만 다시 압축한 뒤 나머지 행은 이전 압축 결과를 그대로 이어 붙입니다(`native/turzx_inc.c`). 결과는 전체를 restart marker와 함께 한 번에 압축한 것과 바이트 단위로 같습니다. 주행 중에는 보통 도로 영역(약 37/120행)만 다시 압축하고 정차 중에는 거의 압축하지 않습니다. 실험 패널의 `부분 인코딩` ON/OFF(`usb_incremental_encode=1`)로 끌 수 있고, 실패하면 자동으로 전체 인코딩으로 돌아갑니다.
 - **크래시 백오프 (v1.4.0)**: Java 프로세스가 연속으로 죽으면 재시작 간격이 0 → 10 → 30 → 60 → 120 → 300초로 늘어나고, 120초 이상 정상 동작하면 초기화됩니다. Dalvik 캐시는 연속 크래시 2회째에 한 번만 지웁니다.
 
 ---
@@ -39,7 +40,7 @@
 - **OTA 아티팩트 디렉터리**: `ota/` (`version.json`, `turzxmonitor.b64`, `turzx-daemon.sh`, `launch.sh`)
 - **패키지 소스 디렉터리**: `package_turzx_monitor/`
   - `NEMESIS.data`: 패키지 메타데이터 (`id=hkg.turzxmonitor`, `version=1.4.0`)
-  - `native/turzxjpeg.c`, `native/build_native.py`: libjpeg-turbo NEON JNI 인코더 소스 및 NDK 빌드 스크립트. 빌드 결과물 `native/prebuilt/armeabi-v7a/libturzxjpeg.so`는 저장소에 포함되어 NDK 없이도 패키징할 수 있습니다.
+  - `native/turzxjpeg.c`, `native/build_native.py`: libjpeg-turbo NEON JNI 인코더 소스 및 NDK 빌드 스크립트. 빌드 결과물 `native/prebuilt/armeabi-v7a/libturzxjpeg.so`는 저장소에 포함되어 NDK 없이도 패키징할 수 있습니다. `native/turzx_inc.c`는 부분 인코딩 핵심 로직이며, `native/test/run_host_test.py`가 PC에서 `zig cc`(pip `ziglang`, `cmake`, `ninja`)로 libjpeg-turbo를 빌드해 부분 인코딩 결과가 전체 인코딩과 바이트 단위로 같은지 검사합니다.
   - `src_java/com/hkg/turzxmonitor/TurzxMonitorMain.java`:
     - `TurzxUsbDriver`: TURZX 9.2" (`1cbe:0092`) 512바이트 DES-CBC (`"slv3tuzx"`) 명령 헤더 암호화, `480×1920` 투명 PNG 오버레이 초기화(`CMD 102`), 및 `464×1920` 패딩 JPEG 프레임 USB Bulk (`EP 0x01`) 전송 드라이버
     - `TurzxFrameRenderer`: Android `Canvas` 기반 `1920 × 462` 클러스터 HUD 렌더러 (`90°/270°` 네이티브 포트레이트 회전 지원)
@@ -69,7 +70,7 @@ python package_turzx_monitor/build_package.py
 2. 설치 후 `hkg-turzxmonitor` 백그라운드 서비스가 자동 실행되며, 유선 USB 허브에 연결된 **TURZX 9.2인치 모니터(`1cbe:0092`)**를 감지하여 자동으로 `1920 × 462` 클러스터 HUD 화면을 전송합니다.
 3. 내장 웹 서버(`http://<헤드유닛_IP>:8766/`)에서 다음 엔드포인트를 사용할 수 있습니다:
    - `/`: 실시간 클러스터 HUD 웹 뷰어
-   - `/status.json`: 4대 도메인 텔레메트리 + USB + OTA 상태 JSON (`fps`, `jpeg_encoder`, `render_ms`, `road_ms`, `encode_ms`, `encode_wait_ms`, `poll_ms`, `usb_tx_ms`, `ack_ms`, `slot_wait_ms`, `jpeg_kb` 포함)
+   - `/status.json`: 4대 도메인 텔레메트리 + USB + OTA 상태 JSON (`fps`, `jpeg_encoder`, `incremental`, `dirty_rows`, `render_ms`, `road_ms`, `encode_ms`, `encode_wait_ms`, `poll_ms`, `usb_tx_ms`, `ack_ms`, `slot_wait_ms`, `jpeg_kb` 포함)
    - 실험 옵션: `config/monitor.conf`에 `usb_panel_fps=<1~60>`을 넣으면 연결 시 TURZX `CMD 0x0F`(프레임레이트)를 전송합니다 (기본 `0` = 전송 안 함). `hud_road=0`이면 ADAS 3D 도로를 그리지 않고, `telemetry_poll_ms`(기본 `200`)로 텔레메트리 수집 주기를 정합니다
    - `/frame.jpg`: 실시간 렌더링된 `1920 × 462` JPEG 프레임 (요청이 있을 때만 생성, 첫 요청은 최대 0.8초 대기)
    - `/albumart.jpg`: 현재 재생 곡의 원본 앨범 커버 이미지
