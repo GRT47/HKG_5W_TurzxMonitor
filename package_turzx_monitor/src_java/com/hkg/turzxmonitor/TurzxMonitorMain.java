@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.4.5";
+    public static final String MONITOR_VERSION = "1.4.6";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -6335,6 +6335,7 @@ public class TurzxMonitorMain {
         private static String lastSubtitle = "";
         private static volatile boolean wantVisible = false;
         private static boolean lastShownState = true;
+        private static int showRetries = 0; // UI thread only
 
         /** Pipeline / system values shown on the dashboard (filled from the live getters, or by self-tests). */
         static final class DashboardStats {
@@ -6494,18 +6495,50 @@ public class TurzxMonitorMain {
         }
 
         public static void toggle() {
+            toggle("launcher");
+        }
+
+        /**
+         * Opens / closes the dashboard based on what is actually on screen (v1.4.5). Before, the flag alone decided:
+         * a dashboard that was auto-hidden (reverse, rear camera, screen off) or had failed to attach still counted
+         * as "open", so the next MAP long press closed an invisible window and nothing appeared.
+         */
+        public static void toggle(final String source) {
+            if (uiHandler == null) {
+                DebugManager.logEvent("OVERLAY", "Toggle (" + source + ") ignored: UI looper not ready");
+                return;
+            }
             postToUi(new Runnable() {
                 @Override
                 public void run() {
-                    if (wantVisible) {
+                    boolean onScreen = wantVisible && rootView != null && lastShownState;
+                    if (onScreen) {
                         wantVisible = false;
                         hideOnUiThread();
+                        DebugManager.logEvent("OVERLAY", "Toggle (" + source + "): dashboard closed");
                     } else {
                         wantVisible = true;
-                        showOnUiThread();
+                        showRetries = 0;
+                        String hiddenWhy = autoHideReason();
+                        DebugManager.logEvent("OVERLAY", "Toggle (" + source + "): dashboard open requested"
+                                + (rootView != null ? " (window exists)" : "")
+                                + (hiddenWhy.isEmpty() ? "" : " - auto-hidden now: " + hiddenWhy + ", appears when it clears"));
+                        if (rootView != null) refreshOnUiThread();
+                        else showOnUiThread();
                     }
                 }
             });
+        }
+
+        /** Why the dashboard must stay hidden right now ("" = may be shown). */
+        static String autoHideReason() {
+            if ("1".equals(getSystemProperty("tcc.hwc.lcd.disable", "0"))) return "LCD off";
+            if ("false".equalsIgnoreCase(getSystemProperty("sys.boot.show_screen", "true"))) return "boot screen";
+            if (TelemetryCollector.isVehicleScreenOff()) return "vehicle screen off";
+            if ("1".equals(getSystemProperty("persist.sys.rearcam.open", "0"))) return "rear camera";
+            TelemetrySnapshot snap = TelemetryCollector.getLatestSnapshot();
+            if (snap != null && "R".equals(snap.gearPos)) return "gear R";
+            return "";
         }
 
         public static void setEnabledAndShow(final boolean enable) {
@@ -6833,6 +6866,21 @@ public class TurzxMonitorMain {
                 refreshOnUiThread();
             } catch (Throwable t) {
                 DebugManager.logError("OVERLAY", "showOnUiThread", t);
+                rootView = null;
+                if (showRetries < 1) {
+                    showRetries++;
+                    windowManager = null; // re-resolved by ensureUiContext()
+                    DebugManager.logEvent("OVERLAY", "Dashboard attach failed -> retry in 1s");
+                    postDelayedToUi(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (wantVisible && rootView == null) showOnUiThread();
+                        }
+                    }, 1000L);
+                } else {
+                    wantVisible = false; // next MAP long press tries again instead of "closing" nothing
+                    DebugManager.logEvent("OVERLAY", "Dashboard attach failed twice -> closed state");
+                }
             }
         }
 
@@ -6969,16 +7017,13 @@ public class TurzxMonitorMain {
             try {
                 TelemetrySnapshot snap = TelemetryCollector.getLatestSnapshot();
                 // Safety: never cover the rear camera / reverse view, and stay out of the way while the screen is off
-                boolean screenOff = "1".equals(getSystemProperty("tcc.hwc.lcd.disable", "0"))
-                        || "false".equalsIgnoreCase(getSystemProperty("sys.boot.show_screen", "true"))
-                        || TelemetryCollector.isVehicleScreenOff();
-                boolean reversing = "1".equals(getSystemProperty("persist.sys.rearcam.open", "0"))
-                        || "R".equals(snap.gearPos);
-                boolean show = !screenOff && !reversing;
+                String hiddenWhy = autoHideReason();
+                boolean show = hiddenWhy.isEmpty();
                 if (show != lastShownState) {
                     lastShownState = show;
                     rootView.getClass().getMethod("setVisibility", int.class)
                             .invoke(rootView, Integer.valueOf(show ? 0 : 8)); // VISIBLE : GONE
+                    DebugManager.logEvent("OVERLAY", show ? "Dashboard visible again" : ("Dashboard auto-hidden: " + hiddenWhy));
                 }
                 if (show) {
                     long now = System.currentTimeMillis();
@@ -7460,9 +7505,18 @@ public class TurzxMonitorMain {
                 this.stuckMs = stuckMs;
             }
 
+            /** down=true from an autorepeat (evdev value 2) or an unknown source: only starts timing when idle. */
             synchronized void onKey(boolean down, long nowMs) {
+                onKey(down, true, nowMs);
+            }
+
+            /**
+             * repeat=false is a fresh press (evdev value 1): it restarts the hold timer even if the previous key-up
+             * was lost (v1.4.5: a missed key-up used to block long presses until the 20s stuck reset).
+             */
+            synchronized void onKey(boolean down, boolean repeat, long nowMs) {
                 if (down) {
-                    if (downSinceMs == 0L) {
+                    if (downSinceMs == 0L || !repeat) {
                         downSinceMs = Math.max(1L, nowMs);
                         fired = false;
                     }
@@ -7634,7 +7688,7 @@ public class TurzxMonitorMain {
                     }
                     if (detector.poll(System.currentTimeMillis())) {
                         DebugManager.logEvent("HOTKEY", "MAP held " + (LONG_PRESS_MS / 1000) + "s -> toggle full-screen dashboard");
-                        TurzxOverlayController.toggle();
+                        TurzxOverlayController.toggle("MAP");
                     }
                     Thread.sleep(100L);
                 } catch (Throwable t) {
@@ -7744,8 +7798,8 @@ public class TurzxMonitorMain {
         private static void onKeyEvent(String dev, int code, int value) {
             long now = System.currentTimeMillis();
             boolean map = isMapCode(code);
-            if (map && (value == 1 || value == 2)) detector.onKey(true, now);
-            else if (map && value == 0) detector.onKey(false, now);
+            if (map && (value == 1 || value == 2)) detector.onKey(true, value == 2, now);
+            else if (map && value == 0) detector.onKey(false, false, now);
 
             // Recent key log (debug report / dashboard) so an unknown MAP code can be identified on the car
             String key = dev + ":" + code;
@@ -7760,6 +7814,13 @@ public class TurzxMonitorMain {
                 }
                 String entry = dev + " code " + code + (map ? "(MAP)" : "")
                         + (down != null ? " " + (now - down.longValue()) + "ms" : "");
+                if (map && down != null) {
+                    long held = now - down.longValue();
+                    if (held >= 1000L && held < LONG_PRESS_MS) {
+                        DebugManager.logEvent("HOTKEY", "MAP released after " + held + "ms (< "
+                                + (LONG_PRESS_MS / 1000) + "s) -> no toggle");
+                    }
+                }
                 synchronized (recentKeys) {
                     recentKeys.add(entry);
                     while (recentKeys.size() > MAX_RECENT_KEYS) recentKeys.remove(0);
@@ -12118,6 +12179,14 @@ public class TurzxMonitorMain {
             assertTrue(!lp.poll(11000L), "long press: short press (1s) never fires");
             lp.onKey(true, 12000L);
             assertTrue(!lp.poll(40000L), "long press: missed key-up (stuck) is reset, not fired");
+            // Missed key-up followed by a fresh press (evdev value 1): the new press is timed from its own start
+            lp.onKey(true, false, 100000L);
+            assertTrue(lp.poll(103100L), "long press: first press fires");
+            lp.onKey(true, false, 110000L); // key-up of the first press was lost
+            assertTrue(!lp.poll(112000L), "long press: fresh press restarts timing (2s)");
+            assertTrue(lp.poll(113100L), "long press: fresh press fires after its own 3s");
+            lp.onKey(true, true, 113500L); // autorepeat does not re-arm
+            assertTrue(!lp.poll(117000L), "long press: still once per press");
 
             TurzxOverlayController.DashboardStats ds = new TurzxOverlayController.DashboardStats();
             ds.usbConnected = true;
