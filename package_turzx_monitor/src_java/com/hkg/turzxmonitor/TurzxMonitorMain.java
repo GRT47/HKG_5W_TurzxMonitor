@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.4.7";
+    public static final String MONITOR_VERSION = "1.4.8";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -179,7 +179,7 @@ public class TurzxMonitorMain {
         // Column 2 3D ADAS road (largest render cost); false = static background only
         public boolean hudRoadEnabled = true;
         public boolean usbIncrementalEncode = true; // v1.4.5: re-encode only changed MCU rows (RST-per-row JPEG)
-        public boolean renderParallel = true;       // v1.4.5: render and JPEG encode on different cores at once
+        public boolean renderParallel = false;      // v1.4.8 default: single-core (render then encode); true = parallel
         // Telemetry (Binder/CAN) poll period of the separate poll thread
         public int telemetryPollMs = 200;
         public String commaIp = "";
@@ -7079,7 +7079,7 @@ public class TurzxMonitorMain {
         static volatile int pollMs = 200;
         static volatile boolean incrementalEncode = true;
         /** true: render || encode on two cores (v1.4.4 pipeline); false: render then encode, one core at a time. */
-        static volatile boolean parallelPipeline = true;
+        static volatile boolean parallelPipeline = false;
         /** Set when panelFps changed: the sender thread pushes CMD 0x0F to the connected panel. */
         static volatile boolean panelFpsDirty = false;
 
@@ -11180,7 +11180,7 @@ public class TurzxMonitorMain {
         return "";
     }
 
-    private static final int CONFIG_REV = 2;
+    private static final int CONFIG_REV = 3;
 
     public static MonitorConfig loadMonitorConfig(File file) {
         MonitorConfig cfg = new MonitorConfig();
@@ -11224,6 +11224,13 @@ public class TurzxMonitorMain {
         // with config_rev>=2 are respected.
         if (configRev < 2 && cfg.usbJpegQuality == 85) {
             cfg.usbJpegQuality = 70;
+        }
+        // v1.4.8: single-core rendering + incremental encoding become the standard. Configs saved before
+        // (config_rev < 3, e.g. render_parallel=1 written by the v1.4.5-1.4.7 experiment panel) are moved over once;
+        // values saved with config_rev >= 3 are respected.
+        if (configRev < 3) {
+            cfg.renderParallel = false;
+            cfg.usbIncrementalEncode = true;
         }
         return cfg;
     }
@@ -12128,7 +12135,7 @@ public class TurzxMonitorMain {
             assertTrue(loadMonitorConfig(current).usbJpegQuality == 85, "Expected explicit q85 with config_rev=2 to be kept");
             MonitorConfig rt = new MonitorConfig();
             saveMonitorConfig(current, rt);
-            assertTrue(readAllTextQuick(current).contains("config_rev=2"), "Expected saved config to carry config_rev=2");
+            assertTrue(readAllTextQuick(current).contains("config_rev=3"), "Expected saved config to carry config_rev=3");
 
             byte[] so = TurzxFrameRenderer.readJarAssetBytesPublic("libturzxjpeg_armv7.so");
             assertTrue(so != null && so.length > 16384 && so[0] == 0x7F && so[1] == 'E' && so[2] == 'L' && so[3] == 'F'
@@ -12237,7 +12244,7 @@ public class TurzxMonitorMain {
             tc.hudRoadEnabled = false;
             tc.telemetryPollMs = 300;
             LiveTuning.loadFrom(tc);
-            assertTrue(LiveTuning.label().equals("q60 · 20fps · 패널끔 · 도로OFF · 수집300 · 부분ON · 멀티코어"), "tuning: label " + LiveTuning.label());
+            assertTrue(LiveTuning.label().equals("q60 · 20fps · 패널끔 · 도로OFF · 수집300 · 부분ON · 싱글코어"), "tuning: label " + LiveTuning.label());
             MonitorConfig tc2 = new MonitorConfig();
             LiveTuning.saveTo(tc2);
             assertTrue(tc2.usbJpegQuality == 60 && tc2.usbFps == 20 && !tc2.hudRoadEnabled && tc2.telemetryPollMs == 300,
@@ -12274,7 +12281,19 @@ public class TurzxMonitorMain {
             LiveTuning.loadFrom(tc);
             LiveTuning.adjust(5, +1);
             assertTrue(LiveTuning.incrementalEncode && LiveTuning.valueText(5).equals("ON"), "tuning: incremental toggle");
+            tc.renderParallel = true;
+            tc.usbIncrementalEncode = false;
+            saveMonitorConfig(tuneCfg, tc);
+            assertTrue(loadMonitorConfig(tuneCfg).renderParallel && !loadMonitorConfig(tuneCfg).usbIncrementalEncode,
+                    "tuning: explicit values saved with config_rev=3 are kept");
+            tuneCfg.delete(); // File.renameTo cannot replace an existing file on the Windows build host
+            writeBytesNoSync(tuneCfg, "render_parallel=1\nusb_incremental_encode=0\nconfig_rev=2\n".getBytes(UTF8));
+            MonitorConfig mig = loadMonitorConfig(tuneCfg);
+            assertTrue(!mig.renderParallel && mig.usbIncrementalEncode, "tuning: config_rev<3 migrates to single-core + incremental");
+            assertTrue(!new MonitorConfig().renderParallel && new MonitorConfig().usbIncrementalEncode,
+                    "tuning: defaults are single-core + incremental");
             tc.renderParallel = false;
+            tc.usbIncrementalEncode = true;
             saveMonitorConfig(tuneCfg, tc);
             assertTrue(!loadMonitorConfig(tuneCfg).renderParallel, "tuning: render_parallel roundtrip");
             LiveTuning.loadFrom(tc);
