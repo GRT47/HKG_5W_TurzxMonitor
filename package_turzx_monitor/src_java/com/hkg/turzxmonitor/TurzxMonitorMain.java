@@ -179,6 +179,7 @@ public class TurzxMonitorMain {
         // Column 2 3D ADAS road (largest render cost); false = static background only
         public boolean hudRoadEnabled = true;
         public boolean usbIncrementalEncode = true; // v1.4.5: re-encode only changed MCU rows (RST-per-row JPEG)
+        public boolean renderParallel = true;       // v1.4.5: render and JPEG encode on different cores at once
         // Telemetry (Binder/CAN) poll period of the separate poll thread
         public int telemetryPollMs = 200;
         public String commaIp = "";
@@ -903,6 +904,18 @@ public class TurzxMonitorMain {
             }
         }
 
+        /** Render thread (single-core mode): blocks until the encoder has no queued or running job. */
+        static void waitEncodeIdle(long maxWaitMs) throws InterruptedException {
+            long deadline = System.currentTimeMillis() + maxWaitMs;
+            synchronized (ENCODE_SLOT_LOCK) {
+                while (queuedEncodeBuf >= 0 || encodingBuf >= 0) {
+                    long remain = deadline - System.currentTimeMillis();
+                    if (remain <= 0L) break;
+                    ENCODE_SLOT_LOCK.wait(remain);
+                }
+            }
+        }
+
         /** Encoder thread: the buffer may be drawn again. */
         static void finishEncodeJob() {
             synchronized (ENCODE_SLOT_LOCK) {
@@ -1064,6 +1077,10 @@ public class TurzxMonitorMain {
                             TelemetrySnapshot fresh = latestPolledSnap;
                             if (TurzxFrameRenderer.renderHudFrame(fresh != null ? fresh : snap, buf)) {
                                 queueEncodeJob(buf, cfg.usbPushEnabled && connected, needLandscape);
+                                if (!LiveTuning.parallelPipeline) {
+                                    // Single-core mode: no overlap, render N+1 only after frame N is encoded
+                                    waitEncodeIdle(1500L);
+                                }
                             }
                         }
                     }
@@ -6252,6 +6269,7 @@ public class TurzxMonitorMain {
             config.overlayHotkeyCode = loaded.overlayHotkeyCode;
             config.hudRoadEnabled = loaded.hudRoadEnabled;
             config.usbIncrementalEncode = loaded.usbIncrementalEncode;
+            config.renderParallel = loaded.renderParallel;
             config.telemetryPollMs = loaded.telemetryPollMs;
             LiveTuning.loadFrom(config);
             config.commaIp = loaded.commaIp;
@@ -6332,6 +6350,7 @@ public class TurzxMonitorMain {
             double encodeMs;
             double roadMs;
             String dirtyRows = "";
+            double cpuPct = -1.0;
             double txMs;
             double ackMs;
             double slotWaitMs;
@@ -6354,6 +6373,7 @@ public class TurzxMonitorMain {
             p.encodeMs = TurzxFrameRenderer.getAvgEncodeMs();
             p.roadMs = TurzxFrameRenderer.getAvgRoadMs();
             p.dirtyRows = TurzxFrameRenderer.getDirtyRowsText();
+            p.cpuPct = ProcCpu.sample(System.currentTimeMillis());
             p.txMs = TurzxUsbDriver.getAvgTxMs();
             p.ackMs = TurzxUsbDriver.getAvgAckMs();
             p.slotWaitMs = TurzxUsbDriver.getAvgSlotWaitMs();
@@ -6405,7 +6425,8 @@ public class TurzxMonitorMain {
                     + (p.dirtyRows.isEmpty() ? "누적 " + p.frames : "갱신 " + p.dirtyRows + "행") + "\n"
                     + String.format(Locale.US, "렌더 %.0f(도로 %.0f) · 인코딩 %.0f\n", p.renderMs, p.roadMs, p.encodeMs)
                     + String.format(Locale.US, "전송 %.0f · 응답 %.0fms\n", p.txMs, p.ackMs)
-                    + String.format(Locale.US, "수집 %.0fms · 대기 %.0fms\n", p.pollMs, p.slotWaitMs)
+                    + String.format(Locale.US, "수집 %.0fms · CPU ", p.pollMs)
+                    + (p.cpuPct >= 0.0 ? String.format(Locale.US, "%.0f%%", p.cpuPct) : "--") + "/400%\n"
                     + "→ " + describeBottleneck(p);
 
             double soc = s.getEffectiveSocPct();
@@ -6664,7 +6685,7 @@ public class TurzxMonitorMain {
                     setGravity.invoke(ctl, 16);
                     addView.invoke(ctl, newText(ctxCls, tvCls, viewCls, LiveTuning.ROW_LABELS[row], 20f, 0xFFCBD5E1, false),
                             llLpWCtor.newInstance(0, -2, 1f));
-                    addView.invoke(ctl, createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls, " － ", 0xFF475569, 22f,
+                    addView.invoke(ctl, createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls, " － ", 0xFF475569, 20f,
                             new Runnable() {
                                 @Override
                                 public void run() {
@@ -6672,11 +6693,11 @@ public class TurzxMonitorMain {
                                     refreshOnUiThread();
                                 }
                             }), llLpCtor.newInstance(-2, -2));
-                    Object val = newText(ctxCls, tvCls, viewCls, LiveTuning.valueText(row), 23f, 0xFFF8FAFC, true);
+                    Object val = newText(ctxCls, tvCls, viewCls, LiveTuning.valueText(row), 21f, 0xFFF8FAFC, true);
                     setTvGravity.invoke(val, 17); // CENTER
                     setTvWidth.invoke(val, 110);
                     addView.invoke(ctl, val, llLpCtor.newInstance(-2, -2));
-                    addView.invoke(ctl, createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls, " ＋ ", 0xFF475569, 22f,
+                    addView.invoke(ctl, createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls, " ＋ ", 0xFF475569, 20f,
                             new Runnable() {
                                 @Override
                                 public void run() {
@@ -6687,7 +6708,7 @@ public class TurzxMonitorMain {
                     controlValueTvs[row] = val;
                     lastControlTexts[row] = "";
                     Object ctlLp = llLpCtor.newInstance(-1, -2);
-                    setMargins.invoke(ctlLp, 0, 8, 0, 0);
+                    setMargins.invoke(ctlLp, 0, 4, 0, 0);
                     addView.invoke(panel, ctl, ctlLp);
                 }
 
@@ -7003,7 +7024,7 @@ public class TurzxMonitorMain {
         static final int[] TARGET_FPS_STEPS = new int[]{5, 8, 10, 12, 15, 20, 25};
         static final int[] PANEL_FPS_STEPS = new int[]{0, 10, 15, 20, 25, 30};
         static final int[] POLL_MS_STEPS = new int[]{100, 150, 200, 300, 500, 1000};
-        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기", "부분 인코딩"};
+        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기", "부분 인코딩", "렌더 방식"};
 
         static volatile int jpegQuality = 70;
         static volatile int targetFps = 12;
@@ -7011,6 +7032,8 @@ public class TurzxMonitorMain {
         static volatile boolean roadEnabled = true;
         static volatile int pollMs = 200;
         static volatile boolean incrementalEncode = true;
+        /** true: render || encode on two cores (v1.4.4 pipeline); false: render then encode, one core at a time. */
+        static volatile boolean parallelPipeline = true;
         /** Set when panelFps changed: the sender thread pushes CMD 0x0F to the connected panel. */
         static volatile boolean panelFpsDirty = false;
 
@@ -7021,6 +7044,7 @@ public class TurzxMonitorMain {
             roadEnabled = c.hudRoadEnabled;
             pollMs = Math.max(50, Math.min(2000, c.telemetryPollMs));
             incrementalEncode = c.usbIncrementalEncode;
+            parallelPipeline = c.renderParallel;
         }
 
         static void saveTo(MonitorConfig c) {
@@ -7030,6 +7054,7 @@ public class TurzxMonitorMain {
             c.hudRoadEnabled = roadEnabled;
             c.telemetryPollMs = pollMs;
             c.usbIncrementalEncode = incrementalEncode;
+            c.renderParallel = parallelPipeline;
         }
 
         /** Next value above (dir > 0) / below (dir < 0) cur in the step list; stays at the ends. */
@@ -7058,15 +7083,18 @@ public class TurzxMonitorMain {
                     return roadEnabled ? "ON" : "OFF";
                 case 4:
                     return pollMs + "ms";
-                default:
+                case 5:
                     return incrementalEncode ? "ON" : "OFF";
+                default:
+                    return parallelPipeline ? "멀티코어" : "싱글코어";
             }
         }
 
         static String label() {
             return "q" + jpegQuality + " · " + targetFps + "fps · 패널" + (panelFps > 0 ? String.valueOf(panelFps) : "끔")
                     + " · 도로" + (roadEnabled ? "ON" : "OFF") + " · 수집" + pollMs
-                    + " · 부분" + (incrementalEncode ? "ON" : "OFF");
+                    + " · 부분" + (incrementalEncode ? "ON" : "OFF")
+                    + " · " + (parallelPipeline ? "멀티코어" : "싱글코어");
         }
 
         /** Panel [－]/[＋] handler: applies immediately and restarts the measurement for the new combination. */
@@ -7092,8 +7120,11 @@ public class TurzxMonitorMain {
                 case 4:
                     pollMs = step(POLL_MS_STEPS, pollMs, dir);
                     break;
-                default:
+                case 5:
                     incrementalEncode = !incrementalEncode;
+                    break;
+                default:
+                    parallelPipeline = !parallelPipeline;
                     break;
             }
             FpsBench.restart(label(), System.currentTimeMillis());
@@ -7220,6 +7251,53 @@ public class TurzxMonitorMain {
      * Windowed benchmark for the experiment panel: 2s warm-up after a change, then 5s of plain averages
      * (the EMA values in /status.json lag several seconds and would blur A/B comparisons).
      */
+    /** Daemon process CPU time from /proc/self/stat (utime + stime). 100% = one core fully busy. */
+    public static final class ProcCpu {
+        static final double CLOCK_TICKS_PER_SEC = 100.0; // Linux USER_HZ (Android: 100)
+        private static long lastTicks = -1L;
+        private static long lastMs = 0L;
+        private static double lastPct = -1.0;
+
+        /** utime + stime in clock ticks, or -1 when /proc is unavailable (host self-test). */
+        static long readTicks() {
+            return parseTicks(readFirstLineQuick(new File("/proc/self/stat")));
+        }
+
+        /** Parses fields 14 (utime) and 15 (stime) after the "(comm)" field, which may contain spaces. */
+        static long parseTicks(String stat) {
+            if (stat == null) return -1L;
+            int rp = stat.lastIndexOf(')');
+            if (rp < 0 || rp + 2 > stat.length()) return -1L;
+            String[] f = stat.substring(rp + 2).trim().split("\\s+");
+            if (f.length < 13) return -1L;
+            try {
+                return Long.parseLong(f[11]) + Long.parseLong(f[12]);
+            } catch (NumberFormatException e) {
+                return -1L;
+            }
+        }
+
+        static double percent(long ticks0, long ticks1, long durMs) {
+            if (ticks0 < 0L || ticks1 < ticks0 || durMs <= 0L) return -1.0;
+            return (ticks1 - ticks0) * (1000.0 / CLOCK_TICKS_PER_SEC) * 100.0 / durMs;
+        }
+
+        /** Live CPU% since the previous call (dashboard refresh, ~500ms); keeps the last value for short gaps. */
+        static synchronized double sample(long nowMs) {
+            long t = readTicks();
+            if (t < 0L) return -1.0;
+            if (lastTicks >= 0L && nowMs - lastMs >= 400L) {
+                lastPct = percent(lastTicks, t, nowMs - lastMs);
+                lastTicks = t;
+                lastMs = nowMs;
+            } else if (lastTicks < 0L) {
+                lastTicks = t;
+                lastMs = nowMs;
+            }
+            return lastPct;
+        }
+    }
+
     public static final class FpsBench {
         static final long WARMUP_MS = 2000L;
         static final long MEASURE_MS = 5000L;
@@ -7234,6 +7312,7 @@ public class TurzxMonitorMain {
         private static int frames = 0;
         private static double sumRender, sumEncode, sumTx, sumAck, sumKb, sumPoll;
         private static int nRender, nEncode, nPoll;
+        private static long cpuTicks0 = -1L;
         private static final List<String[]> history = new ArrayList<String[]>(); // {label, result}, oldest first
 
         private static void clearSums() {
@@ -7281,11 +7360,13 @@ public class TurzxMonitorMain {
         }
 
         static String formatResult(int frameCount, long durMs, double render, double encode, double tx, double ack,
-                                   double kb, double poll) {
+                                   double kb, double poll, double cpuPct) {
             if (frameCount <= 0) return "→ 전송된 프레임 없음 (USB 미연결?)";
             // R=render E=encode T=USB transfer A=panel ACK P=telemetry poll (ms, averages over the window)
+            // CPU = daemon process CPU over the window, 100% = one core (4 cores = 400%)
             return String.format(Locale.US, "→ %.1f FPS | R%.0f E%.0f T%.0f A%.0f P%.0f | %.0fKB",
-                    frameCount * 1000.0 / Math.max(1L, durMs), render, encode, tx, ack, poll, kb);
+                    frameCount * 1000.0 / Math.max(1L, durMs), render, encode, tx, ack, poll, kb)
+                    + (cpuPct >= 0.0 ? String.format(Locale.US, " | CPU %.0f%%", cpuPct) : "");
         }
 
         /** Advances warm-up -> measuring -> finished. Returns the finished result line (for logging) or null. */
@@ -7297,6 +7378,7 @@ public class TurzxMonitorMain {
                     phase = MEASURING;
                     phaseStartMs = nowMs;
                     clearSums();
+                    cpuTicks0 = ProcCpu.readTicks();
                 } else if (phase == MEASURING && nowMs - phaseStartMs >= MEASURE_MS) {
                     done = formatResult(frames, nowMs - phaseStartMs,
                             nRender > 0 ? sumRender / nRender : 0.0,
@@ -7304,7 +7386,8 @@ public class TurzxMonitorMain {
                             frames > 0 ? sumTx / frames : 0.0,
                             frames > 0 ? sumAck / frames : 0.0,
                             frames > 0 ? sumKb / frames : 0.0,
-                            nPoll > 0 ? sumPoll / nPoll : 0.0);
+                            nPoll > 0 ? sumPoll / nPoll : 0.0,
+                            ProcCpu.percent(cpuTicks0, ProcCpu.readTicks(), nowMs - phaseStartMs));
                     doneLabel = label;
                     history.add(new String[]{label, done});
                     while (history.size() > MAX_HISTORY) history.remove(0);
@@ -7808,6 +7891,7 @@ public class TurzxMonitorMain {
                         .append(", overlay_hotkey_code=").append(cfg.overlayHotkeyCode)
                         .append(", hud_road=").append(cfg.hudRoadEnabled)
                         .append(", usb_incremental_encode=").append(cfg.usbIncrementalEncode)
+                        .append(", render_parallel=").append(cfg.renderParallel)
                         .append(", telemetry_poll_ms=").append(cfg.telemetryPollMs)
                         .append(", comma_ip=").append(cfg.commaIp)
                         .append(", auto_update=").append(cfg.autoUpdate)
@@ -11063,6 +11147,7 @@ public class TurzxMonitorMain {
                 else if ("overlay_hotkey_code".equals(k)) cfg.overlayHotkeyCode = Math.max(0, Math.min(767, parseIntSafe(v, 0)));
                 else if ("hud_road".equals(k)) cfg.hudRoadEnabled = !"0".equals(v) && !"false".equalsIgnoreCase(v);
                 else if ("usb_incremental_encode".equals(k)) cfg.usbIncrementalEncode = !"0".equals(v) && !"false".equalsIgnoreCase(v);
+                else if ("render_parallel".equals(k)) cfg.renderParallel = !"0".equals(v) && !"false".equalsIgnoreCase(v);
                 else if ("telemetry_poll_ms".equals(k)) cfg.telemetryPollMs = Math.max(50, Math.min(2000, parseIntSafe(v, 200)));
                 else if ("comma_ip".equals(k)) cfg.commaIp = v;
                 else if ("auto_update".equals(k)) cfg.autoUpdate = !"0".equals(v) && !"false".equalsIgnoreCase(v);
@@ -11095,6 +11180,7 @@ public class TurzxMonitorMain {
                     + "overlay_hotkey_code=" + cfg.overlayHotkeyCode + "\n"
                     + "hud_road=" + (cfg.hudRoadEnabled ? 1 : 0) + "\n"
                     + "usb_incremental_encode=" + (cfg.usbIncrementalEncode ? 1 : 0) + "\n"
+                    + "render_parallel=" + (cfg.renderParallel ? 1 : 0) + "\n"
                     + "telemetry_poll_ms=" + cfg.telemetryPollMs + "\n"
                     + "comma_ip=" + (cfg.commaIp != null ? cfg.commaIp : "") + "\n"
                     + "auto_update=" + (cfg.autoUpdate ? 1 : 0) + "\n"
@@ -12073,7 +12159,7 @@ public class TurzxMonitorMain {
             tc.hudRoadEnabled = false;
             tc.telemetryPollMs = 300;
             LiveTuning.loadFrom(tc);
-            assertTrue(LiveTuning.label().equals("q60 · 20fps · 패널끔 · 도로OFF · 수집300 · 부분ON"), "tuning: label " + LiveTuning.label());
+            assertTrue(LiveTuning.label().equals("q60 · 20fps · 패널끔 · 도로OFF · 수집300 · 부분ON · 멀티코어"), "tuning: label " + LiveTuning.label());
             MonitorConfig tc2 = new MonitorConfig();
             LiveTuning.saveTo(tc2);
             assertTrue(tc2.usbJpegQuality == 60 && tc2.usbFps == 20 && !tc2.hudRoadEnabled && tc2.telemetryPollMs == 300,
@@ -12091,7 +12177,13 @@ public class TurzxMonitorMain {
             assertTrue(res != null && res.startsWith("→ 8.0 FPS") && res.contains("R60 E20 T10 A50 P0") && res.endsWith("| 40KB"),
                     "bench: 40 frames / 5s = 8.0 FPS, got " + res);
             assertTrue(FpsBench.recent(1).size() == 1 && "test".equals(FpsBench.recent(1).get(0)[0]), "bench: history");
-            assertTrue(FpsBench.formatResult(0, 5000L, 0, 0, 0, 0, 0, 0).contains("없음"), "bench: no frames");
+            assertTrue(FpsBench.formatResult(0, 5000L, 0, 0, 0, 0, 0, 0, -1.0).contains("없음"), "bench: no frames");
+            assertTrue(FpsBench.formatResult(50, 5000L, 30, 40, 3, 10, 50, 30, 135.4).endsWith("| 50KB | CPU 135%"),
+                    "bench: cpu suffix");
+            assertTrue(ProcCpu.parseTicks("1234 (app_process (x)) S 1 2 3 4 5 6 7 8 9 10 250 50 0 0") == 300L,
+                    "cpu: utime+stime after (comm) with spaces");
+            assertTrue(ProcCpu.parseTicks("garbage") == -1L, "cpu: bad stat");
+            assertTrue(Math.abs(ProcCpu.percent(100L, 250L, 1000L) - 150.0) < 0.01, "cpu: 150 ticks/s = 150%");
 
             File tuneCfg = File.createTempFile("turzx_cfg_tuning", ".conf");
             tuneCfg.deleteOnExit();
@@ -12104,6 +12196,13 @@ public class TurzxMonitorMain {
             LiveTuning.loadFrom(tc);
             LiveTuning.adjust(5, +1);
             assertTrue(LiveTuning.incrementalEncode && LiveTuning.valueText(5).equals("ON"), "tuning: incremental toggle");
+            tc.renderParallel = false;
+            saveMonitorConfig(tuneCfg, tc);
+            assertTrue(!loadMonitorConfig(tuneCfg).renderParallel, "tuning: render_parallel roundtrip");
+            LiveTuning.loadFrom(tc);
+            assertTrue(LiveTuning.valueText(6).equals("싱글코어"), "tuning: single-core label");
+            LiveTuning.adjust(6, +1);
+            assertTrue(LiveTuning.parallelPipeline && LiveTuning.valueText(6).equals("멀티코어"), "tuning: render mode toggle");
             LiveTuning.loadFrom(new MonitorConfig());
             tuneCfg.delete();
         } catch (Exception e) {
@@ -12127,7 +12226,13 @@ public class TurzxMonitorMain {
             int bufB = TurzxUsbDriver.acquireRenderBuffer(10L);
             assertTrue(bufB >= 0 && bufB != bufA, "pipeline: render never draws the buffer being encoded");
             assertTrue(TurzxUsbDriver.takeEncodeJob(10L) == null, "pipeline: no job without a queue");
+            long tIdle0 = System.currentTimeMillis();
+            TurzxUsbDriver.waitEncodeIdle(40L);
+            assertTrue(System.currentTimeMillis() - tIdle0 >= 30L, "pipeline: single-core mode waits while encoding");
             TurzxUsbDriver.finishEncodeJob();
+            tIdle0 = System.currentTimeMillis();
+            TurzxUsbDriver.waitEncodeIdle(1000L);
+            assertTrue(System.currentTimeMillis() - tIdle0 < 500L, "pipeline: idle encoder returns at once");
             assertTrue(TurzxUsbDriver.acquireRenderBuffer(10L) == 0, "pipeline: buffer free again after encode");
 
             // Batched strips cover exactly the same segments as the old per-segment loop
