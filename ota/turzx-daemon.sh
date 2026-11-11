@@ -192,7 +192,7 @@ is_turzx_usb_present() {
         if [ -f "$udev/idVendor" ] && [ -f "$udev/idProduct" ]; then
             vid="$(cat "$udev/idVendor" 2>/dev/null)"
             pid="$(cat "$udev/idProduct" 2>/dev/null)"
-            if [ "$vid" = "1cbe" ] && { [ "$pid" = "0092" ] || [ "$pid" = "0088" ]; }; then
+            if [ "$vid" = "1cbe" ] && { [ "$pid" = "0092" ] || [ "$pid" = "0088" ] || [ "$pid" = "0123" ]; }; then
                 return 0
             fi
         fi
@@ -221,7 +221,7 @@ nudge_usb_host_for_turzx() {
     if is_turzx_usb_present || is_other_usb_device_present; then
         return 0
     fi
-    log_info "TURZX 1cbe:0092 not yet enumerated after cold boot; cycling DWC_OTG host VBUS"
+    log_info "TURZX 1cbe:(0092/0088/0123) not yet enumerated after cold boot; cycling DWC_OTG host VBUS"
     echo 1 > /sys/module/tcc_dwc_otg/parameters/vbus_control_enable 2>/dev/null
     echo off > /sys/devices/dwc_otg/vbus 2>/dev/null
     echo off > /sys/devices/ehci_tcc.0/vbus 2>/dev/null

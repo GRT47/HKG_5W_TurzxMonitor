@@ -4,6 +4,20 @@
 
 ---
 
+## 0. v1.5.0 테슬라 스타일 HUD (기본값)
+
+- **디자인 원본**: 저장소 루트의 `turzx_redesign_tesla.html` (9.2" 1920×462 / 12.3" 1920×720, 상황·램프를 바꿔 볼 수 있는 시안).
+  `python package_turzx_monitor/tools/make_tesla_assets.py`가 이 HTML을 Chromium으로 렌더링해 `package_turzx_monitor/design_tesla/`에
+  정적 레이어(`tesla_base*.png`), 켜짐 상태 레이어(`tesla_active*.png`), 값·사각형 좌표(`tesla_layout_92/123.txt`), 앞차·내 차·주차 이미지를 만들고,
+  빌드가 jar에 넣습니다. Java `TurzxFrameRenderer.TeslaHud`가 이 좌표대로 숫자·막대·칩을 그립니다.
+- **주행 화면**: 흰 차선 + 크루즈 시 파란 경로, 앞차(회색) · 내 차(기아 니로 EV 3D 렌더). 단속카메라는 빨간 원, 이벤트가 없으면 도로 제한속도를 파란 원으로.
+  회전 안내 카드는 목적지 안내 중에만, 타이어 공기압은 오른쪽 아래 칩, 조향각은 크루즈 옆 핸들 아이콘 회전으로만 표시.
+  P(주차)에서는 도로 대신 주차된 차 사진을 표시합니다.
+- **램프**: 전조등(`getAFLS11_HeadLampStatus` > 0)이면 미등/전조등 빛, 제동은 페달 신호가 없어 감속 > 1.3 m/s², 회생 < -15 kW, D/R 정차로 추정합니다.
+- **실험 패널 `디자인`**: 신규 / 기존(이전 Chromium 1:1 HUD). 설정 키 `hud_design=tesla|classic`. 새 디자인 그리기에 실패하면 그 프레임은 기존 HUD로 그립니다.
+- **3D 모델 크레딧**: 내 차 이미지는 ["2019 Kia e-Niro"](https://sketchfab.com/3d-models/kia-e-niro-2019-49067e3857bd4081918b7f3f5898eb3c)
+  by tonielpro520, licensed under [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/) — 재질 색 지정 · 조명 · 램프 발광을 바꿔 렌더링했습니다.
+
 ## 1. 주요 기능 및 3열 레이아웃 (`1920 × 462`)
 
 - **1열 (좌측 `EV 계기판 + TPMS`)**:

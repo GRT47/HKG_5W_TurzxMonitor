@@ -25,7 +25,7 @@ PKG_STAGE_DIR = BUILD_DIR / "pkg_stage"
 USB_ROOT_DIR = BUILD_DIR / "usb_root"
 
 OUTER_ZIP_PATH = REPO_ROOT / "HKG_5W_TurzxMonitor_USB.zip"
-MONITOR_VERSION = "1.4.8"
+MONITOR_VERSION = "1.5.0"
 
 PUBLIC_SANS_FONTS = {
     "PublicSans-Bold.ttf": "https://fonts.gstatic.com/s/publicsans/v21/ijwGs572Xtc6ZYQws9YVwllKVG8qX1oyOymu8Z65ww.ttf",
@@ -245,167 +245,180 @@ def generate_hud_assets(assets_dir: Path) -> None:
         cdp.call("Page.enable")
         cdp.call(
             "Emulation.setDeviceMetricsOverride",
-            {"width": 1400, "height": 500, "deviceScaleFactor": 2, "mobile": False},
+            {"width": 1400, "height": 600, "deviceScaleFactor": 2, "mobile": False},
         )
-        time.sleep(1.5)
+        time.sleep(1.2)
 
-        cdp.call(
-            "Runtime.evaluate",
-            {
-                "expression": """
-                (() => {
-                    for (let i = 1; i < 9999; i++) window.clearInterval(i);
-                    window.updateViewportScale = () => {};
-                    const lcd = document.getElementById('turzxLcd');
-                    document.body.appendChild(lcd);
-                    Array.from(document.body.children).forEach(ch => {
-                        if (ch !== lcd) ch.remove();
-                    });
-                    document.documentElement.style.margin = '0';
-                    document.documentElement.style.padding = '0';
-                    document.documentElement.style.background = 'transparent';
-                    document.body.style.margin = '0';
-                    document.body.style.padding = '0';
-                    document.body.style.overflow = 'hidden';
-                    window.removeEventListener('resize', updateViewportScale);
-                    lcd.style.setProperty('position', 'fixed', 'important');
-                    lcd.style.setProperty('left', '0px', 'important');
-                    lcd.style.setProperty('top', '0px', 'important');
-                    lcd.style.setProperty('width', '960px', 'important');
-                    lcd.style.setProperty('height', '231px', 'important');
-                    lcd.style.setProperty('transform', 'none', 'important');
-                    lcd.style.setProperty('z-index', '999999', 'important');
-                    const lc = document.getElementById('laneConfText');
-                    if (lc) lc.innerHTML = '차선 <strong id="laneConfVal" style="color:var(--secondary);font-weight:600;">98%</strong>';
-                })()
-                """
-            },
-        )
-        time.sleep(0.2)
-
-        # 1. BASE SHELL (1920x462): static labels/rules/vinyl/chassis/seated figure, inactive HVAC & normal TPMS
-        cdp.call(
-            "Runtime.evaluate",
-            {
-                "expression": """
-                (() => {
-                    const hideSels = [
-                        '.ev-figure-row', '#socBar', '#effSubText', '#pwrBar', '#cumEnergyText', '#batMinMaxText',
-                        '#tpmsFlVal', '#tpmsFrVal', '#tpmsRlVal', '#tpmsRrVal',
-                        '#commaRoadCanvas', '.comma-fused-top', '.comma-corner-foot',
-                        '#mediaTitleText', '#mediaArtistText', '#mediaProgressBar', '#mediaCurTime', '#mediaDurTime',
-                        '#inTempText', '#outTempText'
-                    ];
-                    hideSels.forEach(s => document.querySelectorAll(s).forEach(el => el.style.visibility = 'hidden'));
-                    const fsl = document.getElementById('fanStepLabel');
-                    if (fsl) fsl.innerHTML = '<span style="visibility:hidden">3</span>단';
-                    ['#tpmsTempSummary', '#drvTempText', '#pasTempText'].forEach(s => {
-                        const el = document.querySelector(s);
-                        if (el) {
-                            el.style.color = 'transparent';
-                            el.querySelectorAll('*').forEach(c => c.style.color = 'transparent');
-                        }
-                    });
-                    ['airArrowUp', 'airArrowMid', 'airArrowDown'].forEach(id => {
-                        const g = document.getElementById(id);
-                        if (g) g.className.baseVal = 'air-arrow off';
-                    });
-                    document.querySelectorAll('#fanBarsRail .fan-bar-seg').forEach(b => b.classList.remove('active'));
-                    document.querySelectorAll('.hvac-icon-dock .hvac-dock-btn').forEach(b => b.classList.remove('on'));
-                })()
-                """
-            },
-        )
-        time.sleep(0.15)
-        (assets_dir / "base_shell.png").write_bytes(
-            _capture_png(cdp, {"x": 0, "y": 0, "width": 960, "height": 231, "scale": 1}, omit_bg=False)
-        )
-
-        # 2. ACTIVE SHELL (1920x462): active airflow arrows, 7 fan bars, 5 HVAC dock buttons, amber TPMS warning
-        cdp.call(
-            "Runtime.evaluate",
-            {
-                "expression": """
-                (() => {
-                    ['airArrowUp', 'airArrowMid', 'airArrowDown'].forEach(id => {
-                        const g = document.getElementById(id);
-                        if (g) g.className.baseVal = 'air-arrow';
-                    });
-                    document.querySelectorAll('#fanBarsRail .fan-bar-seg').forEach(b => b.classList.add('active'));
-                    document.querySelectorAll('.hvac-icon-dock .hvac-dock-btn').forEach(b => b.classList.add('on'));
-                    ['svgTireFl', 'svgTireFr', 'svgTireRl', 'svgTireRr'].forEach(id => {
-                        const t = document.getElementById(id);
-                        if (t) t.setAttribute('stroke', '#d9a441');
-                    });
-                    const ts = document.getElementById('tpmsStatusTag');
-                    if (ts) {
-                        ts.textContent = '저압';
-                        ts.className = 'tpms-status-dot warn';
-                    }
-                    const fsl = document.getElementById('fanStepLabel');
-                    if (fsl) fsl.style.visibility = 'hidden';
-                })()
-                """
-            },
-        )
-        time.sleep(0.15)
-        (assets_dir / "active_shell.png").write_bytes(
-            _capture_png(cdp, {"x": 0, "y": 0, "width": 960, "height": 231, "scale": 1}, omit_bg=False)
-        )
-
-        # 3. COLUMN 2 TRANSPARENT HUD OVERLAYS (582x438 at x=304..595, y=6..225 dp)
-        cdp.call(
-            "Runtime.evaluate",
-            {
-                "expression": """
-                (() => {
-                    document.body.style.background = 'transparent';
-                    const lcd = document.getElementById('turzxLcd');
-                    lcd.style.background = 'transparent';
-                    document.querySelector('.panel-ev').style.visibility = 'hidden';
-                    document.querySelector('.right-stack-col').style.visibility = 'hidden';
-                    const pn = document.querySelector('.panel-navi');
-                    pn.style.background = 'transparent';
-                    document.getElementById('commaRoadCanvas').style.visibility = 'hidden';
-
-                    document.querySelector('.comma-fused-top').style.visibility = 'visible';
-                    document.querySelector('.comma-corner-foot').style.visibility = 'visible';
-
-                    const hideHudDynamic = [
-                        '#hudGearChar', '#egoSpeedText', '#cruiseTargetText',
-                        '#camLimitNum', '#camDistFigure', '#camAvgSpeed',
-                        '#tbtDistFigure', '#tbtRoadName', '#tbtNextText',
-                        '#laneConfVal', '#leadDistText', '#steerAngleText'
-                    ];
-                    hideHudDynamic.forEach(s => {
-                        const el = document.querySelector(s);
-                        if (el) el.style.color = 'transparent';
-                    });
-                    const rChipSpans = document.querySelectorAll('.comma-corner-foot .corner-chip:nth-child(2) > span');
-                    if (rChipSpans.length >= 2) rChipSpans[1].style.color = 'transparent';
-                })()
-                """
-            },
-        )
-        for mode in ("section", "traffic", "none"):
+        def _capture_panel_layers(panel_id: str, dp_h: int, col2_dp_h: int, suffix: str) -> None:
+            cdp.call("Page.navigate", {"url": html_src.as_uri()})
+            time.sleep(1.0)
             cdp.call(
                 "Runtime.evaluate",
                 {
                     "expression": f"""
                     (() => {{
-                        setSdiEnforcementState('{mode}', 80, '2.3 km', 80, null);
-                        ['#camLimitNum', '#camDistFigure', '#camAvgSpeed'].forEach(s => {{
-                            const el = document.querySelector(s);
-                            if (el) el.style.color = 'transparent';
+                        for (let i = 1; i < 9999; i++) window.clearInterval(i);
+                        if (typeof setPanelModel === 'function') setPanelModel('{panel_id}', null);
+                        window.updateViewportScale = () => {{}};
+                        const lcd = document.getElementById('turzxLcd');
+                        document.body.appendChild(lcd);
+                        Array.from(document.body.children).forEach(ch => {{
+                            if (ch !== lcd) ch.remove();
                         }});
+                        document.documentElement.style.margin = '0';
+                        document.documentElement.style.padding = '0';
+                        document.documentElement.style.background = 'transparent';
+                        document.body.style.margin = '0';
+                        document.body.style.padding = '0';
+                        document.body.style.overflow = 'hidden';
+                        window.removeEventListener('resize', updateViewportScale);
+                        lcd.style.setProperty('position', 'fixed', 'important');
+                        lcd.style.setProperty('left', '0px', 'important');
+                        lcd.style.setProperty('top', '0px', 'important');
+                        lcd.style.setProperty('width', '960px', 'important');
+                        lcd.style.setProperty('height', '{dp_h}px', 'important');
+                        lcd.style.setProperty('transform', 'none', 'important');
+                        lcd.style.setProperty('z-index', '999999', 'important');
+                        const lc = document.getElementById('laneConfText');
+                        if (lc) lc.innerHTML = '차선 <strong id="laneConfVal" style="color:var(--secondary);font-weight:600;">98%</strong>';
                     }})()
                     """
                 },
             )
-            time.sleep(0.1)
-            (assets_dir / f"col2_hud_{mode}.png").write_bytes(
-                _capture_png(cdp, {"x": 304, "y": 6, "width": 291, "height": 219, "scale": 1}, omit_bg=True)
+            time.sleep(0.2)
+
+            # 1. BASE SHELL: static labels/rules/vinyl/chassis/seated figure, inactive HVAC & normal TPMS
+            cdp.call(
+                "Runtime.evaluate",
+                {
+                    "expression": """
+                    (() => {
+                        const hideSels = [
+                            '.ev-figure-row', '#socBar', '#effSubText', '#pwrBar', '#cumEnergyText', '#batMinMaxText',
+                            '#tpmsFlVal', '#tpmsFrVal', '#tpmsRlVal', '#tpmsRrVal',
+                            '#commaRoadCanvas', '.comma-fused-top', '.comma-corner-foot',
+                            '#mediaTitleText', '#mediaArtistText', '#mediaProgressBar', '#mediaCurTime', '#mediaDurTime',
+                            '#inTempText', '#outTempText'
+                        ];
+                        hideSels.forEach(s => document.querySelectorAll(s).forEach(el => el.style.visibility = 'hidden'));
+                        const fsl = document.getElementById('fanStepLabel');
+                        if (fsl) fsl.innerHTML = '<span style="visibility:hidden">3</span>단';
+                        ['#tpmsTempSummary', '#drvTempText', '#pasTempText'].forEach(s => {
+                            const el = document.querySelector(s);
+                            if (el) {
+                                el.style.color = 'transparent';
+                                el.querySelectorAll('*').forEach(c => c.style.color = 'transparent');
+                            }
+                        });
+                        ['airArrowUp', 'airArrowMid', 'airArrowDown'].forEach(id => {
+                            const g = document.getElementById(id);
+                            if (g) g.className.baseVal = 'air-arrow off';
+                        });
+                        document.querySelectorAll('#fanBarsRail .fan-bar-seg').forEach(b => b.classList.remove('active'));
+                        document.querySelectorAll('.hvac-icon-dock .hvac-dock-btn').forEach(b => b.classList.remove('on'));
+                    })()
+                    """
+                },
             )
+            time.sleep(0.15)
+            (assets_dir / f"base_shell{suffix}.png").write_bytes(
+                _capture_png(cdp, {"x": 0, "y": 0, "width": 960, "height": dp_h, "scale": 1}, omit_bg=False)
+            )
+
+            # 2. ACTIVE SHELL: active airflow arrows, 7 fan bars, 7 HVAC dock buttons, amber TPMS warning
+            cdp.call(
+                "Runtime.evaluate",
+                {
+                    "expression": """
+                    (() => {
+                        ['airArrowUp', 'airArrowMid', 'airArrowDown'].forEach(id => {
+                            const g = document.getElementById(id);
+                            if (g) g.className.baseVal = 'air-arrow';
+                        });
+                        document.querySelectorAll('#fanBarsRail .fan-bar-seg').forEach(b => b.classList.add('active'));
+                        document.querySelectorAll('.hvac-icon-dock .hvac-dock-btn').forEach(b => b.classList.add('on'));
+                        ['svgTireFl', 'svgTireFr', 'svgTireRl', 'svgTireRr'].forEach(id => {
+                            const t = document.getElementById(id);
+                            if (t) t.setAttribute('stroke', '#d9a441');
+                        });
+                        const ts = document.getElementById('tpmsStatusTag');
+                        if (ts) {
+                            ts.textContent = '저압';
+                            ts.className = 'tpms-status-dot warn';
+                        }
+                        const fsl = document.getElementById('fanStepLabel');
+                        if (fsl) fsl.style.visibility = 'hidden';
+                    })()
+                    """
+                },
+            )
+            time.sleep(0.15)
+            (assets_dir / f"active_shell{suffix}.png").write_bytes(
+                _capture_png(cdp, {"x": 0, "y": 0, "width": 960, "height": dp_h, "scale": 1}, omit_bg=False)
+            )
+
+            # 3. COLUMN 2 TRANSPARENT HUD OVERLAYS (x=304..595, y=6..(dp_h-6) dp)
+            cdp.call(
+                "Runtime.evaluate",
+                {
+                    "expression": """
+                    (() => {
+                        document.body.style.background = 'transparent';
+                        const lcd = document.getElementById('turzxLcd');
+                        lcd.style.background = 'transparent';
+                        document.querySelector('.panel-ev').style.visibility = 'hidden';
+                        document.querySelector('.right-stack-col').style.visibility = 'hidden';
+                        const pm = document.querySelector('.panel-media');
+                        if (pm) pm.style.visibility = 'hidden';
+                        const ph = document.querySelector('.panel-hvac');
+                        if (ph) ph.style.visibility = 'hidden';
+                        const pn = document.querySelector('.panel-navi');
+                        pn.style.background = 'transparent';
+                        document.getElementById('commaRoadCanvas').style.visibility = 'hidden';
+
+                        document.querySelector('.comma-fused-top').style.visibility = 'visible';
+                        document.querySelector('.comma-corner-foot').style.visibility = 'visible';
+
+                        const hideHudDynamic = [
+                            '#hudGearChar', '#egoSpeedText', '#cruiseTargetText',
+                            '#camLimitNum', '#camDistFigure', '#camAvgSpeed',
+                            '#tbtDistFigure', '#tbtRoadName', '#tbtNextText',
+                            '#laneConfVal', '#leadDistText', '#steerAngleText'
+                        ];
+                        hideHudDynamic.forEach(s => {
+                            const el = document.querySelector(s);
+                            if (el) el.style.color = 'transparent';
+                        });
+                        const rChipSpans = document.querySelectorAll('.comma-corner-foot .corner-chip:nth-child(2) > span');
+                        if (rChipSpans.length >= 2) rChipSpans[1].style.color = 'transparent';
+                    })()
+                    """
+                },
+            )
+            col2_h = col2_dp_h
+            for mode in ("section", "traffic", "none"):
+                cdp.call(
+                    "Runtime.evaluate",
+                    {
+                        "expression": f"""
+                        (() => {{
+                            setSdiEnforcementState('{mode}', 80, '2.3 km', 80, null);
+                            ['#camLimitNum', '#camDistFigure', '#camAvgSpeed'].forEach(s => {{
+                                const el = document.querySelector(s);
+                                if (el) el.style.color = 'transparent';
+                            }});
+                        }})()
+                        """
+                    },
+                )
+                time.sleep(0.1)
+                (assets_dir / f"col2_hud_{mode}{suffix}.png").write_bytes(
+                    _capture_png(cdp, {"x": 304, "y": 6, "width": 291, "height": col2_h, "scale": 1}, omit_bg=True)
+                )
+
+        # Capture 9.2" (1920x462) and 12.3" (1920x720: 290dp upper row + 58dp bottom climate taskbar) 1:1 Chromium layer sets
+        _capture_panel_layers("92", 231, 219, "")
+        _capture_panel_layers("123", 360, 290, "_720")
     finally:
         proc.kill()
         shutil.rmtree(user_data, ignore_errors=True)
@@ -426,7 +439,11 @@ def stage_native_encoder(assets_dir: Path) -> None:
     import build_native  # noqa: E402
 
     so_path = build_native.PREBUILT_SO
-    if os.environ.get("TURZX_SKIP_NATIVE_BUILD") != "1" and build_native.find_ndk() is not None:
+    if (
+        os.environ.get("TURZX_SKIP_NATIVE_BUILD") != "1"
+        and build_native.find_ndk() is not None
+        and shutil.which("cmake") is not None
+    ):
         so_path = build_native.build_native()
     elif not so_path.is_file():
         raise RuntimeError(f"No NDK found and prebuilt native encoder missing: {so_path}")
@@ -486,6 +503,13 @@ def build() -> None:
         raise RuntimeError(f"Expected 3 panel test JPEGs in {panel_test_dir}, found {len(panel_test_jpegs)}")
     for jpg in panel_test_jpegs:
         shutil.copy2(jpg, ASSETS_DIR / jpg.name)
+    # 1e. v1.5.0 Tesla-style HUD assets (regenerate with tools/make_tesla_assets.py)
+    tesla_dir = BASE_DIR / "design_tesla"
+    tesla_files = sorted(tesla_dir.glob("tesla_*"))
+    if len(tesla_files) < 11:
+        raise RuntimeError(f"Tesla HUD assets missing in {tesla_dir} ({len(tesla_files)} files)")
+    for f in tesla_files:
+        shutil.copy2(f, ASSETS_DIR / f.name)
     classes_assets_dir = CLASSES_DIR / "assets"
     classes_assets_dir.mkdir(parents=True, exist_ok=True)
     for asset_file in sorted(ASSETS_DIR.iterdir()):

@@ -66,3 +66,8 @@ dump_telemetry_apps/
 
 # Committed prebuilt native encoder (built by package_turzx_monitor/native/build_native.py)
 !package_turzx_monitor/native/prebuilt/**/*.so
+
+# Design source material (3D model / photos) - only the rendered sprites ship
+3d/
+2d/
+turzx_niro_ev_rear.png

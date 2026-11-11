@@ -1221,6 +1221,355 @@
     }
 
     /* ==========================================================================
+       3B. TURZX 12.3" (1920 × 720 px = 960 × 360 dp @ 2.0x HiDPI) NATIVE FULL-SCREEN
+       3-Column Upper Workspace (EV+TPMS | 3D ADAS | Dedicated Media) + Persistent Bottom Climate Taskbar
+       ========================================================================== */
+    body[data-panel="123"] .turzx-lcd {
+      width: 960px;
+      height: 360px;
+    }
+
+    body[data-panel="123"] .ccnc-canvas {
+      padding: 6px 6px 0 6px;
+      grid-template-columns: 292px 291px 1fr;
+      grid-template-rows: minmax(0, 1fr) 58px;
+      gap: 6px;
+    }
+
+    body[data-panel="123"] .right-stack-col {
+      display: contents;
+    }
+
+    /* Column 1: EV 2x2 Readouts + TPMS (292 × 290 dp) */
+    body[data-panel="123"] .ev-cell {
+      padding: 10px 8px;
+    }
+
+    body[data-panel="123"] .ev-label {
+      font-size: 12.5px;
+    }
+
+    body[data-panel="123"] .ev-figure {
+      font-size: 29px;
+    }
+
+    body[data-panel="123"] .ev-figure.compact {
+      font-size: 24px;
+    }
+
+    body[data-panel="123"] .ev-unit,
+    body[data-panel="123"] .ev-subline {
+      font-size: 12px;
+    }
+
+    body[data-panel="123"] .ccnc-bar-track {
+      height: 5.5px;
+      border-radius: 3px;
+    }
+
+    body[data-panel="123"] .tpms-pane {
+      padding: 10px 7px;
+    }
+
+    body[data-panel="123"] .tpms-header-line,
+    body[data-panel="123"] .tpms-status-dot,
+    body[data-panel="123"] .tpms-pos-label,
+    body[data-panel="123"] .tpms-foot-bar {
+      font-size: 12px;
+    }
+
+    body[data-panel="123"] .tpms-foot-bar {
+      padding-top: 7px;
+    }
+
+    body[data-panel="123"] .tpms-diagram-grid {
+      grid-template-columns: minmax(0, 1fr) 26px minmax(0, 1fr);
+      margin: 5px 0;
+    }
+
+    body[data-panel="123"] .tpms-car-center svg {
+      width: 26px;
+      height: 96px;
+    }
+
+    body[data-panel="123"] .tpms-psi-val {
+      font-size: 18.5px;
+    }
+
+    /* Column 2: Comma 3D ADAS + CarrotNavi (291 × 290 dp) */
+    body[data-panel="123"] .comma-fused-top {
+      padding: 9px 9px;
+      gap: 7px;
+    }
+
+    body[data-panel="123"] .hud-left-stamps {
+      gap: 7px;
+    }
+
+    body[data-panel="123"] .speed-stamp {
+      padding: 5px 9px;
+      gap: 7px;
+    }
+
+    body[data-panel="123"] .hud-gear-char {
+      font-size: 16.5px;
+    }
+
+    body[data-panel="123"] .comma-ego-num {
+      font-size: 34px;
+    }
+
+    body[data-panel="123"] .comma-cruise-val {
+      font-size: 17px;
+    }
+
+    body[data-panel="123"] .sdi-limit-circle {
+      width: 46px;
+      height: 46px;
+      border-width: 5px;
+    }
+
+    body[data-panel="123"] .sdi-limit-circle span {
+      font-size: 19px;
+    }
+
+    body[data-panel="123"] .sdi-avg-wing {
+      margin-top: 10px;
+      padding: 4px 8px 4px 10px;
+    }
+
+    body[data-panel="123"] .sdi-avg-num {
+      font-size: 21px;
+    }
+
+    body[data-panel="123"] .tbt-compact-stamp {
+      padding: 5px 9px;
+      gap: 3px;
+    }
+
+    body[data-panel="123"] .tbt-dist-figure {
+      font-size: 22px;
+    }
+
+    body[data-panel="123"] .tbt-road-sub {
+      font-size: 12.5px;
+      padding-top: 2px;
+    }
+
+    body[data-panel="123"] .comma-corner-foot {
+      padding: 0 8px 8px;
+    }
+
+    body[data-panel="123"] .corner-chip {
+      padding: 4px 8px;
+      font-size: 12.5px;
+    }
+
+    /* Column 3: Dedicated Full-Size Media Card (353 × 290 dp) */
+    body[data-panel="123"] .panel-media {
+      grid-column: 3;
+      grid-row: 1;
+      flex-direction: column;
+      align-items: stretch;
+      justify-content: space-between;
+      padding: 15px 18px;
+      gap: 12px;
+    }
+
+    body[data-panel="123"] .media-artwork-frame {
+      width: 148px;
+      height: 148px;
+      margin: 0 auto;
+      border-radius: 10px;
+    }
+
+    body[data-panel="123"] .media-artwork-frame svg {
+      width: 146px;
+      height: 146px;
+    }
+
+    body[data-panel="123"] .media-right-col {
+      width: 100%;
+      height: auto;
+      flex: 1;
+      justify-content: space-between;
+      padding: 0;
+      gap: 8px;
+    }
+
+    body[data-panel="123"] .media-text-stack {
+      gap: 5px;
+    }
+
+    body[data-panel="123"] .media-track-name {
+      font-size: 24px;
+    }
+
+    body[data-panel="123"] .media-artist-album {
+      font-size: 15px;
+    }
+
+    body[data-panel="123"] .media-progress-block {
+      width: 100%;
+      max-width: none;
+      gap: 6px;
+    }
+
+    body[data-panel="123"] .media-progress-rail {
+      height: 6px;
+      border-radius: 3px;
+    }
+
+    body[data-panel="123"] .media-time-labels {
+      font-size: 13.5px;
+    }
+
+    /* Row 2: Persistent Full-Width Bottom Climate Taskbar (960 × 58 dp = 1920 × 116 px) */
+    body[data-panel="123"] .panel-hvac {
+      grid-column: 1 / -1;
+      grid-row: 2;
+      margin: 0 -6px;
+      height: 58px;
+      padding: 7px 18px;
+      border-radius: 0;
+      border-left: none;
+      border-right: none;
+      border-bottom: none;
+      border-top: 1px solid #2e303a;
+      background-color: #14151a;
+      display: grid;
+      grid-template-columns: 74px 84px 29px 248px 1fr;
+      grid-template-rows: 26px 14px;
+      row-gap: 4px;
+      column-gap: 0;
+      align-items: center;
+    }
+
+    body[data-panel="123"] .panel-hvac::before {
+      content: "";
+      grid-column: 3;
+      grid-row: 1 / 3;
+      width: 1px;
+      height: 40px;
+      background-color: var(--rule);
+      justify-self: center;
+      align-self: center;
+    }
+
+    body[data-panel="123"] .hvac-compact-top,
+    body[data-panel="123"] .hvac-temp-col,
+    body[data-panel="123"] .hvac-temp-col.right {
+      display: contents;
+    }
+
+    body[data-panel="123"] #pasTempText {
+      display: none;
+    }
+
+    body[data-panel="123"] #drvTempText {
+      grid-column: 1 / 3;
+      grid-row: 1;
+      align-self: end;
+      font-size: 24px;
+      padding-bottom: 2px;
+      text-align: left;
+    }
+
+    body[data-panel="123"] .hvac-temp-figure small {
+      font-size: 13px;
+    }
+
+    body[data-panel="123"] .hvac-temp-col:not(.right) .hvac-env-sub {
+      grid-column: 1;
+      grid-row: 2;
+      align-self: end;
+      font-size: 12px;
+      text-align: left;
+      justify-content: flex-start;
+    }
+
+    body[data-panel="123"] .hvac-temp-col.right .hvac-env-sub {
+      grid-column: 2;
+      grid-row: 2;
+      align-self: end;
+      font-size: 12px;
+      padding-left: 9px;
+      border-left: 1px solid #2e303a;
+      text-align: left;
+      justify-content: flex-start;
+    }
+
+    body[data-panel="123"] .hvac-airflow-hud {
+      grid-column: 4;
+      grid-row: 1 / 3;
+      align-self: center;
+      width: 248px;
+      height: 42px;
+      padding: 2px 12px;
+      gap: 10px;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    body[data-panel="123"] .hvac-dir-zone {
+      padding-right: 10px;
+    }
+
+    body[data-panel="123"] .hvac-dir-zone svg {
+      width: 52px;
+      height: 38px;
+    }
+
+    body[data-panel="123"] .hvac-fan-zone {
+      gap: 4px;
+    }
+
+    body[data-panel="123"] .fan-title-group {
+      font-size: 13px;
+      gap: 4px;
+    }
+
+    body[data-panel="123"] .fan-step-num {
+      font-size: 16px;
+    }
+
+    body[data-panel="123"] .fan-bars-rail {
+      height: 16px;
+      gap: 3.5px;
+    }
+
+    body[data-panel="123"] .fan-bar-seg.b1 { height: 5.5px; }
+    body[data-panel="123"] .fan-bar-seg.b2 { height: 7.2px; }
+    body[data-panel="123"] .fan-bar-seg.b3 { height: 9.0px; }
+    body[data-panel="123"] .fan-bar-seg.b4 { height: 10.8px; }
+    body[data-panel="123"] .fan-bar-seg.b5 { height: 12.5px; }
+    body[data-panel="123"] .fan-bar-seg.b6 { height: 14.2px; }
+    body[data-panel="123"] .fan-bar-seg.b7 { height: 16.0px; }
+
+    body[data-panel="123"] .hvac-icon-dock {
+      grid-column: 5;
+      grid-row: 1 / 3;
+      align-self: center;
+      margin-left: 14px;
+      min-width: 0;
+      gap: 6px;
+    }
+
+    body[data-panel="123"] .hvac-dock-btn {
+      height: 42px;
+      border-radius: 5px;
+      font-size: 13px;
+    }
+
+    body[data-panel="123"] .hvac-dock-btn.on {
+      background-color: #21242e;
+    }
+
+    body[data-panel="123"] .hvac-dock-btn svg {
+      transform: scale(1.16);
+    }
+
+    /* ==========================================================================
        4. LOWER WORKBENCH: SCENARIO SIMULATOR & DPI EXPLANATION TABLE
        ========================================================================== */
     .workbench-grid {
@@ -1437,17 +1786,23 @@
     }
   </style>
 </head>
-<body data-theme="hyundai">
+<body data-theme="hyundai" data-panel="92">
 
   <!-- 1. TOP STUDIO HEADER -->
   <header class="studio-header">
     <div class="brand-group">
       <span class="brand-mark">ccNC</span>
       <h1 class="brand-title">현대·기아 ccNC ('선 Seon') 클러스터</h1>
-      <span class="brand-subtitle">TURZX 9.2" HiDPI 2.0x (960×231 dp → 1920×462 px)</span>
+      <span class="brand-subtitle" id="brandSubtitle">TURZX 9.2" HiDPI 2.0x (960×231 dp → 1920×462 px)</span>
     </div>
 
     <div class="studio-controls">
+      <div class="tab-group" role="group" aria-label="패널 모델 선택">
+        <span class="tab-group-label">패널</span>
+        <button type="button" class="edge-tab active" id="btnPanel92" onclick="setPanelModel('92', this)">9.2" (1920×462)</button>
+        <button type="button" class="edge-tab" id="btnPanel123" onclick="setPanelModel('123', this)">12.3" (1920×720)</button>
+      </div>
+
       <div class="tab-group" role="group" aria-label="브랜드 테마 선택">
         <span class="tab-group-label">테마</span>
         <button type="button" class="edge-tab active" onclick="setTheme('hyundai', this)">Hyundai Cyan</button>
@@ -1464,7 +1819,7 @@
 
       <div class="tab-group" role="group" aria-label="화면 배율">
         <span class="tab-group-label">크기</span>
-        <button type="button" class="edge-tab active" id="btnPhysical" onclick="setScaleMode('physical', this)">실물 9.2" 크기 (227×55mm)</button>
+        <button type="button" class="edge-tab active" id="btnPhysical" onclick="setScaleMode('physical', this)">실물 크기 (1:1)</button>
         <button type="button" class="edge-tab" id="btnFit" onclick="setScaleMode('fit', this)">화면 폭 맞춤</button>
         <button type="button" class="edge-tab" id="btnNative" onclick="setScaleMode('native', this)">1:1 픽셀 (1920px)</button>
         <button type="button" class="edge-tab" id="btnLiveLink" onclick="toggleLiveTelemetryModal()" title="Headunit :8765/status.json + Comma 3X :7000/ws/raw 실시간 연동">📡 실차 연동</button>
@@ -1949,12 +2304,43 @@
   </section>
 
   <script>
+    let currentPanelModel = "92"; /* "92" = 9.2" (1920x462), "123" = 12.3" (1920x720) */
+    let panelModelUserPinned = false;
     let currentScaleMode = "physical";
     let monitorPpi = 86;
     let elapsedSec = 102;
     const totalSec = 178;
 
     const twoDigit = (n) => (n < 10 ? "0" + n : "" + n);
+
+    function setPanelModel(model, btn) {
+      currentPanelModel = (model === "123" || model === "720") ? "123" : "92";
+      if (btn) panelModelUserPinned = true;
+      document.body.setAttribute("data-panel", currentPanelModel);
+
+      const b92 = document.getElementById("btnPanel92");
+      const b123 = document.getElementById("btnPanel123");
+      if (b92 && b123) {
+        b92.classList.toggle("active", currentPanelModel === "92");
+        b123.classList.toggle("active", currentPanelModel === "123");
+      }
+
+      const sub = document.getElementById("brandSubtitle");
+      if (sub) {
+        sub.textContent = currentPanelModel === "123"
+          ? 'TURZX 12.3" HiDPI 2.0x (960×360 dp → 1920×720 px)'
+          : 'TURZX 9.2" HiDPI 2.0x (960×231 dp → 1920×462 px)';
+      }
+
+      const roadCanvas = document.getElementById("commaRoadCanvas");
+      if (roadCanvas) {
+        roadCanvas.width = 582;
+        roadCanvas.height = currentPanelModel === "123" ? 576 : 434;
+      }
+
+      updateViewportScale();
+      renderCommaAdasCanvas();
+    }
 
     function updateViewportScale() {
       const clip = document.getElementById("turzxLcdClip");
@@ -1972,13 +2358,18 @@
         return;
       }
 
-      /* Logical resolution of .turzx-lcd is 960 x 231 dp (2.0x HiDPI for 1920 x 462 hardware) */
+      /* Logical resolution of .turzx-lcd: 960 x 231 dp (9.2") or 960 x 360 dp (12.3") */
+      const is123 = currentPanelModel === "123";
       const logicalW = 960;
-      const logicalH = 231;
+      const logicalH = is123 ? 360 : 231;
+      const nativeH = is123 ? 720 : 462;
+      const physWmm = is123 ? 292.5 : 227.2;
+      const physHmm = is123 ? 109.7 : 54.7;
+      const diagLabel = is123 ? "12.3 inch · 312.4 mm" : "9.2 inch · 233.7 mm";
 
       if (currentScaleMode === "physical") {
         const pxPerMm = monitorPpi / 25.4;
-        const targetW = Math.round(227.2 * pxPerMm);
+        const targetW = Math.round(physWmm * pxPerMm);
         const scale = targetW / logicalW;
         const targetH = Math.round(logicalH * scale);
 
@@ -1992,11 +2383,11 @@
           cardBox.style.height = Math.round(53.98 * pxPerMm) + "px";
         }
         if (rulerTop) {
-          rulerTop.textContent = "실제 액티브 가로 227.2 mm (대각선 9.2 inch · 233.7 mm / 현재 " + monitorPpi + " PPI 기준 · 2.0x HiDPI)";
+          rulerTop.textContent = "실제 액티브 가로 " + physWmm.toFixed(1) + " mm (대각선 " + diagLabel + " / 현재 " + monitorPpi + " PPI 기준 · 2.0x HiDPI)";
         }
         if (rulerSide) {
           rulerSide.style.display = "inline-block";
-          rulerSide.textContent = "세로 54.7 mm";
+          rulerSide.textContent = "세로 " + physHmm.toFixed(1) + " mm";
         }
         return;
       }
@@ -2005,10 +2396,10 @@
 
       if (currentScaleMode === "native") {
         clip.style.width = "1920px";
-        clip.style.height = "462px";
+        clip.style.height = nativeH + "px";
         lcd.style.transform = "scale(2)";
-        if (rulerTop) rulerTop.textContent = "1:1 픽셀 원본 모드 (1920 × 462 px · 2.0x HiDPI 렌더링)";
-        if (rulerSide) rulerSide.textContent = "462 px";
+        if (rulerTop) rulerTop.textContent = "1:1 픽셀 원본 모드 (1920 × " + nativeH + " px · 2.0x HiDPI 렌더링)";
+        if (rulerSide) rulerSide.textContent = nativeH + " px";
         return;
       }
 
@@ -2301,7 +2692,8 @@
       ctx.clearRect(0, 0, W, H);
 
       /* 1. Sky, Atmospheric Horizon Glow & Ground Plane Base */
-      const horizonY = 130;
+      const is123 = H > 500;
+      const horizonY = is123 ? 172 : 130;
       const skyGrad = ctx.createLinearGradient(0, 0, 0, horizonY);
       skyGrad.addColorStop(0, "#07080c");
       skyGrad.addColorStop(1, "#0f131d");
@@ -2315,11 +2707,11 @@
       ctx.fillStyle = groundGrad;
       ctx.fillRect(0, horizonY, W, H - horizonY);
 
-      /* Camera intrinsics in 582x434 pixel space (291x217dp, -25% width) */
+      /* Camera intrinsics in 582x434 (9.2") or 582x576 (12.3") pixel space */
       const u0 = W * 0.565;
       const v0 = horizonY;
       const fx = 395;
-      const fy = 950;
+      const fy = is123 ? 1180 : 950;
       const camH = 1.35;
 
       /* Map real radar distance (10.5m ~ 52m) to compressed 3D cluster visual distance (8.8m ~ 18.2m) */
@@ -3011,14 +3403,23 @@
         if (m.title) document.getElementById("mediaTitleText").textContent = m.title;
         if (m.artist || m.album) {
           document.getElementById("mediaArtistText").textContent =
-            (m.artist || "") + (m.album ? " — " + m.album : "");
+            (m.artist || "") + (m.album ? " · " + m.album : "");
         }
         if (typeof m.posSec === "number" && typeof m.durSec === "number" && m.durSec > 0) {
           const pct = Math.min(100, Math.max(0, Math.round((m.posSec / m.durSec) * 100)));
-          const fillEl = document.getElementById("mediaProgFill");
+          const fillEl = document.getElementById("mediaProgressBar");
           if (fillEl) fillEl.style.width = pct + "%";
-          document.getElementById("mediaTimeCur").textContent = formatSecMmSs(m.posSec);
-          document.getElementById("mediaTimeTot").textContent = formatSecMmSs(m.durSec);
+          const curEl = document.getElementById("mediaCurTime");
+          const durEl = document.getElementById("mediaDurTime");
+          if (curEl) curEl.textContent = formatSecMmSs(m.posSec);
+          if (durEl) durEl.textContent = formatSecMmSs(m.durSec);
+        }
+      }
+
+      if (!panelModelUserPinned && data.usb && data.usb.panel) {
+        const wantPanel = String(data.usb.panel).indexOf("12.3") !== -1 ? "123" : "92";
+        if (wantPanel !== currentPanelModel) {
+          setPanelModel(wantPanel, null);
         }
       }
 
@@ -3289,8 +3690,12 @@
 
     window.addEventListener("resize", updateViewportScale);
     window.addEventListener("DOMContentLoaded", () => {
-      updateViewportScale();
-      renderCommaAdasCanvas();
+      if (window.location.search.indexOf("panel=123") !== -1 || window.location.search.indexOf("panel=720") !== -1) {
+        setPanelModel("123", null);
+      } else {
+        updateViewportScale();
+        renderCommaAdasCanvas();
+      }
       /* Auto-start live telemetry if ?live=1 is in the URL query string */
       if (window.location.search.indexOf("live=1") !== -1) {
         startLiveTelemetry();

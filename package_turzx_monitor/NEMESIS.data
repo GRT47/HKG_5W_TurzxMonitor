@@ -1,7 +1,7 @@
 [nemesis]
-version=1.4.8
+version=1.5.0
 id=hkg.turzxmonitor
-name=HKG 5W TURZX 9.2 Cluster
+name=HKG 5W TURZX 9.2/12.3 Cluster
 types=application,service
 postinstall=scripts/post.sh
 preuninstall=scripts/preun.sh

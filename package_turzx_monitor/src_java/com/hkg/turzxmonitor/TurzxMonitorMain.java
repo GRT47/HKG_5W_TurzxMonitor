@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.4.8";
+    public static final String MONITOR_VERSION = "1.5.0";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -90,10 +90,17 @@ public class TurzxMonitorMain {
     public static final int CARROT_UDP_PORT_BROADCAST = 7706;
     public static final int CARROT_WS_PORT = 7000;
 
-    // TURZX 9.2" (1920x462) USB constants (verified on live hardware USB\VID_1CBE&PID_0092 firmware turzx_0001_0015)
+    // TURZX USB secondary monitor constants (9.2" 0x0092 1920x462, 8.8" 0x0088 1920x480, 12.3" 0x0123 1920x720)
     public static final int TURZX_USB_VID = 0x1CBE;
     public static final int TURZX_USB_PID_92 = 0x0092;
     public static final int TURZX_USB_PID_88 = 0x0088;
+    public static final int TURZX_USB_PID_123 = 0x0123;
+
+    public static boolean isSupportedTurzxPid(String pidHex) {
+        if (pidHex == null) return false;
+        String p = pidHex.trim().toLowerCase(Locale.US);
+        return "0092".equals(p) || "0088".equals(p) || "0123".equals(p);
+    }
     public static final int TURZX_EP_OUT = 0x01;
     public static final int TURZX_EP_IN = 0x81;
     public static final int TURZX_CMD_HELLO = 10;       // 0x0A Handshake / Sync (replies "turzx_0001_0015")
@@ -180,6 +187,7 @@ public class TurzxMonitorMain {
         public boolean hudRoadEnabled = true;
         public boolean usbIncrementalEncode = true; // v1.4.5: re-encode only changed MCU rows (RST-per-row JPEG)
         public boolean renderParallel = false;      // v1.4.8 default: single-core (render then encode); true = parallel
+        public boolean hudDesignTesla = true;       // v1.5.0: Tesla-style HUD (false = classic Chromium 1:1 HUD)
         // Telemetry (Binder/CAN) poll period of the separate poll thread
         public int telemetryPollMs = 200;
         public String commaIp = "";
@@ -274,6 +282,7 @@ public class TurzxMonitorMain {
         public float tpmsFrPsi = 38.0f;
         public float tpmsRlPsi = 39.0f;
         public float tpmsRrPsi = 39.0f;
+        public int headLampStatus = -1;       // tmHscanService getAFLS11_HeadLampStatus() raw (v1.5.0)
 
         // 4. Now Playing Media
         public String mediaSource = "Bluetooth Audio";
@@ -424,6 +433,7 @@ public class TurzxMonitorMain {
     // =========================================================================
 
     private static volatile byte[] cachedTransparentPng480x1920 = null;
+    private static volatile byte[] cachedTransparentPng720x1920 = null;
 
     /**
      * Builds the 512-byte TURZX V1.x (turzx_0001_0015) USB command header:
@@ -491,21 +501,20 @@ public class TurzxMonitorMain {
     }
 
     /**
-     * Generates a valid 480x1920 all-transparent (RGBA 0x00000000) PNG image in pure Java.
+     * Generates a valid width x height all-transparent (RGBA 0x00000000) PNG image in pure Java.
      * Sent once via CMD 102 upon USB connection to clear any persistent PNG overlay layer
      * so CMD 101 hardware-decoded JPEGs are visible underneath.
      */
-    public static byte[] buildTransparentOverlayPng480x1920() {
-        byte[] cached = cachedTransparentPng480x1920;
-        if (cached != null) return cached;
+    public static byte[] buildTransparentOverlayPng(int width, int height) {
+        if (width <= 0 || height <= 0) {
+            throw new IllegalArgumentException("Invalid PNG dimensions: " + width + "x" + height);
+        }
         try {
-            final int width = 480;
-            final int height = 1920;
-            ByteArrayOutputStream out = new ByteArrayOutputStream(4096);
+            ByteArrayOutputStream out = new ByteArrayOutputStream(8192);
             // PNG 8-byte signature
             out.write(new byte[]{(byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A});
 
-            // IHDR chunk (13 bytes): width=480, height=1920, bitDepth=8, colorType=6 (RGBA)
+            // IHDR chunk (13 bytes): width, height, bitDepth=8, colorType=6 (RGBA)
             byte[] ihdr = new byte[13];
             ihdr[0] = (byte) ((width >>> 24) & 0xFF);
             ihdr[1] = (byte) ((width >>> 16) & 0xFF);
@@ -522,17 +531,22 @@ public class TurzxMonitorMain {
             ihdr[12] = 0;
             writePngChunk(out, "IHDR", ihdr, 0, ihdr.length);
 
-            // IDAT chunk: 1920 rows * (1 filter byte + 480 * 4 RGBA zero bytes) = 3,688,320 zero bytes
-            Deflater deflater = new Deflater(Deflater.BEST_SPEED);
-            ByteArrayOutputStream idatBuf = new ByteArrayOutputStream(4096);
-            byte[] zeros = new byte[1921 * 32]; // 32 scanlines per feed
+            // IDAT chunk: height rows * (1 filter byte + width * 4 RGBA zero bytes)
+            int rowBytes = 1 + width * 4;
+            int batchRows = 32;
+            byte[] zeros = new byte[rowBytes * batchRows];
             byte[] compBuf = new byte[4096];
-            for (int rowGroup = 0; rowGroup < 60; rowGroup++) {
-                deflater.setInput(zeros, 0, zeros.length);
+            Deflater deflater = new Deflater(Deflater.BEST_SPEED);
+            ByteArrayOutputStream idatBuf = new ByteArrayOutputStream(8192);
+            int remainingRows = height;
+            while (remainingRows > 0) {
+                int rowsThisFeed = Math.min(batchRows, remainingRows);
+                deflater.setInput(zeros, 0, rowsThisFeed * rowBytes);
                 while (!deflater.needsInput()) {
                     int n = deflater.deflate(compBuf);
                     if (n > 0) idatBuf.write(compBuf, 0, n);
                 }
+                remainingRows -= rowsThisFeed;
             }
             deflater.finish();
             while (!deflater.finished()) {
@@ -545,13 +559,26 @@ public class TurzxMonitorMain {
 
             // IEND chunk
             writePngChunk(out, "IEND", new byte[0], 0, 0);
-
-            cached = out.toByteArray();
-            cachedTransparentPng480x1920 = cached;
-            return cached;
+            return out.toByteArray();
         } catch (Exception e) {
-            throw new RuntimeException("Failed to build 480x1920 transparent PNG", e);
+            throw new RuntimeException("Failed to build " + width + "x" + height + " transparent PNG", e);
         }
+    }
+
+    public static byte[] buildTransparentOverlayPng480x1920() {
+        byte[] cached = cachedTransparentPng480x1920;
+        if (cached != null) return cached;
+        cached = buildTransparentOverlayPng(480, 1920);
+        cachedTransparentPng480x1920 = cached;
+        return cached;
+    }
+
+    public static byte[] buildTransparentOverlayPng720x1920() {
+        byte[] cached = cachedTransparentPng720x1920;
+        if (cached != null) return cached;
+        cached = buildTransparentOverlayPng(720, 1920);
+        cachedTransparentPng720x1920 = cached;
+        return cached;
     }
 
     private static void writePngChunk(OutputStream out, String type, byte[] data, int off, int len) throws Exception {
@@ -597,7 +624,9 @@ public class TurzxMonitorMain {
     public static final class TurzxUsbDriver {
         private static volatile boolean connected = false;
         private static volatile String connectedDevPath = "";
-        private static volatile String statusText = "USB 검색 대기 (1cbe:0092)";
+        private static volatile int connectedPid = TURZX_USB_PID_92;
+        private static volatile String connectedFirmware = "";
+        private static volatile String statusText = "USB 검색 대기 (1cbe:0092/0123)";
         private static volatile int pushedFrames = 0;
         private static volatile double liveFps = 0.0;
         private static volatile int lastAppliedBrightness = -1;
@@ -624,6 +653,18 @@ public class TurzxMonitorMain {
 
         public static boolean isConnected() {
             return connected;
+        }
+
+        public static int getConnectedPid() {
+            return connectedPid;
+        }
+
+        public static String getConnectedPidHex() {
+            return String.format(Locale.US, "%04x", connectedPid & 0xFFFF);
+        }
+
+        public static String getConnectedFirmware() {
+            return connectedFirmware;
         }
 
         public static String getStatusText() {
@@ -757,7 +798,7 @@ public class TurzxMonitorMain {
             }
             lastUsbHostNudgeMs = now;
             usbHostNudgeCount++;
-            cycleUsbHostVbus("cold-boot/missing 1cbe:0092 nudge #" + usbHostNudgeCount);
+            cycleUsbHostVbus("cold-boot/missing 1cbe:(0092/0088/0123) nudge #" + usbHostNudgeCount);
         }
 
         private static void resetTurzxUsbDeviceInSysfs() {
@@ -771,7 +812,7 @@ public class TurzxMonitorMain {
                 if (!fVid.isFile() || !fPid.isFile()) continue;
                 String vid = readFirstLineQuick(fVid).toLowerCase(Locale.US);
                 String pid = readFirstLineQuick(fPid).toLowerCase(Locale.US);
-                if ("1cbe".equals(vid) && ("0092".equals(pid) || "0088".equals(pid))) {
+                if ("1cbe".equals(vid) && isSupportedTurzxPid(pid)) {
                     File authFile = new File(d, "authorized");
                     if (authFile.exists()) {
                         DebugManager.logEvent("USB", "Toggling sysfs authorized (0->1) on " + d.getName());
@@ -1199,7 +1240,8 @@ public class TurzxMonitorMain {
                             fpsWinCount = 0;
                             fpsWinStartMs = now;
                         }
-                        statusText = String.format(Locale.US, "TURZX 연결됨 (%s · %.1f FPS)", connectedDevPath, liveFps);
+                        statusText = String.format(Locale.US, "TURZX %s 연결됨 (%s · %.1f FPS)",
+                                TurzxFrameRenderer.getActivePanelLabel(), connectedDevPath, liveFps);
                     } else if (attempted) {
                         fpsWinCount = 0;
                         fpsWinStartMs = System.currentTimeMillis();
@@ -1214,10 +1256,10 @@ public class TurzxMonitorMain {
         }
 
         /**
-         * Scans /sys/bus/usb/devices/* for VID 1cbe & PID 0092 (or 0088) and returns
-         * the corresponding /dev/bus/usb/<busnum>/<devnum> path.
+         * Scans /sys/bus/usb/devices/* for VID 1cbe & PID 0092 (9.2"), 0088 (8.8"), or 0123 (12.3")
+         * and returns { "/dev/bus/usb/<busnum>/<devnum>", "<pidHex>" }.
          */
-        public static String findTurzxUsbDevicePath() {
+        public static String[] findTurzxUsbDevice() {
             File sysUsb = new File("/sys/bus/usb/devices");
             File[] dirs = sysUsb.listFiles();
             if (dirs == null) return null;
@@ -1226,20 +1268,25 @@ public class TurzxMonitorMain {
                 File fVid = new File(d, "idVendor");
                 File fPid = new File(d, "idProduct");
                 if (!fVid.isFile() || !fPid.isFile()) continue;
-                String vid = readFirstLineQuick(fVid).toLowerCase(Locale.US);
-                String pid = readFirstLineQuick(fPid).toLowerCase(Locale.US);
-                if ("1cbe".equals(vid) && ("0092".equals(pid) || "0088".equals(pid))) {
+                String vid = readFirstLineQuick(fVid).trim().toLowerCase(Locale.US);
+                String pid = readFirstLineQuick(fPid).trim().toLowerCase(Locale.US);
+                if ("1cbe".equals(vid) && isSupportedTurzxPid(pid)) {
                     int busNum = parseIntSafe(readFirstLineQuick(new File(d, "busnum")), -1);
                     int devNum = parseIntSafe(readFirstLineQuick(new File(d, "devnum")), -1);
                     if (busNum > 0 && devNum > 0) {
                         String path = String.format(Locale.US, "/dev/bus/usb/%03d/%03d", busNum, devNum);
                         if (new File(path).exists()) {
-                            return path;
+                            return new String[]{path, pid};
                         }
                     }
                 }
             }
             return null;
+        }
+
+        public static String findTurzxUsbDevicePath() {
+            String[] found = findTurzxUsbDevice();
+            return found != null ? found[0] : null;
         }
 
         private static void onUsbOpenFailure(String devPath, String msg) {
@@ -1256,15 +1303,17 @@ public class TurzxMonitorMain {
 
         private static synchronized boolean tryOpenTurzxUsbDevice() {
             closeUsbConnection();
-            String devPath = findTurzxUsbDevicePath();
-            if (devPath == null) {
+            String[] found = findTurzxUsbDevice();
+            if (found == null) {
                 nudgeUsbHostIfTurzxMissing();
-                devPath = findTurzxUsbDevicePath();
-                if (devPath == null) {
-                    statusText = "TURZX USB 미감지 (1cbe:0092 대기)";
+                found = findTurzxUsbDevice();
+                if (found == null) {
+                    statusText = "TURZX USB 미감지 (1cbe:0092/0123 대기)";
                     return false;
                 }
             }
+            String devPath = found[0];
+            String pidHex = found[1];
             if (!devPath.equals(lastObservedDevPath)) {
                 lastObservedDevPath = devPath;
                 lastObservedDevPathFirstSeenMs = System.currentTimeMillis();
@@ -1276,12 +1325,19 @@ public class TurzxMonitorMain {
                     Thread.sleep(700L - sinceFirstSeen);
                 } catch (InterruptedException ignored) {
                 }
-                devPath = findTurzxUsbDevicePath();
-                if (devPath == null) {
-                    statusText = "TURZX USB 미감지 (1cbe:0092 대기)";
+                found = findTurzxUsbDevice();
+                if (found == null) {
+                    statusText = "TURZX USB 미감지 (1cbe:0092/0123 대기)";
                     return false;
                 }
+                devPath = found[0];
+                pidHex = found[1];
                 lastObservedDevPath = devPath;
+            }
+            int pidInt = TURZX_USB_PID_92;
+            try {
+                pidInt = Integer.parseInt(pidHex, 16);
+            } catch (NumberFormatException ignored) {
             }
             try {
                 try {
@@ -1354,21 +1410,37 @@ public class TurzxMonitorMain {
 
                 usbDevConn = conn;
                 connectedDevPath = devPath;
+                connectedPid = pidInt;
+                TurzxFrameRenderer.setActivePanelByPid(pidInt);
 
-                // 1. Send CMD 10 (HELLO / Sync) with up to 3 attempts -> replies "turzx_0001_0015" (512B + ZLP)
+                // 1. Send CMD 10 (HELLO / Sync) with up to 3 attempts -> replies "turzx_0001_0015" / "turzx_0001_0026"
                 byte[] helloPkt = buildTurzxCommandPacket(TURZX_CMD_HELLO, 0);
                 boolean helloOk = false;
+                String fwVer = "";
                 for (int attempt = 1; attempt <= 3; attempt++) {
                     drainBulkIn(40);
-                    if (bulkTransferOut(helloPkt, 0, helloPkt.length, 600) && drainBulkIn(600) > 0) {
-                        helloOk = true;
-                        break;
+                    if (bulkTransferOut(helloPkt, 0, helloPkt.length, 600)) {
+                        int nRx = drainBulkIn(600);
+                        if (nRx > 0) {
+                            helloOk = true;
+                            if (nRx >= 23) {
+                                StringBuilder fwSb = new StringBuilder(16);
+                                for (int k = 8; k < Math.min(nRx, 28); k++) {
+                                    int ch = RX_BUF[k] & 0xFF;
+                                    if (ch >= 0x20 && ch <= 0x7E) fwSb.append((char) ch);
+                                    else break;
+                                }
+                                fwVer = fwSb.toString().trim();
+                            }
+                            break;
+                        }
                     }
                     try {
                         Thread.sleep(180L);
                     } catch (InterruptedException ignored) {
                     }
                 }
+                connectedFirmware = fwVer;
 
                 // 2. Send CMD 111 (Stop built-in storage video playback)
                 byte[] stopVideoPkt = buildTurzxCommandPacket(TURZX_CMD_STOP_VIDEO, 0);
@@ -1393,15 +1465,20 @@ public class TurzxMonitorMain {
                     return false;
                 }
 
-                // 4. Clear the 480x1920 RGBA PNG overlay layer (CMD 102) so CMD 101 JPEGs are visible
-                byte[] clearPng = buildTransparentOverlayPng480x1920();
+                // 4. Clear the RGBA PNG overlay layer (CMD 102: 720x1920 for 12.3", 480x1920 for 9.2"/8.8")
+                byte[] clearPng = (pidInt == TURZX_USB_PID_123)
+                        ? buildTransparentOverlayPng720x1920()
+                        : buildTransparentOverlayPng480x1920();
                 sendPayloadFrame(TURZX_CMD_SEND_PNG, clearPng);
 
                 consecutiveOpenFailures = 0;
                 usbHostNudgeCount = 0;
                 connected = true;
-                statusText = "TURZX 연결됨 (" + devPath + ")";
-                DebugManager.logEvent("USB", "Connected to TURZX 9.2 panel at " + devPath + " (hello=" + helloOk + ", br=" + brOk + ")");
+                String panelLabel = TurzxFrameRenderer.getActivePanelLabel();
+                statusText = "TURZX " + panelLabel + " 연결됨 (" + devPath + ")";
+                DebugManager.logEvent("USB", "Connected to TURZX " + panelLabel + " (1cbe:" + pidHex
+                        + ", " + TurzxFrameRenderer.getActiveResolutionString() + ") at " + devPath
+                        + " (hello=" + helloOk + ", fw='" + fwVer + "', br=" + brOk + ")");
                 return true;
             } catch (Throwable t) {
                 onUsbOpenFailure(devPath, "USB 초기화 오류: " + t.getClass().getSimpleName());
@@ -1753,15 +1830,72 @@ public class TurzxMonitorMain {
     }
 
     // =========================================================================
-    // 2. ANDROID CANVAS 1920x462 CLUSTER HUD FRAME RENDERER
+    // 2. ANDROID CANVAS 1920x462 / 1920x720 CLUSTER HUD FRAME RENDERER
     // =========================================================================
 
     public static final class TurzxFrameRenderer {
         public static final int HUD_WIDTH = 1920;
         public static final int HUD_HEIGHT = 462;
+        public static final int HUD_HEIGHT_720 = 720;
         // TURZX 9.2" (0x0092) hardware JPEG decoder requires 16-pixel macroblock width: 29 * 16 = 464 (464x1920)
+        // TURZX 8.8" (0x0088) uses 480x1920; TURZX 12.3" (0x0123) uses native 720x1920 (45 * 16 = 720).
         public static final int PANEL_JPEG_WIDTH = 464;
+        public static final int PANEL_JPEG_WIDTH_88 = 480;
+        public static final int PANEL_JPEG_WIDTH_123 = 720;
         public static final int PANEL_JPEG_HEIGHT = 1920;
+
+        private static volatile int activePid = TURZX_USB_PID_92;
+        private static volatile int activeHudHeight = HUD_HEIGHT;
+        private static volatile int activePanelJpegWidth = PANEL_JPEG_WIDTH;
+        private static int allocatedHudHeight = -1;
+        private static int allocatedPanelJpegWidth = -1;
+        private static int loadedSpriteHeight = -1;
+
+        public static synchronized void setActivePanelByPid(int pid) {
+            int p = pid & 0xFFFF;
+            int newHudH;
+            int newPadW;
+            if (p == TURZX_USB_PID_123) {
+                newHudH = HUD_HEIGHT_720;
+                newPadW = PANEL_JPEG_WIDTH_123;
+            } else if (p == TURZX_USB_PID_88) {
+                newHudH = HUD_HEIGHT;
+                newPadW = PANEL_JPEG_WIDTH_88;
+            } else {
+                p = TURZX_USB_PID_92;
+                newHudH = HUD_HEIGHT;
+                newPadW = PANEL_JPEG_WIDTH;
+            }
+            activePid = p;
+            if (newHudH != activeHudHeight || newPadW != activePanelJpegWidth) {
+                activeHudHeight = newHudH;
+                activePanelJpegWidth = newPadW;
+                cachedSolidBlackPanelJpeg = null;
+            }
+        }
+
+        public static int getActivePid() {
+            return activePid;
+        }
+
+        public static int getActiveHudHeight() {
+            return activeHudHeight;
+        }
+
+        public static int getActivePanelJpegWidth() {
+            return activePanelJpegWidth;
+        }
+
+        public static String getActivePanelLabel() {
+            int p = activePid;
+            if (p == TURZX_USB_PID_123) return "12.3\"";
+            if (p == TURZX_USB_PID_88) return "8.8\"";
+            return "9.2\"";
+        }
+
+        public static String getActiveResolutionString() {
+            return HUD_WIDTH + "x" + activeHudHeight;
+        }
 
         // v1.4.4: two landscape buffers so the render thread draws frame N+1 while the encoder thread
         // compresses frame N (TurzxUsbDriver hands buffers over; a buffer is never drawn and encoded at once).
@@ -1784,15 +1918,231 @@ public class TurzxMonitorMain {
         private static Object srcRect = null;
         private static Object dstRect = null;
 
-        // Pre-rendered Chromium 1:1 layer sprites from turzx_92_mockup.html
+        // Pre-rendered Chromium 1:1 layer sprites from turzx_92_mockup.html (lazy-loaded per active panel height)
         private static Object bmpBaseShell = null;
         private static Object bmpActiveShell = null;
         private static Object bmpCol2Section = null;
         private static Object bmpCol2Traffic = null;
         private static Object bmpCol2None = null;
-        private static boolean assetsLoaded = false;
+        private static boolean typefacesLoaded = false;
 
         private static float roadPhase = 0.0f;
+
+        /** Exact 2x calibrated coordinates for 1920x462 (9.2"/8.8") vs 1920x720 (12.3") HUD layouts. */
+        static final class HudLayout {
+            final int hudH;
+            // Column 1: EV cells
+            final float socY, evBigFs, socBarY, evBarH;
+            final float dteY, effY;
+            final float pwrY, evMidFs, pwrBarY, cumY;
+            final float batTempY, batMinMaxY;
+            // Column 1: TPMS
+            final int[] tpmsTag, tireFl, tireFr, tireRl, tireRr;
+            final float tpmsFrontY, tpmsRearY, tpmsValFs, tpmsFootY;
+            // Column 2: 3D Road + HUD stamps
+            final float roadBottomY, roadClipBottomY, roadH, roadHorizonY, roadFy;
+            final float gearX, gearY, gearFs;
+            final float egoX, egoY, egoFs;
+            final float cruiseX, cruiseY, cruiseFs;
+            final float sdiSecX, sdiTrafX, sdiNoneX;
+            final float sdiSecY, sdiTrafY, sdiNoneY, sdiLimitFs;
+            final float sdiDistSecY, sdiDistTrafY;
+            final float sdiAvgX, sdiAvgY, sdiAvgFs;
+            final float tbtDistX, tbtDistY, tbtDistFs;
+            final float tbtRoadX, tbtRoadY, tbtRoadFs;
+            final float tbtNextX, tbtNextY, tbtNextFs;
+            final float laneChipX, laneChipY, laneChipFs;
+            final float leadChipX, leadChipY, leadChipFs;
+            // Column 3: Media
+            final float artX0, artY0, artX1, artY1, artRad;
+            final float mediaTextX;
+            final int titleMaxChars, subMaxChars;
+            final float mediaTitleY, mediaTitleFs;
+            final float mediaSubY, mediaSubFs;
+            final float mediaBarY, mediaBarW, mediaBarH;
+            final float mediaCurTimeY, mediaDurTimeX, mediaDurTimeY, mediaTimeFs;
+            // Climate (Column 3 bottom on 9.2"/8.8", full-width bottom taskbar on 12.3")
+            final float drvTempX, inTempX;
+            final boolean showPasTemp;
+            final float pasTempX, outTempX;
+            final boolean outTempAlignRight;
+            final float hvacTempY, hvacEnvY;
+            final int[] dirUpA, dirUpB, dirMidA, dirMidB, dirDownA, dirDownB;
+            final float fanStepX, fanStepY;
+            final int[] fanOffClear;
+            final float fanOffX;
+            final float fanBarBase, fanBarStep, fanBarSegW;
+            final int fanBarCopyX0, fanBarCopyY0, fanBarCopyY1;
+            final int[][] hvacBtns;
+
+            HudLayout(
+                    int hudH,
+                    float socY, float evBigFs, float socBarY, float evBarH,
+                    float dteY, float effY,
+                    float pwrY, float evMidFs, float pwrBarY, float cumY,
+                    float batTempY, float batMinMaxY,
+                    int[] tpmsTag, int[] tireFl, int[] tireFr, int[] tireRl, int[] tireRr,
+                    float tpmsFrontY, float tpmsRearY, float tpmsValFs, float tpmsFootY,
+                    float roadBottomY, float roadClipBottomY, float roadH, float roadHorizonY, float roadFy,
+                    float gearX, float gearY, float gearFs,
+                    float egoX, float egoY, float egoFs,
+                    float cruiseX, float cruiseY, float cruiseFs,
+                    float sdiSecX, float sdiTrafX, float sdiNoneX,
+                    float sdiSecY, float sdiTrafY, float sdiNoneY, float sdiLimitFs,
+                    float sdiDistSecY, float sdiDistTrafY,
+                    float sdiAvgX, float sdiAvgY, float sdiAvgFs,
+                    float tbtDistX, float tbtDistY, float tbtDistFs,
+                    float tbtRoadX, float tbtRoadY, float tbtRoadFs,
+                    float tbtNextX, float tbtNextY, float tbtNextFs,
+                    float laneChipX, float laneChipY, float laneChipFs,
+                    float leadChipX, float leadChipY, float leadChipFs,
+                    float artX0, float artY0, float artX1, float artY1, float artRad,
+                    float mediaTextX, int titleMaxChars, int subMaxChars,
+                    float mediaTitleY, float mediaTitleFs,
+                    float mediaSubY, float mediaSubFs,
+                    float mediaBarY, float mediaBarW, float mediaBarH,
+                    float mediaCurTimeY, float mediaDurTimeX, float mediaDurTimeY, float mediaTimeFs,
+                    float drvTempX, float inTempX,
+                    boolean showPasTemp, float pasTempX, float outTempX, boolean outTempAlignRight,
+                    float hvacTempY, float hvacEnvY,
+                    int[] dirUpA, int[] dirUpB, int[] dirMidA, int[] dirMidB, int[] dirDownA, int[] dirDownB,
+                    float fanStepX, float fanStepY, int[] fanOffClear, float fanOffX,
+                    float fanBarBase, float fanBarStep, float fanBarSegW,
+                    int fanBarCopyX0, int fanBarCopyY0, int fanBarCopyY1,
+                    int[][] hvacBtns
+            ) {
+                this.hudH = hudH;
+                this.socY = socY; this.evBigFs = evBigFs; this.socBarY = socBarY; this.evBarH = evBarH;
+                this.dteY = dteY; this.effY = effY;
+                this.pwrY = pwrY; this.evMidFs = evMidFs; this.pwrBarY = pwrBarY; this.cumY = cumY;
+                this.batTempY = batTempY; this.batMinMaxY = batMinMaxY;
+                this.tpmsTag = tpmsTag; this.tireFl = tireFl; this.tireFr = tireFr; this.tireRl = tireRl; this.tireRr = tireRr;
+                this.tpmsFrontY = tpmsFrontY; this.tpmsRearY = tpmsRearY; this.tpmsValFs = tpmsValFs; this.tpmsFootY = tpmsFootY;
+                this.roadBottomY = roadBottomY; this.roadClipBottomY = roadClipBottomY;
+                this.roadH = roadH; this.roadHorizonY = roadHorizonY; this.roadFy = roadFy;
+                this.gearX = gearX; this.gearY = gearY; this.gearFs = gearFs;
+                this.egoX = egoX; this.egoY = egoY; this.egoFs = egoFs;
+                this.cruiseX = cruiseX; this.cruiseY = cruiseY; this.cruiseFs = cruiseFs;
+                this.sdiSecX = sdiSecX; this.sdiTrafX = sdiTrafX; this.sdiNoneX = sdiNoneX;
+                this.sdiSecY = sdiSecY; this.sdiTrafY = sdiTrafY; this.sdiNoneY = sdiNoneY; this.sdiLimitFs = sdiLimitFs;
+                this.sdiDistSecY = sdiDistSecY; this.sdiDistTrafY = sdiDistTrafY;
+                this.sdiAvgX = sdiAvgX; this.sdiAvgY = sdiAvgY; this.sdiAvgFs = sdiAvgFs;
+                this.tbtDistX = tbtDistX; this.tbtDistY = tbtDistY; this.tbtDistFs = tbtDistFs;
+                this.tbtRoadX = tbtRoadX; this.tbtRoadY = tbtRoadY; this.tbtRoadFs = tbtRoadFs;
+                this.tbtNextX = tbtNextX; this.tbtNextY = tbtNextY; this.tbtNextFs = tbtNextFs;
+                this.laneChipX = laneChipX; this.laneChipY = laneChipY; this.laneChipFs = laneChipFs;
+                this.leadChipX = leadChipX; this.leadChipY = leadChipY; this.leadChipFs = leadChipFs;
+                this.artX0 = artX0; this.artY0 = artY0; this.artX1 = artX1; this.artY1 = artY1; this.artRad = artRad;
+                this.mediaTextX = mediaTextX; this.titleMaxChars = titleMaxChars; this.subMaxChars = subMaxChars;
+                this.mediaTitleY = mediaTitleY; this.mediaTitleFs = mediaTitleFs;
+                this.mediaSubY = mediaSubY; this.mediaSubFs = mediaSubFs;
+                this.mediaBarY = mediaBarY; this.mediaBarW = mediaBarW; this.mediaBarH = mediaBarH;
+                this.mediaCurTimeY = mediaCurTimeY; this.mediaDurTimeX = mediaDurTimeX;
+                this.mediaDurTimeY = mediaDurTimeY; this.mediaTimeFs = mediaTimeFs;
+                this.drvTempX = drvTempX; this.inTempX = inTempX;
+                this.showPasTemp = showPasTemp; this.pasTempX = pasTempX;
+                this.outTempX = outTempX; this.outTempAlignRight = outTempAlignRight;
+                this.hvacTempY = hvacTempY; this.hvacEnvY = hvacEnvY;
+                this.dirUpA = dirUpA; this.dirUpB = dirUpB;
+                this.dirMidA = dirMidA; this.dirMidB = dirMidB;
+                this.dirDownA = dirDownA; this.dirDownB = dirDownB;
+                this.fanStepX = fanStepX; this.fanStepY = fanStepY;
+                this.fanOffClear = fanOffClear; this.fanOffX = fanOffX;
+                this.fanBarBase = fanBarBase; this.fanBarStep = fanBarStep; this.fanBarSegW = fanBarSegW;
+                this.fanBarCopyX0 = fanBarCopyX0; this.fanBarCopyY0 = fanBarCopyY0; this.fanBarCopyY1 = fanBarCopyY1;
+                this.hvacBtns = hvacBtns;
+            }
+        }
+
+        static final HudLayout LAYOUT_462 = new HudLayout(
+                462,
+                152f, 52f, 208f, 8f,
+                138f, 204f,
+                338f, 44f, 370.3f, 424f,
+                354f, 424f,
+                new int[]{520, 24, 586, 62},
+                new int[]{480, 166, 491, 197}, new int[]{513, 166, 524, 197},
+                new int[]{480, 255, 491, 286}, new int[]{513, 255, 524, 286},
+                170f, 330f, 36f, 423f,
+                448f, 449f, 434f, 130f, 950f,
+                655f, 69f, 30f,
+                732f, 88f, 60f,
+                800f, 90f, 32f,
+                680.8f, 680.8f, 680.8f,
+                195f, 183f, 158f, 36f,
+                245f, 233f,
+                785f, 204f, 40f,
+                1034.2f, 72f, 40f,
+                984.2f, 115f, 24f,
+                1154f, 114f, 24f,
+                706f, 423f, 24f,
+                1017.2f, 421f, 24f,
+                1234f, 32f, 1406f, 204f, 18f,
+                1436f, 16, 24,
+                81f, 48f,
+                131f, 30f,
+                154.5f, 388.9f, 10f,
+                196f, 1824.9f, 195f, 26f,
+                1228f, 1275.5f,
+                true, 1882f, 1882f, true,
+                297f, 337f,
+                new int[]{1396, 260, 1425, 286}, new int[]{1425, 260, 1445, 284},
+                new int[]{1396, 287, 1425, 304}, new int[]{1425, 285, 1446, 307},
+                new int[]{1396, 305, 1425, 331}, new int[]{1425, 308, 1445, 331},
+                1687f, 287f, new int[]{1650, 256, 1720, 292}, 1715f,
+                1539.4f, 26.3f, 20f,
+                1538, 298, 336,
+                new int[][]{
+                        {1226, 374, 1315, 436}, {1320, 374, 1411, 436}, {1416, 374, 1505, 436},
+                        {1510, 374, 1599, 436}, {1604, 374, 1693, 436}, {1698, 374, 1789, 436},
+                        {1794, 374, 1884, 436}
+                }
+        );
+
+        static final HudLayout LAYOUT_720 = new HudLayout(
+                720,
+                188.9f, 58f, 269f, 11f,
+                176.3f, 269f,
+                436.7f, 48f, 486.5f, 560f,
+                462.7f, 560f,
+                new int[]{520, 32, 586, 72},
+                new int[]{475, 221, 489, 259}, new int[]{515, 221, 529, 259},
+                new int[]{475, 329, 489, 367}, new int[]{515, 329, 529, 367},
+                210.3f, 426.3f, 37f, 557.5f,
+                590f, 591f, 576f, 172f, 1180f,
+                659.9f, 80.9f, 33f,
+                743.3f, 101.7f, 68f,
+                816.9f, 101.5f, 34f,
+                682.8f, 682.8f, 674.0f,
+                217.5f, 205.5f, 180.3f, 38f,
+                270.8f, 258.8f,
+                787.1f, 227.5f, 42f,
+                1018.2f, 83.4f, 44f,
+                968.2f, 128.1f, 25f,
+                1150f, 127.0f, 25f,
+                713.1f, 555.2f, 25f,
+                1005.9f, 553.1f, 25f,
+                1409f, 46f, 1701f, 338f, 18f,
+                1240f, 25, 36,
+                408.5f, 48f,
+                460.5f, 30f,
+                509f, 630f, 12f,
+                555.3f, 1870f, 554.3f, 27f,
+                36f, 83.5f,
+                false, -1f, 251.5f, false,
+                660f, 704f,
+                new int[]{439, 627, 468, 653}, new int[]{468, 627, 488, 651},
+                new int[]{439, 653, 468, 672}, new int[]{468, 652, 489, 674},
+                new int[]{439, 673, 468, 698}, new int[]{468, 675, 488, 698},
+                850.4f, 655f, new int[]{810, 624, 883, 662}, 879f,
+                582.0f, 43.57f, 36.6f,
+                580, 666, 702,
+                new int[][]{
+                        {933, 621, 1060, 707}, {1070, 621, 1198, 707}, {1208, 621, 1335, 707},
+                        {1345, 621, 1473, 707}, {1483, 621, 1610, 707}, {1620, 621, 1748, 707},
+                        {1758, 621, 1885, 707}
+                }
+        );
 
         private static byte[] readJarAssetBytes(String assetName) {
             String relPath = "assets/" + assetName;
@@ -1883,18 +2233,18 @@ public class TurzxMonitorMain {
             return fallbackTf;
         }
 
-        private static void ensureAssetsLoaded(Class<?> tfCls, Class<?> paintCls) {
-            if (assetsLoaded) return;
-            assetsLoaded = true;
+        private static void recycleBitmapQuietly(Class<?> bmpCls, Object bmp) {
+            if (bmp == null || bmpCls == null) return;
             try {
-                Class<?> bfCls = Class.forName("android.graphics.BitmapFactory");
-                Method decodeByteArray = bfCls.getMethod("decodeByteArray", byte[].class, int.class, int.class);
-                bmpBaseShell = decodeAssetBitmap(decodeByteArray, "base_shell.png");
-                bmpActiveShell = decodeAssetBitmap(decodeByteArray, "active_shell.png");
-                bmpCol2Section = decodeAssetBitmap(decodeByteArray, "col2_hud_section.png");
-                bmpCol2Traffic = decodeAssetBitmap(decodeByteArray, "col2_hud_traffic.png");
-                bmpCol2None = decodeAssetBitmap(decodeByteArray, "col2_hud_none.png");
+                bmpCls.getMethod("recycle").invoke(bmp);
+            } catch (Throwable ignored) {
+            }
+        }
 
+        private static void ensureTypefacesLoaded(Class<?> tfCls, Class<?> paintCls) {
+            if (typefacesLoaded) return;
+            typefacesLoaded = true;
+            try {
                 Object sysBoldTf = tfCls.getField("DEFAULT_BOLD").get(null);
                 Object sysMedTf = tfCls.getField("SANS_SERIF").get(null);
                 Object pubBoldTf = loadBundledTypeface(tfCls, "PublicSans-Bold.ttf", "hkg_public_sans_bold.ttf", sysBoldTf);
@@ -1905,12 +2255,40 @@ public class TurzxMonitorMain {
                 setTf.invoke(paintPublicMed, pubMedTf);
                 setTf.invoke(paintSysBold, sysBoldTf);
                 setTf.invoke(paintSysMed, sysMedTf);
+            } catch (Throwable t) {
+                DebugManager.logError("RENDER", "ensureTypefacesLoaded", t);
+            }
+        }
 
-                DebugManager.logEvent("RENDER", "Chromium 1:1 HUD layers loaded: base=" + (bmpBaseShell != null)
-                        + " active=" + (bmpActiveShell != null)
+        private static void ensurePanelSpritesLoaded(Class<?> bmpCls, int hudH) {
+            if (loadedSpriteHeight == hudH && bmpBaseShell != null) return;
+            try {
+                recycleBitmapQuietly(bmpCls, bmpBaseShell);
+                recycleBitmapQuietly(bmpCls, bmpActiveShell);
+                recycleBitmapQuietly(bmpCls, bmpCol2Section);
+                recycleBitmapQuietly(bmpCls, bmpCol2Traffic);
+                recycleBitmapQuietly(bmpCls, bmpCol2None);
+                bmpBaseShell = null;
+                bmpActiveShell = null;
+                bmpCol2Section = null;
+                bmpCol2Traffic = null;
+                bmpCol2None = null;
+
+                Class<?> bfCls = Class.forName("android.graphics.BitmapFactory");
+                Method decodeByteArray = bfCls.getMethod("decodeByteArray", byte[].class, int.class, int.class);
+                String suffix = (hudH == HUD_HEIGHT_720) ? "_720" : "";
+                bmpBaseShell = decodeAssetBitmap(decodeByteArray, "base_shell" + suffix + ".png");
+                bmpActiveShell = decodeAssetBitmap(decodeByteArray, "active_shell" + suffix + ".png");
+                bmpCol2Section = decodeAssetBitmap(decodeByteArray, "col2_hud_section" + suffix + ".png");
+                bmpCol2Traffic = decodeAssetBitmap(decodeByteArray, "col2_hud_traffic" + suffix + ".png");
+                bmpCol2None = decodeAssetBitmap(decodeByteArray, "col2_hud_none" + suffix + ".png");
+                loadedSpriteHeight = hudH;
+
+                DebugManager.logEvent("RENDER", "Chromium 1:1 HUD layers loaded (" + HUD_WIDTH + "x" + hudH + "): base="
+                        + (bmpBaseShell != null) + " active=" + (bmpActiveShell != null)
                         + " col2=" + (bmpCol2Section != null));
             } catch (Throwable t) {
-                DebugManager.logError("RENDER", "ensureAssetsLoaded", t);
+                DebugManager.logError("RENDER", "ensurePanelSpritesLoaded(" + hudH + ")", t);
             }
         }
 
@@ -1941,6 +2319,7 @@ public class TurzxMonitorMain {
         }
 
         private static volatile double avgRoadMs = 0.0;
+        private static boolean teslaFailureLogged = false;
 
         public static double getAvgRoadMs() {
             return avgRoadMs;
@@ -1962,7 +2341,7 @@ public class TurzxMonitorMain {
                     ? String.format(Locale.US, "%.0f/%d", avgDirtyRows, lastTotalRows) : "";
         }
 
-        /** Lazily creates the bitmaps, canvases and paints (render thread, under the class lock). */
+        /** Lazily creates or resizes bitmaps, canvases, paints, and sprites for the active TURZX panel. */
         private static void ensureRenderResources() throws Exception {
             if (gfxClasses == null) {
                 String[] names = new String[]{
@@ -1975,7 +2354,14 @@ public class TurzxMonitorMain {
                 for (int i = 0; i < names.length; i++) loaded[i] = Class.forName(names[i]);
                 gfxClasses = loaded;
             }
-            if (landscapeBitmaps[LANDSCAPE_BUFFERS - 1] != null) return;
+            int targetHudH = activeHudHeight;
+            int targetPadW = activePanelJpegWidth;
+            if (landscapeBitmaps[LANDSCAPE_BUFFERS - 1] != null
+                    && allocatedHudHeight == targetHudH
+                    && allocatedPanelJpegWidth == targetPadW
+                    && loadedSpriteHeight == targetHudH) {
+                return;
+            }
 
             Class<?> bmpCls = gfxClasses[0];
             Class<?> cfgCls = gfxClasses[1];
@@ -1989,46 +2375,71 @@ public class TurzxMonitorMain {
 
             Object argb8888 = cfgCls.getField("ARGB_8888").get(null);
             Method createBitmap = bmpCls.getMethod("createBitmap", int.class, int.class, cfgCls);
-            synchronized (ENCODE_LOCK) {
-                panelBitmap = createBitmap.invoke(null, Integer.valueOf(PANEL_JPEG_WIDTH), Integer.valueOf(PANEL_JPEG_HEIGHT), argb8888);
-                panelCanvas = canvasCls.getConstructor(bmpCls).newInstance(panelBitmap);
-                rotMatrix = matrixCls.getConstructor().newInstance();
+
+            if (paintFill == null) {
+                Object fillStyle = styleCls.getField("FILL").get(null);
+                Object strokeStyle = styleCls.getField("STROKE").get(null);
+
+                paintFill = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
+                paintCls.getMethod("setStyle", styleCls).invoke(paintFill, fillStyle);
+
+                paintStroke = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
+                paintCls.getMethod("setStyle", styleCls).invoke(paintStroke, strokeStyle);
+
+                paintShader = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
+                paintCls.getMethod("setStyle", styleCls).invoke(paintShader, fillStyle);
+
+                // 129 = ANTI_ALIAS_FLAG (1) | SUBPIXEL_TEXT_FLAG (128)
+                paintPublicBold = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
+                paintPublicMed = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
+                paintSysBold = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
+                paintSysMed = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
+
+                rectF = rectFCls.getConstructor().newInstance();
+                srcRect = rectCls.getConstructor().newInstance();
+                dstRect = rectCls.getConstructor().newInstance();
             }
 
-            Object fillStyle = styleCls.getField("FILL").get(null);
-            Object strokeStyle = styleCls.getField("STROKE").get(null);
+            ensureTypefacesLoaded(tfCls, paintCls);
+            ensurePanelSpritesLoaded(bmpCls, targetHudH);
 
-            paintFill = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
-            paintCls.getMethod("setStyle", styleCls).invoke(paintFill, fillStyle);
+            if (panelBitmap == null || allocatedPanelJpegWidth != targetPadW) {
+                synchronized (ENCODE_LOCK) {
+                    recycleBitmapQuietly(bmpCls, panelBitmap);
+                    panelBitmap = createBitmap.invoke(null, Integer.valueOf(targetPadW), Integer.valueOf(PANEL_JPEG_HEIGHT), argb8888);
+                    panelCanvas = canvasCls.getConstructor(bmpCls).newInstance(panelBitmap);
+                    if (rotMatrix == null) {
+                        rotMatrix = matrixCls.getConstructor().newInstance();
+                    }
+                    allocatedPanelJpegWidth = targetPadW;
+                }
+            }
 
-            paintStroke = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
-            paintCls.getMethod("setStyle", styleCls).invoke(paintStroke, strokeStyle);
-
-            paintShader = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(1));
-            paintCls.getMethod("setStyle", styleCls).invoke(paintShader, fillStyle);
-
-            // 129 = ANTI_ALIAS_FLAG (1) | SUBPIXEL_TEXT_FLAG (128)
-            paintPublicBold = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
-            paintPublicMed = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
-            paintSysBold = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
-            paintSysMed = paintCls.getConstructor(int.class).newInstance(Integer.valueOf(129));
-
-            rectF = rectFCls.getConstructor().newInstance();
-            srcRect = rectCls.getConstructor().newInstance();
-            dstRect = rectCls.getConstructor().newInstance();
-
-            ensureAssetsLoaded(tfCls, paintCls);
-
-            // Landscape buffers last: their presence marks the resources as complete
-            for (int i = 0; i < LANDSCAPE_BUFFERS; i++) {
-                Object bmp = createBitmap.invoke(null, Integer.valueOf(HUD_WIDTH), Integer.valueOf(HUD_HEIGHT), argb8888);
-                landscapeCanvases[i] = canvasCls.getConstructor(bmpCls).newInstance(bmp);
-                landscapeBitmaps[i] = bmp;
+            if (landscapeBitmaps[LANDSCAPE_BUFFERS - 1] == null || allocatedHudHeight != targetHudH) {
+                synchronized (ENCODE_LOCK) {
+                    for (int i = 0; i < LANDSCAPE_BUFFERS; i++) {
+                        recycleBitmapQuietly(bmpCls, landscapeBitmaps[i]);
+                        Object bmp = createBitmap.invoke(null, Integer.valueOf(HUD_WIDTH), Integer.valueOf(targetHudH), argb8888);
+                        landscapeCanvases[i] = canvasCls.getConstructor(bmpCls).newInstance(bmp);
+                        landscapeBitmaps[i] = bmp;
+                    }
+                }
+                recycleBitmapQuietly(bmpCls, roadBgBitmap);
+                roadBgBitmap = null;
+                roadBgCanvas = null;
+                roadBgKey = Integer.MIN_VALUE;
+                roadSurfShaders = null;
+                roadStripShaders = null;
+                roadTrajShaders = null;
+                roadTrajKey = 0;
+                artShader = null;
+                artShaderBitmap = null;
+                allocatedHudHeight = targetHudH;
             }
         }
 
         /**
-         * Render thread: draws the 1920x462 HUD frame into landscape buffer {@code buf}.
+         * Render thread: draws the 1920x462 or 1920x720 HUD frame into landscape buffer {@code buf}.
          * The caller guarantees the encoder is not reading that buffer at the same time.
          */
         public static synchronized boolean renderHudFrame(TelemetrySnapshot s, int buf) {
@@ -2049,10 +2460,25 @@ public class TurzxMonitorMain {
                 }
 
                 long tRender0 = System.nanoTime();
-                drawHudToCanvas(landscapeCanvases[buf], paintFill, paintStroke, paintShader,
-                        paintPublicBold, paintPublicMed, paintSysBold, paintSysMed,
-                        rectF, srcRect, dstRect,
-                        bmpCls, canvasCls, paintCls, alignCls, rectFCls, rectCls, pathCls, s);
+                boolean drawn = false;
+                if (LiveTuning.teslaDesign) {
+                    // v1.5.0 Tesla-style design; any failure falls back to the classic HUD for this frame
+                    try {
+                        TeslaHud.draw(landscapeCanvases[buf], s);
+                        drawn = true;
+                    } catch (Throwable t) {
+                        if (!teslaFailureLogged) {
+                            teslaFailureLogged = true;
+                            DebugManager.logError("RENDER", "TeslaHud.draw -> classic HUD", t);
+                        }
+                    }
+                }
+                if (!drawn) {
+                    drawHudToCanvas(landscapeCanvases[buf], paintFill, paintStroke, paintShader,
+                            paintPublicBold, paintPublicMed, paintSysBold, paintSysMed,
+                            rectF, srcRect, dstRect,
+                            bmpCls, canvasCls, paintCls, alignCls, rectFCls, rectCls, pathCls, s);
+                }
                 double ms = (System.nanoTime() - tRender0) / 1e6;
                 avgRenderMs = ema(avgRenderMs, ms);
                 FpsBench.addRender(ms);
@@ -2064,17 +2490,18 @@ public class TurzxMonitorMain {
 
         /**
          * Encoder thread: compresses landscape buffer {@code buf} (already drawn by {@link #renderHudFrame}) into:
-         * - result[0]: 1920x462 landscape JPEG (web /frame.jpg) — only when needLandscape, else null
-         * - result[1]: rotated 464x1920 portrait JPEG (TURZX CMD 101) — only when needPanel, else null
+         * - result[0]: 1920x462 or 1920x720 landscape JPEG (web /frame.jpg) — only when needLandscape, else null
+         * - result[1]: rotated 464x1920 / 480x1920 / 720x1920 portrait JPEG (TURZX CMD 101) — only when needPanel, else null
          * Encoding uses libjpeg-turbo NEON (rotation done in native code); Skia is the fallback.
          */
         public static byte[][] encodeHudFrame(int buf, int rotationDeg, int jpegQuality,
                                               boolean needPanel, boolean needLandscape) {
             if (!needPanel && !needLandscape) return null;
             if (buf < 0 || buf >= LANDSCAPE_BUFFERS || gfxClasses == null) return null;
-            Object src = landscapeBitmaps[buf];
-            if (src == null) return null;
             synchronized (ENCODE_LOCK) {
+                // Read the buffer under the lock: a panel switch re-creates (and recycles) the buffers under ENCODE_LOCK
+                Object src = landscapeBitmaps[buf];
+                if (src == null) return null;
                 try {
                     Class<?> bmpCls = gfxClasses[0];
                     Class<?> canvasCls = gfxClasses[2];
@@ -2085,6 +2512,7 @@ public class TurzxMonitorMain {
                     long tEncode0 = System.nanoTime();
                     int q = Math.max(50, Math.min(95, jpegQuality));
                     int nativeRot = (rotationDeg == 90) ? 90 : 270;
+                    int padW = activePanelJpegWidth;
                     byte[] landBytes = null;
                     byte[] panelBytes = null;
 
@@ -2094,7 +2522,7 @@ public class TurzxMonitorMain {
                             boolean inc = false;
                             if (LiveTuning.incrementalEncode && NativeJpeg.isIncrementalAvailable()) {
                                 int[] st = incStats;
-                                panelBytes = NativeJpeg.encodeIncremental(src, nativeRot, PANEL_JPEG_WIDTH, q, false, st);
+                                panelBytes = NativeJpeg.encodeIncremental(src, nativeRot, padW, q, false, st);
                                 if (panelBytes != null && st[2] > 0) {
                                     inc = true;
                                     avgDirtyRows = ema(avgDirtyRows, st[0]);
@@ -2102,7 +2530,7 @@ public class TurzxMonitorMain {
                                 }
                             }
                             if (!inc) {
-                                panelBytes = NativeJpeg.encode(src, nativeRot, PANEL_JPEG_WIDTH, q);
+                                panelBytes = NativeJpeg.encode(src, nativeRot, padW, q);
                                 avgDirtyRows = 0.0;
                                 lastTotalRows = 0;
                             }
@@ -2135,7 +2563,7 @@ public class TurzxMonitorMain {
                         return new byte[][]{landBytes, null};
                     }
 
-                    // Rotate 1920x462 landscape into 462x1920 at (0,0) on the 464x1920 macroblock-aligned panelBitmap
+                    int srcH = ((Integer) bmpCls.getMethod("getHeight").invoke(src)).intValue();
                     canvasCls.getMethod("drawColor", int.class).invoke(panelCanvas, Integer.valueOf(0xFF000000));
                     matrixCls.getMethod("reset").invoke(rotMatrix);
                     if (rotationDeg == 90) {
@@ -2145,7 +2573,7 @@ public class TurzxMonitorMain {
                     } else {
                         matrixCls.getMethod("postRotate", float.class).invoke(rotMatrix, Float.valueOf(90.0f));
                         matrixCls.getMethod("postTranslate", float.class, float.class)
-                                .invoke(rotMatrix, Float.valueOf((float) HUD_HEIGHT), Float.valueOf(0.0f));
+                                .invoke(rotMatrix, Float.valueOf((float) srcH), Float.valueOf(0.0f));
                     }
                     canvasCls.getMethod("drawBitmap", bmpCls, matrixCls, paintCls)
                             .invoke(panelCanvas, src, rotMatrix, null);
@@ -2178,7 +2606,8 @@ public class TurzxMonitorMain {
                 Method createBmp = bmpCls.getMethod("createBitmap", int.class, int.class, bmpCfgCls);
                 Method compressM = bmpCls.getMethod("compress", fmtCls, int.class, OutputStream.class);
 
-                Object blkBmp = createBmp.invoke(null, Integer.valueOf(PANEL_JPEG_WIDTH), Integer.valueOf(PANEL_JPEG_HEIGHT), argb8888);
+                int padW = activePanelJpegWidth;
+                Object blkBmp = createBmp.invoke(null, Integer.valueOf(padW), Integer.valueOf(PANEL_JPEG_HEIGHT), argb8888);
                 Object blkCanvas = canvasCls.getConstructor(bmpCls).newInstance(blkBmp);
                 canvasCls.getMethod("drawColor", int.class).invoke(blkCanvas, Integer.valueOf(0xFF000000));
                 ByteArrayOutputStream baos = new ByteArrayOutputStream(16384);
@@ -2278,6 +2707,19 @@ public class TurzxMonitorMain {
             drawBmpRect.invoke(c, srcBmp, sRect, dRect, null);
         }
 
+        private static void copySpriteBox(
+                Object c,
+                Object srcBmp,
+                Object sRect,
+                Object dRect,
+                Method setRect,
+                Method drawBmpRect,
+                int[] box
+        ) throws Exception {
+            if (srcBmp == null || box == null || box.length < 4) return;
+            copySpriteRect(c, srcBmp, sRect, dRect, setRect, drawBmpRect, box[0], box[1], box[2], box[3]);
+        }
+
         // Render-thread-only reflection caches (renderHudFrame is synchronized)
         private static Method[] hudMethods = null;
         private static Object[] hudAligns = null;
@@ -2297,6 +2739,692 @@ public class TurzxMonitorMain {
         private static Object artShader = null;
         private static int artBmpW = 0;
         private static int artBmpH = 0;
+
+        // =================================================================
+        // v1.5.0 Tesla-style HUD (design: turzx_redesign_tesla.html -> tools/make_tesla_assets.py -> design_tesla/)
+        // Static layer = tesla_base*.png, ON states are copied from tesla_active*.png, text anchors / rects come from
+        // tesla_layout_*.txt (panel pixels). Dynamic parts: road + cars, park photo + lamp glows, numbers, bars, chips.
+        // =================================================================
+        static final class TeslaHud {
+            static final class Field {
+                String key;
+                float x, y, size, maxW, unitSize, gap;
+                boolean bold, unitBold;
+                int color, unitColor;
+                char align = 'L';
+                String unit = "";
+            }
+
+            static final class Layout {
+                final HashMap<String, Field> fields = new HashMap<String, Field>();
+                final HashMap<String, float[]> rects = new HashMap<String, float[]>();
+                final HashMap<String, Float> sizes = new HashMap<String, Float>();
+
+                float[] rect(String name) {
+                    return rects.get(name);
+                }
+            }
+
+            /** Parses tesla_layout_*.txt (tab separated: F:key / R:name / S:name lines). Unknown lines are ignored. */
+            static Layout parseLayout(String text) {
+                Layout l = new Layout();
+                if (text == null) return l;
+                String[] lines = text.split("\n");
+                for (int i = 0; i < lines.length; i++) {
+                    String line = lines[i];
+                    if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
+                    if (line.isEmpty() || line.startsWith("#")) continue;
+                    String[] t = line.split("\t", -1);
+                    try {
+                        if (t[0].startsWith("F:") && t.length >= 13) {
+                            Field f = new Field();
+                            f.key = t[0].substring(2);
+                            f.x = Float.parseFloat(t[1]);
+                            f.y = Float.parseFloat(t[2]);
+                            f.size = Float.parseFloat(t[3]);
+                            f.bold = "1".equals(t[4]);
+                            f.color = (int) Long.parseLong(t[5], 16);
+                            f.align = t[6].isEmpty() ? 'L' : t[6].charAt(0);
+                            f.maxW = Float.parseFloat(t[7]);
+                            f.unit = t[8];
+                            f.unitSize = Float.parseFloat(t[9]);
+                            f.unitBold = "1".equals(t[10]);
+                            f.unitColor = (int) Long.parseLong(t[11], 16);
+                            f.gap = Float.parseFloat(t[12]);
+                            l.fields.put(f.key, f);
+                        } else if (t[0].startsWith("R:") && t.length >= 5) {
+                            float[] r = new float[t.length - 1];
+                            for (int k = 1; k < t.length; k++) r[k - 1] = Float.parseFloat(t[k]);
+                            l.rects.put(t[0].substring(2), r);
+                        } else if (t[0].startsWith("S:") && t.length >= 2) {
+                            l.sizes.put(t[0].substring(2), Float.valueOf(Float.parseFloat(t[1])));
+                        }
+                    } catch (RuntimeException ignored) {
+                        // malformed line: skip
+                    }
+                }
+                return l;
+            }
+
+            /** Brake lamp estimate (no pedal signal yet): decelerating, strong regeneration, or stopped in D/R. */
+            static boolean estimateBrake(String gear, int speedKph, double decelMps2, double totalKw) {
+                if (!"D".equals(gear) && !"R".equals(gear)) return false;
+                if (speedKph <= 0) return true;
+                return decelMps2 > 1.3 || totalKw < -15.0;
+            }
+
+            /** Headlamp status from tmHscanService getAFLS11_HeadLampStatus(): 0 = off, > 0 = lamps on (raw shown in the report). */
+            static boolean headLampsOn(int status) {
+                return status > 0;
+            }
+
+            // Sprite metrics (make_lamp_sprites.py / make_tesla_assets.py)
+            static final float EGO_CAR_W = 560f, EGO_CAR_H = 555f, EGO_MARGIN = 54.19f, EGO_IMG_W = 668f, EGO_IMG_H = 664f;
+            static final float[][] PARK_HEAD = {{345f, 210f}, {390f, 202f}};
+            static final float[] PARK_HEAD_FAR = {42f, 192f};
+            static final float[][] PARK_DRL = {{348f, 303f}, {356f, 348f}};
+            static final float[] PARK_REAR = {938f, 145f};
+
+            private static int loadedH = -1;
+            private static Layout L = null;
+            private static Object base, active, egoOff, egoTail, egoBrake, park, lead;
+            private static float parkW = 960f, parkH = 470f;
+            private static Object pFill, pStroke, pBmp, pAdd, pShade, rf, rs, rd, path;
+            private static Method mDrawBmpXY, mDrawBmpRR, mDrawBmpRRF, mDrawRoundRect, mDrawRect, mDrawOval, mDrawPath,
+                    mSave, mRestore, mClipPath, mRotate, mTranslate, mScale, mSetColor, mSetStrokeW, mSetShader,
+                    mSetRf, mSetRect, mPReset, mPMove, mPLine, mPClose, mPAddRRect, mMeasure, mSetTextSize, mSetTextAlign, mDrawText;
+            private static Constructor<?> cLinear, cRadial;
+            private static Object clamp, dirCW, alignLeft;
+            private static Object[] lineShaders = null;
+            private static float phase = 0f;
+            private static long lastNs = 0L;
+            private static int lastSpeed = -1;
+            private static long lastSpeedNs = 0L;
+            private static double decel = 0.0;
+
+            static boolean isReady() {
+                return L != null && base != null;
+            }
+
+            private static boolean ensure(int hudH) throws Exception {
+                if (loadedH == hudH && base != null) return true;
+                loadedH = hudH;
+                base = active = egoOff = egoTail = egoBrake = park = lead = null;
+                lineShaders = null;
+                String sfx = (hudH == HUD_HEIGHT_720) ? "_720" : "";
+                byte[] lay = readJarAssetBytes("tesla_layout_" + (hudH == HUD_HEIGHT_720 ? "123" : "92") + ".txt");
+                L = parseLayout(lay != null ? new String(lay, UTF8) : null);
+                Class<?> bfCls = Class.forName("android.graphics.BitmapFactory");
+                Method dec = bfCls.getMethod("decodeByteArray", byte[].class, int.class, int.class);
+                base = decodeAssetBitmap(dec, "tesla_base" + sfx + ".png");
+                active = decodeAssetBitmap(dec, "tesla_active" + sfx + ".png");
+                egoOff = decodeAssetBitmap(dec, "tesla_ego_off.png");
+                egoTail = decodeAssetBitmap(dec, "tesla_ego_tail.png");
+                egoBrake = decodeAssetBitmap(dec, "tesla_ego_brake.png");
+                park = decodeAssetBitmap(dec, "tesla_park.png");
+                lead = decodeAssetBitmap(dec, "tesla_lead.png");
+                if (park != null) {
+                    Class<?> bmpCls = gfxClasses[0];
+                    parkW = ((Integer) bmpCls.getMethod("getWidth").invoke(park)).intValue();
+                    parkH = ((Integer) bmpCls.getMethod("getHeight").invoke(park)).intValue();
+                }
+                if (mDrawBmpXY == null) initReflection();
+                DebugManager.logEvent("RENDER", "Tesla HUD assets (" + HUD_WIDTH + "x" + hudH + "): layout fields="
+                        + L.fields.size() + " rects=" + L.rects.size() + " base=" + (base != null) + " active=" + (active != null)
+                        + " ego=" + (egoOff != null) + " park=" + (park != null));
+                return base != null && !L.fields.isEmpty();
+            }
+
+            private static void initReflection() throws Exception {
+                Class<?> bmpCls = gfxClasses[0], canvasCls = gfxClasses[2], paintCls = gfxClasses[3], styleCls = gfxClasses[4],
+                        alignCls = gfxClasses[5], rectFCls = gfxClasses[7], rectCls = gfxClasses[8], pathCls = gfxClasses[9];
+                Class<?> shaderCls = Class.forName("android.graphics.Shader");
+                Class<?> tileCls = Class.forName("android.graphics.Shader$TileMode");
+                Class<?> dirCls = Class.forName("android.graphics.Path$Direction");
+                Class<?> xferCls = Class.forName("android.graphics.Xfermode");
+                Class<?> pdCls = Class.forName("android.graphics.PorterDuff$Mode");
+                Class<?> pdxCls = Class.forName("android.graphics.PorterDuffXfermode");
+                mDrawBmpXY = canvasCls.getMethod("drawBitmap", bmpCls, float.class, float.class, paintCls);
+                mDrawBmpRR = canvasCls.getMethod("drawBitmap", bmpCls, rectCls, rectCls, paintCls);
+                mDrawBmpRRF = canvasCls.getMethod("drawBitmap", bmpCls, rectCls, rectFCls, paintCls);
+                mDrawRoundRect = canvasCls.getMethod("drawRoundRect", rectFCls, float.class, float.class, paintCls);
+                mDrawRect = canvasCls.getMethod("drawRect", float.class, float.class, float.class, float.class, paintCls);
+                mDrawOval = canvasCls.getMethod("drawOval", rectFCls, paintCls);
+                mDrawPath = canvasCls.getMethod("drawPath", pathCls, paintCls);
+                mDrawText = canvasCls.getMethod("drawText", String.class, float.class, float.class, paintCls);
+                mSave = canvasCls.getMethod("save");
+                mRestore = canvasCls.getMethod("restoreToCount", int.class);
+                mClipPath = canvasCls.getMethod("clipPath", pathCls);
+                mRotate = canvasCls.getMethod("rotate", float.class, float.class, float.class);
+                mTranslate = canvasCls.getMethod("translate", float.class, float.class);
+                mScale = canvasCls.getMethod("scale", float.class, float.class);
+                mSetColor = paintCls.getMethod("setColor", int.class);
+                mSetStrokeW = paintCls.getMethod("setStrokeWidth", float.class);
+                mSetShader = paintCls.getMethod("setShader", shaderCls);
+                mMeasure = paintCls.getMethod("measureText", String.class);
+                mSetTextSize = paintCls.getMethod("setTextSize", float.class);
+                mSetTextAlign = paintCls.getMethod("setTextAlign", alignCls);
+                mSetRf = rectFCls.getMethod("set", float.class, float.class, float.class, float.class);
+                mSetRect = rectCls.getMethod("set", int.class, int.class, int.class, int.class);
+                mPReset = pathCls.getMethod("reset");
+                mPMove = pathCls.getMethod("moveTo", float.class, float.class);
+                mPLine = pathCls.getMethod("lineTo", float.class, float.class);
+                mPClose = pathCls.getMethod("close");
+                mPAddRRect = pathCls.getMethod("addRoundRect", rectFCls, float.class, float.class, dirCls);
+                cLinear = Class.forName("android.graphics.LinearGradient").getConstructor(
+                        float.class, float.class, float.class, float.class, int[].class, float[].class, tileCls);
+                cRadial = Class.forName("android.graphics.RadialGradient").getConstructor(
+                        float.class, float.class, float.class, int[].class, float[].class, tileCls);
+                clamp = tileCls.getField("CLAMP").get(null);
+                dirCW = dirCls.getField("CW").get(null);
+                alignLeft = alignCls.getField("LEFT").get(null);
+                Object fill = styleCls.getField("FILL").get(null), stroke = styleCls.getField("STROKE").get(null);
+                Method setStyle = paintCls.getMethod("setStyle", styleCls);
+                Constructor<?> pc = paintCls.getConstructor(int.class);
+                pFill = pc.newInstance(Integer.valueOf(1));
+                setStyle.invoke(pFill, fill);
+                pShade = pc.newInstance(Integer.valueOf(1));
+                setStyle.invoke(pShade, fill);
+                pStroke = pc.newInstance(Integer.valueOf(1));
+                setStyle.invoke(pStroke, stroke);
+                pBmp = pc.newInstance(Integer.valueOf(3)); // ANTI_ALIAS | FILTER_BITMAP
+                pAdd = pc.newInstance(Integer.valueOf(1));
+                setStyle.invoke(pAdd, fill);
+                Object add = pdCls.getField("ADD").get(null);
+                paintCls.getMethod("setXfermode", xferCls).invoke(pAdd, pdxCls.getConstructor(pdCls).newInstance(add));
+                rf = rectFCls.getConstructor().newInstance();
+                rs = rectCls.getConstructor().newInstance();
+                rd = rectCls.getConstructor().newInstance();
+                path = pathCls.getConstructor().newInstance();
+            }
+
+            // ---- small drawing helpers ----
+            private static void copyActive(Object c, float[] r) throws Exception {
+                if (active == null || r == null) return;
+                int x0 = Math.round(r[0]) - 1, y0 = Math.round(r[1]) - 1, x1 = Math.round(r[0] + r[2]) + 1, y1 = Math.round(r[1] + r[3]) + 1;
+                mSetRect.invoke(rs, x0, y0, x1, y1);
+                mSetRect.invoke(rd, x0, y0, x1, y1);
+                mDrawBmpRR.invoke(c, active, rs, rd, null);
+            }
+
+            private static void roundRect(Object c, float x0, float y0, float x1, float y1, float rad, int color) throws Exception {
+                mSetShader.invoke(pFill, new Object[]{null});
+                mSetColor.invoke(pFill, color);
+                mSetRf.invoke(rf, x0, y0, x1, y1);
+                mDrawRoundRect.invoke(c, rf, rad, rad, pFill);
+            }
+
+            private static void glow(Object c, float x, float y, float r, int rgb, float a) throws Exception {
+                if (r <= 0.5f) return;
+                int a0 = Math.max(0, Math.min(255, Math.round(a * 255)));
+                int a1 = Math.max(0, Math.min(255, Math.round(a * 0.45f * 255)));
+                Object sh = cRadial.newInstance(x, y, r, new int[]{(a0 << 24) | rgb, (a1 << 24) | rgb, rgb & 0x00FFFFFF},
+                        new float[]{0f, 0.35f, 1f}, clamp);
+                mSetShader.invoke(pAdd, sh);
+                mDrawRect.invoke(c, x - r, y - r, x + r, y + r, pAdd);
+                mSetShader.invoke(pAdd, new Object[]{null});
+            }
+
+            private static void shadow(Object c, float cx, float cy, float rx, float squash, float alpha) throws Exception {
+                int a = Math.round(alpha * 255);
+                Object sh = cRadial.newInstance(0f, 0f, rx, new int[]{a << 24, 0}, new float[]{0f, 1f}, clamp);
+                int sc = ((Integer) mSave.invoke(c)).intValue();
+                mTranslate.invoke(c, cx, cy);
+                mScale.invoke(c, 1f, squash);
+                mSetShader.invoke(pShade, sh);
+                mDrawRect.invoke(c, -rx, -rx, rx, rx, pShade);
+                mSetShader.invoke(pShade, new Object[]{null});
+                mRestore.invoke(c, sc);
+            }
+
+            private static void drawImage(Object c, Object bmp, float x, float y, float w, float h) throws Exception {
+                if (bmp == null) return;
+                mSetRf.invoke(rf, x, y, x + w, y + h);
+                mDrawBmpRRF.invoke(c, bmp, null, rf, pBmp);
+            }
+
+            private static Object textPaint(String t, boolean bold) {
+                return hasHangulOrCjk(t) ? (bold ? paintSysBold : paintSysMed) : (bold ? paintPublicBold : paintPublicMed);
+            }
+
+            private static float measure(String t, float size, boolean bold) throws Exception {
+                if (t == null || t.isEmpty()) return 0f;
+                Object p = textPaint(t, bold);
+                mSetTextSize.invoke(p, size);
+                return ((Float) mMeasure.invoke(p, t)).floatValue();
+            }
+
+            private static float text(Object c, String t, float x, float y, float size, boolean bold, int color) throws Exception {
+                if (t == null || t.isEmpty()) return 0f;
+                Object p = textPaint(t, bold);
+                mSetTextSize.invoke(p, size);
+                mSetTextAlign.invoke(p, alignLeft);
+                mSetColor.invoke(p, color);
+                mDrawText.invoke(c, t, x, y, p);
+                return ((Float) mMeasure.invoke(p, t)).floatValue();
+            }
+
+            private static String fit(String t, float size, boolean bold, float maxW) throws Exception {
+                if (t == null || maxW <= 0f || measure(t, size, bold) <= maxW) return t;
+                String s = t;
+                while (s.length() > 1 && measure(s + "…", size, bold) > maxW) s = s.substring(0, s.length() - 1);
+                return s + "…";
+            }
+
+            /** Draws a layout field (value + optional unit) honouring its alignment; color 0 = layout colour. */
+            private static void field(Object c, String key, String value, int color) throws Exception {
+                Field f = L.fields.get(key);
+                if (f == null || value == null || value.isEmpty()) return;
+                String v = fit(value, f.size, f.bold, f.maxW);
+                float wv = measure(v, f.size, f.bold);
+                boolean hasUnit = f.unit != null && !f.unit.isEmpty();
+                float wu = hasUnit ? measure(f.unit, f.unitSize, f.unitBold) : 0f;
+                float total = wv + (hasUnit ? f.gap + wu : 0f);
+                float x = (f.align == 'R') ? f.x - total : (f.align == 'C' ? f.x - total / 2f : f.x);
+                text(c, v, x, f.y, f.size, f.bold, color != 0 ? color : f.color);
+                if (hasUnit) text(c, f.unit, x + wv + f.gap, f.y, f.unitSize, f.unitBold, f.unitColor);
+            }
+
+            private static void barFill(Object c, float[] r, float x0, float x1, int color) throws Exception {
+                if (r == null || x1 - x0 < 0.5f) return;
+                roundRect(c, x0, r[1], x1, r[1] + r[3], r[3] / 2f, color);
+            }
+
+            // ---- frame ----
+            static void draw(Object c, TelemetrySnapshot s) throws Exception {
+                if (!ensure(activeHudHeight)) throw new IllegalStateException("Tesla HUD assets missing");
+                long now = System.nanoTime();
+                float dt = (lastNs == 0L) ? 0f : Math.min(0.2f, (now - lastNs) / 1e9f);
+                lastNs = now;
+                int spd = Math.max(0, s.carrotSpeedKph);
+                phase = (phase + (spd / 3.6f) * dt) % 7000f;
+                if (lastSpeed >= 0 && now - lastSpeedNs > 150_000_000L) {
+                    double dv = (lastSpeed - spd) / 3.6, dts = (now - lastSpeedNs) / 1e9;
+                    decel = decel * 0.6 + (dv / dts) * 0.4;
+                    lastSpeed = spd;
+                    lastSpeedNs = now;
+                } else if (lastSpeed < 0) {
+                    lastSpeed = spd;
+                    lastSpeedNs = now;
+                }
+                String gear = (s.gearPos != null && !s.gearPos.isEmpty()) ? s.gearPos : "D";
+                boolean head = headLampsOn(s.headLampStatus);
+                double totalKw = s.getTotalPowerKw();
+                boolean brake = estimateBrake(gear, spd, decel, totalKw);
+
+                mDrawBmpXY.invoke(c, base, 0f, 0f, null);
+
+                // 1. Driving visualisation
+                float[] vz = L.rect("viz");
+                boolean parked = "P".equals(gear);
+                if (vz != null) {
+                    int sc = ((Integer) mSave.invoke(c)).intValue();
+                    mPReset.invoke(path);
+                    mSetRf.invoke(rf, vz[0], vz[1], vz[0] + vz[2], vz[1] + vz[3]);
+                    float rad = vz.length > 4 ? vz[4] : 28f;
+                    mPAddRRect.invoke(path, rf, rad, rad, dirCW);
+                    mClipPath.invoke(c, path);
+                    if (parked) drawParked(c, vz, head, brake);
+                    else drawRoad(c, s, vz, gear, spd, head, brake);
+                    mRestore.invoke(c, sc);
+                }
+                drawVizOverlays(c, s, vz, gear, spd, parked);
+                drawBattery(c, s, totalKw);
+                drawMedia(c, s);
+                drawClimate(c, s);
+            }
+
+            private static void drawRoad(Object c, TelemetrySnapshot s, float[] vz, String gear, int spd,
+                                         boolean head, boolean brake) throws Exception {
+                float vx = vz[0], vy = vz[1], vw = vz[2], vh = vz[3];
+                final float horizon = vy + vh * 0.46f, u0 = vx + vw * 0.52f, kx = vw * 0.58f, near = 5.2f, bottom = vy + vh;
+                float curve = 0f;
+                if (s.pathPoly != null && s.pathPoly.length >= 3) curve = Math.max(-0.0025f, Math.min(0.0025f, s.pathPoly[2]));
+                if (Math.abs(curve) < 1e-6f && Math.abs(s.steeringAngleDeg) > 0.05f) {
+                    curve = Math.max(-0.0025f, Math.min(0.0025f, -s.steeringAngleDeg * 0.000025f));
+                }
+                float[] xs = new float[41];
+                for (int i = 0; i <= 40; i++) xs[i] = near + 90f * (i / 40f) * (i / 40f);
+                if (lineShaders == null) {
+                    // distance fade = vertical gradient (rows only depend on the panel geometry)
+                    int[][] rgbA = {{160, 164, 172, 140}, {230, 232, 236, 140}, {245, 245, 247, 230}};
+                    lineShaders = new Object[3];
+                    for (int k = 0; k < 3; k++) {
+                        int col = (rgbA[k][0] << 16) | (rgbA[k][1] << 8) | rgbA[k][2];
+                        lineShaders[k] = cLinear.newInstance(0f, bottom, 0f, horizon,
+                                new int[]{(rgbA[k][3] << 24) | col, (Math.round(rgbA[k][3] * 0.08f) << 24) | col},
+                                new float[]{0f, 1f}, clamp);
+                    }
+                }
+                float[][] styles = {{5.4f, 0.06f, 0f}, {3.6f, 0.055f, 1f}, {1.8f, 0.07f, 0f}};
+                for (int k = 0; k < 3; k++) {
+                    mPReset.invoke(path);
+                    boolean dashed = styles[k][2] > 0f;
+                    for (int side = -1; side <= 1; side += 2) {
+                        float lat = side * styles[k][0], w = styles[k][1];
+                        for (int i = 0; i < xs.length - 1; i++) {
+                            float x0 = xs[i], x1 = xs[i + 1];
+                            if (dashed && (((int) Math.floor((x0 + phase) / 3.5f)) & 1) != 0) continue;
+                            float c0 = curve * x0 * x0 * 0.5f, c1 = curve * x1 * x1 * 0.5f;
+                            float v0 = horizon + (bottom - horizon) * (near / x0), v1 = horizon + (bottom - horizon) * (near / x1);
+                            mPMove.invoke(path, u0 + kx * ((lat - w + c0) / x0), v0);
+                            mPLine.invoke(path, u0 + kx * ((lat + w + c0) / x0), v0);
+                            mPLine.invoke(path, u0 + kx * ((lat + w + c1) / x1), v1);
+                            mPLine.invoke(path, u0 + kx * ((lat - w + c1) / x1), v1);
+                            mPClose.invoke(path);
+                        }
+                    }
+                    mSetShader.invoke(pFill, lineShaders[k]);
+                    mDrawPath.invoke(c, path, pFill);
+                }
+                mSetShader.invoke(pFill, new Object[]{null});
+
+                boolean hasLead = s.hasLeadCar && s.leadDistM > 0.5f;
+                float leadX = hasLead ? 6.2f + (float) Math.pow(Math.max(6.0, s.leadDistM), 0.62) * 1.05f + 4f : 0f;
+                boolean crit = hasLead && s.leadDistM <= 12f, close = hasLead && s.leadDistM <= 18f;
+                if ("D".equals(gear) || "R".equals(gear)) {
+                    float end = hasLead ? leadX - 1.5f : 60f;
+                    int rgb = crit ? 0xE31937 : (close ? 0xF5A623 : (s.carrotCruiseKph > 0 ? 0x3E6AE1 : 0xC8CDD7));
+                    int a0 = (s.carrotCruiseKph > 0 || close) ? 140 : 46;
+                    float vEnd = horizon + (bottom - horizon) * (near / end);
+                    mPReset.invoke(path);
+                    for (int i = 0; i < xs.length && xs[i] <= end; i++) {
+                        float x = xs[i], cc = curve * x * x * 0.5f, v = horizon + (bottom - horizon) * (near / x);
+                        if (i == 0) mPMove.invoke(path, u0 + kx * ((-1.65f + cc) / x), v);
+                        else mPLine.invoke(path, u0 + kx * ((-1.65f + cc) / x), v);
+                    }
+                    for (int i = xs.length - 1; i >= 0; i--) {
+                        if (xs[i] > end) continue;
+                        float x = xs[i], cc = curve * x * x * 0.5f, v = horizon + (bottom - horizon) * (near / x);
+                        mPLine.invoke(path, u0 + kx * ((1.65f + cc) / x), v);
+                    }
+                    mPClose.invoke(path);
+                    mSetShader.invoke(pFill, cLinear.newInstance(0f, bottom, 0f, vEnd,
+                            new int[]{(a0 << 24) | rgb, rgb}, new float[]{0f, 1f}, clamp));
+                    mDrawPath.invoke(c, path, pFill);
+                    mSetShader.invoke(pFill, new Object[]{null});
+                }
+                if (hasLead && lead != null) {
+                    float cc = curve * leadX * leadX * 0.5f;
+                    float cx = u0 + kx * (cc / leadX), by = horizon + (bottom - horizon) * (near / leadX);
+                    float w = Math.abs(kx * (1.9f / leadX));
+                    float fullW = w * (200f / 172f), fullH = fullW * 0.8f;
+                    drawImage(c, lead, cx - fullW / 2f, by - fullH * (158f / 160f), fullW, fullH);
+                    String tag = Math.round(s.leadDistM) + " m";
+                    float size = vw / 30f;
+                    float tw = measure(tag, size, true);
+                    text(c, tag, cx - tw / 2f, by - fullH * (137f / 160f) - vw / 90f, size, true,
+                            crit ? 0xFFFF4D63 : (close ? 0xFFF5A623 : 0xFFC9CBD1));
+                }
+                // ego car: lamp variant
+                Object ego = brake ? egoBrake : (head ? egoTail : egoOff);
+                if (ego != null) {
+                    float w = Math.min(vw * 0.165f, vh * 0.27f), k = (w * 1.13f) / EGO_CAR_W;
+                    float cx = u0, by = vy + vh * 0.985f, bodyH = EGO_CAR_H * k;
+                    shadow(c, cx, by - bodyH * 0.02f, EGO_CAR_W * k * 0.58f, 0.14f, 0.55f);
+                    drawImage(c, ego, cx - (EGO_CAR_W / 2f + EGO_MARGIN) * k, by - (EGO_CAR_H + EGO_MARGIN) * k, EGO_IMG_W * k, EGO_IMG_H * k);
+                }
+            }
+
+            private static void drawParked(Object c, float[] vz, boolean head, boolean brake) throws Exception {
+                float vx = vz[0], vy = vz[1], vw = vz[2], vh = vz[3];
+                glow(c, vx + vw * 0.58f, vy + vh * 0.9f, vw * 0.55f, 0xFFFFFF, 0.10f);
+                if (park == null) return;
+                float w = Math.min(vw * 0.78f, vh * 1.36f), h = w * parkH / parkW;
+                float cx = vx + vw * 0.58f, bottom = vy + vh * 0.96f, left = cx - w / 2f, top = bottom - h, k = w / parkW;
+                shadow(c, cx, bottom - h * 0.05f, w * 0.52f, 0.12f, 0.65f);
+                if (head) {
+                    int sc = ((Integer) mSave.invoke(c)).intValue();
+                    mTranslate.invoke(c, left + 120f * k, bottom - 6f * k);
+                    mScale.invoke(c, 1f, 0.22f);
+                    glow(c, 0f, 0f, w * 0.5f, 0xDCEBFF, 0.22f);
+                    mRestore.invoke(c, sc);
+                }
+                drawImage(c, park, left, top, w, h);
+                if (head) {
+                    for (int i = 0; i < PARK_HEAD.length; i++) {
+                        float x = left + PARK_HEAD[i][0] * k, y = top + PARK_HEAD[i][1] * k;
+                        glow(c, x, y, 70f * k, 0xCDE1FF, 0.35f);
+                        glow(c, x, y, 20f * k, 0xF5FAFF, 0.95f);
+                    }
+                    glow(c, left + PARK_HEAD_FAR[0] * k, top + PARK_HEAD_FAR[1] * k, 42f * k, 0xCDE1FF, 0.35f);
+                    glow(c, left + PARK_HEAD_FAR[0] * k, top + PARK_HEAD_FAR[1] * k, 13f * k, 0xF5FAFF, 0.9f);
+                    for (int i = 0; i < PARK_DRL.length; i++) {
+                        glow(c, left + PARK_DRL[i][0] * k, top + PARK_DRL[i][1] * k, 40f * k, 0xBEE1FF, 0.4f);
+                    }
+                }
+                float rx = left + PARK_REAR[0] * k, ry = top + PARK_REAR[1] * k;
+                if (brake) {
+                    glow(c, rx, ry, 110f * k, 0xFF192D, 0.55f);
+                    glow(c, rx, ry, 45f * k, 0xFF3246, 0.85f);
+                    glow(c, rx, ry, 16f * k, 0xFFAAB4, 1.0f);
+                } else if (head) {
+                    glow(c, rx, ry, 42f * k, 0xFF1E32, 0.22f);
+                    glow(c, rx, ry, 16f * k, 0xFF4655, 0.45f);
+                }
+            }
+
+            private static void drawVizOverlays(Object c, TelemetrySnapshot s, float[] vz, String gear, int spd, boolean parked)
+                    throws Exception {
+                copyActive(c, L.rect("prnd" + gear));
+                field(c, "speed", String.valueOf(spd), 0);
+                // speed limit: camera event -> red ring, otherwise the current road limit -> blue ring
+                boolean camera = !(s.carrotSdiType < 0 && s.carrotSdiDistM <= 0);
+                int limit = Math.max(0, s.carrotSdiSpeedLimit);
+                float[] lr = L.rect("limit");
+                if (limit > 0 && lr != null) {
+                    float cx = lr[0] + lr[2] / 2f, cy = lr[1] + lr[3] / 2f, r = lr[2] / 2f;
+                    mSetRf.invoke(rf, cx - r, cy - r, cx + r, cy + r);
+                    mSetShader.invoke(pFill, new Object[]{null});
+                    mSetColor.invoke(pFill, 0xFFFFFFFF);
+                    mDrawOval.invoke(c, rf, pFill);
+                    float sw = r * 0.23f;
+                    mSetStrokeW.invoke(pStroke, sw);
+                    mSetColor.invoke(pStroke, camera ? 0xFFE31937 : 0xFF3E6AE1);
+                    mSetRf.invoke(rf, cx - r + sw / 2f, cy - r + sw / 2f, cx + r - sw / 2f, cy + r - sw / 2f);
+                    mDrawOval.invoke(c, rf, pStroke);
+                    field(c, "limit", String.valueOf(limit), 0);
+                }
+                // steering wheel: rotates with the real steering angle (+ = left = counter-clockwise)
+                float[] wr = L.rect("wheel");
+                if (wr != null) {
+                    float cx = wr[0] + wr[2] / 2f, cy = wr[1] + wr[3] / 2f, u = wr[2] / 24f;
+                    int col = s.carrotCruiseKph > 0 ? 0xFF6E95FF : 0xFF5A5D64;
+                    int sc = ((Integer) mSave.invoke(c)).intValue();
+                    mRotate.invoke(c, Math.max(-540f, Math.min(540f, -s.steeringAngleDeg)), cx, cy);
+                    mSetColor.invoke(pStroke, col);
+                    mSetStrokeW.invoke(pStroke, 2.2f * u);
+                    mSetRf.invoke(rf, cx - 9 * u, cy - 9 * u, cx + 9 * u, cy + 9 * u);
+                    mDrawOval.invoke(c, rf, pStroke);
+                    mSetRf.invoke(rf, cx - 2.2f * u, cy - 2.2f * u, cx + 2.2f * u, cy + 2.2f * u);
+                    mDrawOval.invoke(c, rf, pStroke);
+                    mPReset.invoke(path);
+                    mPMove.invoke(path, cx - 8.5f * u, cy - 1.5f * u);
+                    mPLine.invoke(path, cx - 2.2f * u, cy - 1.5f * u);
+                    mPMove.invoke(path, cx + 2.2f * u, cy - 1.5f * u);
+                    mPLine.invoke(path, cx + 8.5f * u, cy - 1.5f * u);
+                    mPMove.invoke(path, cx, cy + 2.2f * u);
+                    mPLine.invoke(path, cx, cy + 9f * u);
+                    mDrawPath.invoke(c, path, pStroke);
+                    mRestore.invoke(c, sc);
+                }
+                if (s.carrotCruiseKph > 0) field(c, "cruise", String.valueOf(s.carrotCruiseKph), 0);
+                if (camera && s.carrotSdiDistM > 0) {
+                    int d = s.carrotSdiDistM;
+                    String ds = d >= 1000 ? String.format(Locale.US, "%.1f km", d / 1000.0) : (d + " m");
+                    boolean section = s.carrotSdiType == 2 || s.carrotSdiType == 3 || s.carrotSdiType == 4 || d >= 800;
+                    field(c, "sect", section ? ("구간단속 " + ds + " · 평균 " + Math.max(spd, limit)) : ("과속카메라 " + ds), 0);
+                }
+                // turn-by-turn card (hidden without a destination)
+                boolean tbt = s.carrotTbtDistM > 0 && vz != null;
+                if (tbt) drawTbt(c, s, vz);
+                drawTpms(c, s, vz, parked && !tbt);
+                if (!parked) {
+                    Field lf = L.fields.get("lane");
+                    String lane = s.laneConfidencePct > 0f ? String.format(Locale.US, "%.0f%%", s.laneConfidencePct)
+                            : (s.carrotConnected ? (s.carrotActive ? "ON" : "대기") : "--");
+                    if (lf != null) {
+                        float pw = measure("차선 ", lf.size, false);
+                        text(c, "차선 ", lf.x - pw, lf.y, lf.size, false, 0xFF5A5D64);
+                        field(c, "lane", lane, 0);
+                    }
+                }
+            }
+
+            private static void drawTbt(Object c, TelemetrySnapshot s, float[] vz) throws Exception {
+                float[] tr = L.rect("tbt");
+                Field roadF = L.fields.get("navRoad");
+                Float ds = L.sizes.get("tbtDist");
+                if (tr == null || roadF == null || ds == null) return;
+                float distSize = ds.floatValue(), roadSize = roadF.size;
+                int d = s.carrotTbtDistM;
+                String num = d >= 1000 ? String.format(Locale.US, "%.1f", d / 1000.0) : String.valueOf(d);
+                String unit = d >= 1000 ? "km" : "m";
+                String road = s.carrotTbtRoad != null ? s.carrotTbtRoad : "";
+                if (road.contains("·")) {
+                    String[] parts = road.split("·");
+                    road = parts[parts.length - 1].trim();
+                }
+                road = fit(road, roadSize, false, distSize * 6f);
+                String next = s.carrotTbtDistNextM > 0 ? (s.carrotTbtDistNextM >= 1000
+                        ? String.format(Locale.US, "+%.1fkm", s.carrotTbtDistNextM / 1000.0) : ("+" + s.carrotTbtDistNextM + "m")) : "";
+                float icon = distSize * 1.3f, pad = distSize * 0.45f;
+                float wNum = measure(num, distSize, true) + distSize * 0.08f + measure(unit, distSize * 0.55f, false);
+                float wRoad = measure(road, roadSize, false) + (next.isEmpty() ? 0f : roadSize * 0.4f + measure(next, roadSize, true));
+                float wText = Math.max(wNum, wRoad);
+                float h = tr[3], x1 = vz[0] + vz[2] - 20f, y0 = vz[1] + 20f, x0 = x1 - (pad * 2f + icon + pad * 0.8f + wText);
+                roundRect(c, x0, y0, x1, y0 + h, tr.length > 4 ? tr[4] : 24f, 0xDB0E0F12);
+                mSetStrokeW.invoke(pStroke, 2f);
+                mSetColor.invoke(pStroke, 0xFF2A2C31);
+                mSetRf.invoke(rf, x0, y0, x1, y0 + h);
+                float rr = tr.length > 4 ? tr[4] : 24f;
+                mDrawRoundRect.invoke(c, rf, rr, rr, pStroke);
+                // generic navigation arrow (turn direction is not available from the TBT feed)
+                float ix = x0 + pad + icon / 2f, iy = y0 + h / 2f, u = icon / 2f;
+                mPReset.invoke(path);
+                mPMove.invoke(path, ix, iy - u * 0.9f);
+                mPLine.invoke(path, ix + u * 0.7f, iy + u * 0.8f);
+                mPLine.invoke(path, ix, iy + u * 0.4f);
+                mPLine.invoke(path, ix - u * 0.7f, iy + u * 0.8f);
+                mPClose.invoke(path);
+                mSetShader.invoke(pFill, new Object[]{null});
+                mSetColor.invoke(pFill, 0xFFF5F5F7);
+                mDrawPath.invoke(c, path, pFill);
+                float tx = ix + icon / 2f + pad * 0.8f;
+                float base1 = y0 + h * 0.52f, base2 = y0 + h * 0.84f;
+                float w1 = text(c, num, tx, base1, distSize, true, 0xFFF5F5F7);
+                text(c, unit, tx + w1 + distSize * 0.08f, base1, distSize * 0.55f, false, 0xFF8E9099);
+                float w2 = text(c, road, tx, base2, roadSize, false, 0xFF8E9099);
+                if (!next.isEmpty()) text(c, next, tx + w2 + roadSize * 0.4f, base2, roadSize, true, 0xFFF5F5F7);
+            }
+
+            private static void drawTpms(Object c, TelemetrySnapshot s, float[] vz, boolean top) throws Exception {
+                float[] tr = L.rect("tpms");
+                Float ts = L.sizes.get("tpms");
+                if (tr == null || ts == null || vz == null) return;
+                float w = tr[2], h = tr[3], x0 = tr[0], y0 = top ? vz[1] + 20f : tr[1], rad = tr.length > 4 ? tr[4] : 20f;
+                roundRect(c, x0, y0, x0 + w, y0 + h, rad, 0xDB0E0F12);
+                mSetStrokeW.invoke(pStroke, 2f);
+                mSetColor.invoke(pStroke, 0xFF2A2C31);
+                mSetRf.invoke(rf, x0, y0, x0 + w, y0 + h);
+                mDrawRoundRect.invoke(c, rf, rad, rad, pStroke);
+                float size = ts.floatValue(), cx = x0 + w / 2f, carW = size * 0.95f, carH = h * 0.5f, carTop = y0 + h * 0.12f;
+                mSetColor.invoke(pStroke, 0xFF8E9099);
+                mSetStrokeW.invoke(pStroke, 2.4f);
+                mSetRf.invoke(rf, cx - carW / 2f, carTop, cx + carW / 2f, carTop + carH);
+                mDrawRoundRect.invoke(c, rf, carW * 0.42f, carW * 0.42f, pStroke);
+                float[] psi = {s.tpmsFlPsi, s.tpmsFrPsi, s.tpmsRlPsi, s.tpmsRrPsi};
+                float gap = size * 0.3f, row1 = carTop + carH * 0.42f, row2 = carTop + carH * 0.95f;
+                for (int i = 0; i < 4; i++) {
+                    String t = String.format(Locale.US, "%.0f", psi[i]);
+                    boolean warn = psi[i] > 0f && psi[i] < 31f;
+                    float tw = measure(t, size, true);
+                    float x = (i % 2 == 0) ? cx - carW / 2f - gap - tw : cx + carW / 2f + gap;
+                    text(c, t, x, i < 2 ? row1 : row2, size, true, warn ? 0xFFF5A623 : 0xFFF5F5F7);
+                }
+                float pw = measure("psi", size * 0.36f, false);
+                text(c, "psi", cx - pw / 2f, y0 + h - size * 0.3f, size * 0.36f, false, 0xFF5A5D64);
+            }
+
+            private static void drawBattery(Object c, TelemetrySnapshot s, double totalKw) throws Exception {
+                double soc = s.getEffectiveSocPct();
+                if (s.remainEnergyKwh > 0.0) field(c, "remain", String.format(Locale.US, "· 잔여 %.1f kWh", s.remainEnergyKwh), 0);
+                if (soc >= 0.0) field(c, "soc", String.format(Locale.US, "%.1f", soc), soc < 20.0 ? 0xFFF5A623 : 0);
+                int dte = s.dteKm;
+                if (isValidDteValue(dte)) field(c, "dte", String.valueOf(dte), 0);
+                if (s.avgEconomyKmKwh > 0.0) field(c, "eff", String.format(Locale.US, "%.1f km/kWh", s.avgEconomyKmKwh), 0);
+                float[] pr = L.rect("pill");
+                if (pr != null && soc >= 0.0) barFill(c, pr, pr[0], pr[0] + pr[2] * (float) Math.min(1.0, soc / 100.0), soc < 20.0 ? 0xFFF5A623 : 0xFFF5F5F7);
+                if (s.bmsSocPct >= 0.0) field(c, "bms", String.format(Locale.US, "%.1f", s.bmsSocPct), 0);
+                if (s.sohPct >= 0.0) field(c, "soh", String.format(Locale.US, "%.1f", s.sohPct), 0);
+                Integer bt = s.getRepresentativeBattTempC();
+                if (bt != null) field(c, "batT", String.format(Locale.US, "%.1f", bt.doubleValue()), 0);
+                if (s.cellMaxVoltV > 0.0) field(c, "cellMax", String.format(Locale.US, "%.2f", s.cellMaxVoltV), 0);
+                if (s.cellMinVoltV > 0.0) field(c, "cellMin", String.format(Locale.US, "%.2f", s.cellMinVoltV), 0);
+                if (s.cellDiffMv >= 0) field(c, "cellDiff", String.valueOf(s.cellDiffMv), 0);
+                boolean regen = totalKw < -0.05;
+                String kw = (totalKw > 0.05 ? "+" : (regen ? "−" : "")) + String.format(Locale.US, "%.1f", Math.abs(totalKw));
+                field(c, "kw", kw, regen ? 0xFF3DD68C : 0);
+                field(c, "pwrLbl", regen ? "회생 제동" : (totalKw > 0.05 ? "출력" : "대기"), 0);
+                float[] wr = L.rect("pwr");
+                if (wr != null) {
+                    float zero = wr[0] + wr[2] * 0.28f;
+                    if (totalKw >= 0.0) barFill(c, wr, zero, zero + (wr[2] * 0.72f) * (float) Math.min(1.0, totalKw / 150.0), 0xFFF5F5F7);
+                    else {
+                        float x0 = zero - (wr[2] * 0.28f) * (float) Math.min(1.0, -totalKw / 60.0);
+                        barFill(c, wr, x0, zero, 0xFF3DD68C);
+                    }
+                    roundRect(c, zero - 2f, wr[1] - 6f, zero + 2f, wr[1] + wr[3] + 6f, 2f, 0xFFC9CBD1);
+                }
+            }
+
+            private static void drawMedia(Object c, TelemetrySnapshot s) throws Exception {
+                float[] ar = L.rect("art");
+                if (ar != null && s.albumArtBitmap != null && gfxClasses[0].isInstance(s.albumArtBitmap)) {
+                    int sc = ((Integer) mSave.invoke(c)).intValue();
+                    mPReset.invoke(path);
+                    mSetRf.invoke(rf, ar[0], ar[1], ar[0] + ar[2], ar[1] + ar[3]);
+                    float rad = ar.length > 4 ? ar[4] : 16f;
+                    mPAddRRect.invoke(path, rf, rad, rad, dirCW);
+                    mClipPath.invoke(c, path);
+                    drawImage(c, s.albumArtBitmap, ar[0], ar[1], ar[2], ar[3]);
+                    mRestore.invoke(c, sc);
+                }
+                boolean real = s.mediaTitle != null && !s.mediaTitle.isEmpty() && !"미디어 재생 대기 중".equals(s.mediaTitle);
+                field(c, "src", s.mediaSource, 0);
+                field(c, "title", real ? s.mediaTitle : "미디어 재생 대기 중", 0);
+                String sub = (s.mediaArtist != null) ? s.mediaArtist : "";
+                if (s.mediaAlbum != null && !s.mediaAlbum.isEmpty() && !s.mediaAlbum.equals(s.mediaArtist)) {
+                    sub = sub.isEmpty() ? s.mediaAlbum : (sub + " · " + s.mediaAlbum);
+                }
+                field(c, "artist", real ? sub : "", 0);
+                int pos = real ? Math.max(0, s.mediaPositionSec) : 0, dur = real ? Math.max(0, s.mediaDurationSec) : 0;
+                float[] pr = L.rect("prog");
+                if (pr != null && dur > 0) barFill(c, pr, pr[0], pr[0] + pr[2] * Math.min(1f, pos / (float) dur), 0xFFF5F5F7);
+                field(c, "pos", (pos / 60) + ":" + String.format(Locale.US, "%02d", pos % 60), 0);
+                field(c, "dur", dur > 0 ? ("-" + ((dur - pos) / 60) + ":" + String.format(Locale.US, "%02d", Math.max(0, dur - pos) % 60)) : "--:--", 0);
+            }
+
+            private static void drawClimate(Object c, TelemetrySnapshot s) throws Exception {
+                boolean on = s.hvacOn;
+                int tone = !on ? 0xFF5A5D64 : (s.hvacHeat ? 0xFFFF9A5C : (s.hvacAc ? 0xFF7EA6FF : 0xFFF5F5F7));
+                field(c, "dr", on ? String.format(Locale.US, "%.1f°", s.hvacDrTempC) : "OFF", tone);
+                if (on && s.hvacAuto) copyActive(c, L.rect("auto"));
+                int bm = s.hvacBlowerMode;
+                if (on && (bm == 1 || bm == 2)) copyActive(c, L.rect("airFace"));
+                if (on && (bm == 2 || bm == 3 || bm == 4)) copyActive(c, L.rect("airFoot"));
+                int step = on ? Math.max(0, Math.min(7, s.hvacBlowerStep)) : 0;
+                for (int i = 0; i < step; i++) copyActive(c, L.rect("fan" + i));
+                field(c, "fanNum", on ? String.valueOf(step) : "-", 0);
+                field(c, "inT", String.format(Locale.US, "%.1f°", s.inCarTempC), 0);
+                field(c, "outT", String.format(Locale.US, "%.1f°", s.outdoorTempC), 0);
+                if (on && s.hvacAc) copyActive(c, L.rect("chip_ac"));
+                if (on && s.hvacHeat) copyActive(c, L.rect("chip_heat"));
+                if (on && (s.hvacFrontDefog || bm == 5)) copyActive(c, L.rect("chip_fdef"));
+                if (s.hvacRearDefog) copyActive(c, L.rect("chip_rdef"));
+                if (s.hvacRecirc) copyActive(c, L.rect("chip_recirc"));
+            }
+        }
 
         private static void drawHudToCanvas(
                 Object c,
@@ -2366,14 +3494,16 @@ public class TurzxMonitorMain {
             Method drawBmpRect = hudMethods[14];
             Method drawBmpRectF = hudMethods[15];
 
+            HudLayout L = (activeHudHeight == HUD_HEIGHT_720) ? LAYOUT_720 : LAYOUT_462;
+
             // =================================================================
-            // 1. BASE CHROMIUM LAYER (1920x462) FROM turzx_92_mockup.html
+            // 1. BASE CHROMIUM LAYER (1920x462 OR 1920x720) FROM turzx_92_mockup.html
             // =================================================================
             if (bmpBaseShell != null) {
                 drawBmpXY.invoke(c, bmpBaseShell, Float.valueOf(0f), Float.valueOf(0f), null);
             } else {
                 setColor.invoke(pFill, Integer.valueOf(0xFF171719));
-                drawRect.invoke(c, 0f, 0f, 1920f, 462f, pFill);
+                drawRect.invoke(c, 0f, 0f, 1920f, (float) L.hudH, pFill);
             }
 
             // =================================================================
@@ -2383,10 +3513,10 @@ public class TurzxMonitorMain {
             double soc = s.getEffectiveSocPct();
             String socStr = (soc >= 0.0) ? String.format(Locale.US, "%.1f", soc) : "78.4";
             float socPct = (soc >= 0.0) ? (float) Math.max(0.0, Math.min(100.0, soc)) : 78.4f;
-            drawValuePlusUnit(c, socStr, "%", 30f, 152f, 52f, 0xFFFFFFFF, 24f, 0xFF8A8C92, 4f,
+            drawValuePlusUnit(c, socStr, "%", 30f, L.socY, L.evBigFs, 0xFFFFFFFF, 24f, 0xFF8A8C92, 4f,
                     alignLeft, pPubBold, pPubMed, pSysBold, pSysMed,
                     setColor, setTextSize, setTextAlign, measureText, drawText);
-            drawBarFillOnly(c, rf, pFill, setRf, drawRoundRect, setColor, 30f, 208f, 163f, 8f, socPct, 0xFF4A8AD6);
+            drawBarFillOnly(c, rf, pFill, setRf, drawRoundRect, setColor, 30f, L.socBarY, 163f, L.evBarH, socPct, 0xFF4A8AD6);
 
             // Cell [1,2] 주행가능거리 + 전비
             String distUnit = s.distanceUnitMiles ? "mi" : "km";
@@ -2397,14 +3527,14 @@ public class TurzxMonitorMain {
                 effectiveDte = (int) Math.round(kwh * econ);
             }
             String dteStr = isValidDteValue(effectiveDte) ? String.valueOf(effectiveDte) : "384";
-            drawValuePlusUnit(c, dteStr, distUnit, 227f, 138f, 52f, 0xFFFFFFFF, 24f, 0xFF8A8C92, 4f,
+            drawValuePlusUnit(c, dteStr, distUnit, 227f, L.dteY, L.evBigFs, 0xFFFFFFFF, 24f, 0xFF8A8C92, 4f,
                     alignLeft, pPubBold, pPubMed, pSysBold, pSysMed,
                     setColor, setTextSize, setTextAlign, measureText, drawText);
 
             String effStr = (s.avgEconomyKmKwh > 0.0)
                     ? String.format(Locale.US, "%.1f %s/kWh", s.avgEconomyKmKwh, distUnit)
                     : ("5.8 " + distUnit + "/kWh");
-            drawTextSmart(c, effStr, 227f, 204f, 24f, 0xFFBDBDC0, false, alignLeft,
+            drawTextSmart(c, effStr, 227f, L.effY, 24f, 0xFFBDBDC0, false, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             // Cell [2,1] 실시간 전력 + 누적 에너지
@@ -2415,34 +3545,34 @@ public class TurzxMonitorMain {
             String pwrStr = isRegen
                     ? String.format(Locale.US, "-%.1f", Math.abs(dispKw))
                     : String.format(Locale.US, "+%.1f", Math.abs(dispKw));
-            drawValuePlusUnit(c, pwrStr, "kW", 30f, 338f, 44f, 0xFFFFFFFF, 24f, 0xFF8A8C92, 4f,
+            drawValuePlusUnit(c, pwrStr, "kW", 30f, L.pwrY, L.evMidFs, 0xFFFFFFFF, 24f, 0xFF8A8C92, 4f,
                     alignLeft, pPubBold, pPubMed, pSysBold, pSysMed,
                     setColor, setTextSize, setTextAlign, measureText, drawText);
 
             float pwrPct = (float) Math.min(100.0, Math.max(8.0, (Math.abs(dispKw) / 75.0) * 100.0));
             drawBarFillOnly(c, rf, pFill, setRf, drawRoundRect, setColor,
-                    30f, 370.3f, 163f, 8f, pwrPct, isRegen ? 0xFF44A282 : 0xFF4A8AD6);
+                    30f, L.pwrBarY, 163f, L.evBarH, pwrPct, isRegen ? 0xFF44A282 : 0xFF4A8AD6);
 
             double cumVal = (s.remainEnergyKwh > 0.0) ? s.remainEnergyKwh
                     : ((s.cumulDischargeKwh > 0.0) ? s.cumulDischargeKwh : 12.8);
             String cumStr = (cumVal >= 100.0)
                     ? String.format(Locale.US, "%.0f kWh", cumVal)
                     : String.format(Locale.US, "%.1f kWh", cumVal);
-            drawTextSmart(c, cumStr, 78f, 424f, 24f, 0xFFBDBDC0, true, alignLeft,
+            drawTextSmart(c, cumStr, 78f, L.cumY, 24f, 0xFFBDBDC0, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             // Cell [2,2] 배터리 온도 + 최저~최고 온도
             Integer repTemp = s.getRepresentativeBattTempC();
             double batTemp = (repTemp != null) ? repTemp.doubleValue() : 24.0;
             String batTempStr = String.format(Locale.US, "%.1f", batTemp);
-            drawValuePlusUnit(c, batTempStr, "°C", 227f, 354f, 44f, 0xFFFFFFFF, 24f, 0xFF8A8C92, 4f,
+            drawValuePlusUnit(c, batTempStr, "°C", 227f, L.batTempY, L.evMidFs, 0xFFFFFFFF, 24f, 0xFF8A8C92, 4f,
                     alignLeft, pPubBold, pPubMed, pSysBold, pSysMed,
                     setColor, setTextSize, setTextAlign, measureText, drawText);
 
             double minBatT = (s.battMinTempC != null) ? s.battMinTempC.doubleValue() : (batTemp - 1.0);
             double maxBatT = (s.battMaxTempC != null) ? s.battMaxTempC.doubleValue() : (batTemp + 1.0);
             String batMinMaxStr = String.format(Locale.US, "%.1f~%.1f°C", minBatT, maxBatT);
-            drawTextSmart(c, batMinMaxStr, 227f, 424f, 24f, 0xFFBDBDC0, false, alignLeft,
+            drawTextSmart(c, batMinMaxStr, 227f, L.batMinMaxY, 24f, 0xFFBDBDC0, false, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             // Right TPMS Strip (x = 408..596)
@@ -2452,23 +3582,23 @@ public class TurzxMonitorMain {
             boolean warnRr = s.tpmsRrPsi > 0f && s.tpmsRrPsi < 31.0f;
             boolean anyTpmsWarn = warnFl || warnFr || warnRl || warnRr;
             if (anyTpmsWarn && bmpActiveShell != null) {
-                copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 520, 24, 586, 62);
-                if (warnFl) copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 480, 166, 491, 197);
-                if (warnFr) copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 513, 166, 524, 197);
-                if (warnRl) copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 480, 255, 491, 286);
-                if (warnRr) copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 513, 255, 524, 286);
+                copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.tpmsTag);
+                if (warnFl) copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.tireFl);
+                if (warnFr) copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.tireFr);
+                if (warnRl) copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.tireRl);
+                if (warnRr) copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.tireRr);
             }
 
-            drawTextSmart(c, String.format(Locale.US, "%.0f", s.tpmsFlPsi), 424f, 170f, 36f,
+            drawTextSmart(c, String.format(Locale.US, "%.0f", s.tpmsFlPsi), 424f, L.tpmsFrontY, L.tpmsValFs,
                     warnFl ? 0xFFD9A441 : 0xFFFFFFFF, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
-            drawTextSmart(c, String.format(Locale.US, "%.0f", s.tpmsFrPsi), 580f, 170f, 36f,
+            drawTextSmart(c, String.format(Locale.US, "%.0f", s.tpmsFrPsi), 580f, L.tpmsFrontY, L.tpmsValFs,
                     warnFr ? 0xFFD9A441 : 0xFFFFFFFF, true, alignRight,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
-            drawTextSmart(c, String.format(Locale.US, "%.0f", s.tpmsRlPsi), 424f, 330f, 36f,
+            drawTextSmart(c, String.format(Locale.US, "%.0f", s.tpmsRlPsi), 424f, L.tpmsRearY, L.tpmsValFs,
                     warnRl ? 0xFFD9A441 : 0xFFFFFFFF, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
-            drawTextSmart(c, String.format(Locale.US, "%.0f", s.tpmsRrPsi), 580f, 330f, 36f,
+            drawTextSmart(c, String.format(Locale.US, "%.0f", s.tpmsRrPsi), 580f, L.tpmsRearY, L.tpmsValFs,
                     warnRr ? 0xFFD9A441 : 0xFFFFFFFF, true, alignRight,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
@@ -2480,7 +3610,7 @@ public class TurzxMonitorMain {
                 int tBase = (int) Math.round(s.outdoorTempC > -40.0 ? s.outdoorTempC + 8.0 : 26.0);
                 tpmsFootStr = tBase + "~" + (tBase + 1) + "°C";
             }
-            drawTextSmart(c, tpmsFootStr, 502f, 423f, 24f, 0xFF8A8C92, false, alignCenter,
+            drawTextSmart(c, tpmsFootStr, 502f, L.tpmsFootY, 24f, 0xFF8A8C92, false, alignCenter,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             // =================================================================
@@ -2491,13 +3621,13 @@ public class TurzxMonitorMain {
                 drawCommaAdasRoad3D(c, rf, pFill, pStroke, pShader, pPubBold, pPubMed, pSysBold, pSysMed,
                         setRf, drawRoundRect, drawRect, drawOval, drawLine, drawPath, drawText,
                         setColor, setStrokeW, setTextSize, setTextAlign, measureText, alignCenter,
-                        canvasCls, paintCls, pathCls, s);
+                        canvasCls, paintCls, pathCls, L, s);
                 avgRoadMs = ema(avgRoadMs, (System.nanoTime() - tRoad0) / 1e6);
             } else {
                 avgRoadMs = 0.0;
                 // Experiment: plain dark column instead of the ~400-path 3D road (measures its render cost)
                 setColor.invoke(pFill, Integer.valueOf(0xFF0E1118));
-                drawRect.invoke(c, 610f, 14f, 1188f, 448f, pFill);
+                drawRect.invoke(c, 610f, 14f, 1188f, L.roadBottomY, pFill);
             }
 
             // Determine SDI mode: "section" (구간단속), "traffic" (신호·과속), or "none" (일반 제한속도)
@@ -2520,23 +3650,24 @@ public class TurzxMonitorMain {
 
             // Speed-stamp numbers
             String gear = (s.gearPos != null && !s.gearPos.isEmpty()) ? s.gearPos : "D";
-            drawTextSmart(c, gear, 655f, 69f, 30f, 0xFF4A8AD6, true, alignCenter,
+            drawTextSmart(c, gear, L.gearX, L.gearY, L.gearFs, 0xFF4A8AD6, true, alignCenter,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             int egoSpd = Math.max(0, s.carrotSpeedKph);
-            drawTextSmart(c, String.valueOf(egoSpd), 732f, 88f, 60f, 0xFFFFFFFF, true, alignCenter,
+            drawTextSmart(c, String.valueOf(egoSpd), L.egoX, L.egoY, L.egoFs, 0xFFFFFFFF, true, alignCenter,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             String cruiseStr = (s.carrotCruiseKph > 0) ? String.valueOf(s.carrotCruiseKph) : "--";
             int cruiseColor = (s.carrotCruiseKph > 0) ? 0xFF44A282 : 0xFF8A8C92;
-            drawTextSmart(c, cruiseStr, 800f, 90f, 32f, cruiseColor, true, alignLeft,
+            drawTextSmart(c, cruiseStr, L.cruiseX, L.cruiseY, L.cruiseFs, cruiseColor, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             // SDI speed sign numbers (calibrated per mode to match Chromium circle center)
             int signLimit = (s.carrotSdiSpeedLimit > 0) ? s.carrotSdiSpeedLimit : 0;
             String signLimitStr = (signLimit > 0) ? String.valueOf(signLimit) : "--";
-            float limitNumY = "section".equals(sdiMode) ? 195f : ("traffic".equals(sdiMode) ? 183f : 158f);
-            drawTextSmart(c, signLimitStr, 680.8f, limitNumY, 36f, 0xFF131217, true, alignCenter,
+            float sdiX = "section".equals(sdiMode) ? L.sdiSecX : ("traffic".equals(sdiMode) ? L.sdiTrafX : L.sdiNoneX);
+            float limitNumY = "section".equals(sdiMode) ? L.sdiSecY : ("traffic".equals(sdiMode) ? L.sdiTrafY : L.sdiNoneY);
+            drawTextSmart(c, signLimitStr, sdiX, limitNumY, L.sdiLimitFs, 0xFF131217, true, alignCenter,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             if (!"none".equals(sdiMode) && s.carrotSdiDistM > 0) {
@@ -2544,14 +3675,14 @@ public class TurzxMonitorMain {
                 String sdiDistStr = (sdiDist >= 1000)
                         ? String.format(Locale.US, "%.1f km", sdiDist / 1000.0)
                         : (sdiDist + " m");
-                float distY = "section".equals(sdiMode) ? 245f : 233f;
-                drawTextSmart(c, sdiDistStr, 680.8f, distY, 24f, 0xFFFFFFFF, true, alignCenter,
+                float distY = "section".equals(sdiMode) ? L.sdiDistSecY : L.sdiDistTrafY;
+                drawTextSmart(c, sdiDistStr, sdiX, distY, 24f, 0xFFFFFFFF, true, alignCenter,
                         pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
             }
             if ("section".equals(sdiMode)) {
                 int avgSpd = (egoSpd > 0) ? egoSpd : signLimit;
                 String avgStr = (avgSpd > 0) ? String.valueOf(avgSpd) : "--";
-                drawTextSmart(c, avgStr, 785f, 204f, 40f, 0xFF44A282, true, alignCenter,
+                drawTextSmart(c, avgStr, L.sdiAvgX, L.sdiAvgY, L.sdiAvgFs, 0xFF44A282, true, alignCenter,
                         pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
             }
 
@@ -2564,7 +3695,7 @@ public class TurzxMonitorMain {
             } else {
                 tbtDistStr = "--m";
             }
-            drawTextSmart(c, tbtDistStr, 1034.2f, 72f, 40f, 0xFFFFFFFF, true, alignLeft,
+            drawTextSmart(c, tbtDistStr, L.tbtDistX, L.tbtDistY, L.tbtDistFs, 0xFFFFFFFF, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             String roadName = (s.carrotTbtRoad != null && !s.carrotTbtRoad.isEmpty()) ? s.carrotTbtRoad : "주행 중";
@@ -2572,7 +3703,7 @@ public class TurzxMonitorMain {
                 String[] parts = roadName.split("·");
                 roadName = parts[parts.length - 1].trim();
             }
-            drawTextSmart(c, truncateText(roadName, 6), 984.2f, 115f, 24f, 0xFFBDBDC0, true, alignLeft,
+            drawTextSmart(c, truncateText(roadName, 6), L.tbtRoadX, L.tbtRoadY, L.tbtRoadFs, 0xFFBDBDC0, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             String nextTbtStr;
@@ -2583,7 +3714,7 @@ public class TurzxMonitorMain {
             } else {
                 nextTbtStr = s.carrotConnected ? "COMMA" : "CAN";
             }
-            drawTextSmart(c, nextTbtStr, 1154f, 114f, 24f, 0xFF4A8AD6, true, alignRight,
+            drawTextSmart(c, nextTbtStr, L.tbtNextX, L.tbtNextY, L.tbtNextFs, 0xFF4A8AD6, true, alignRight,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             // Bottom corner chips: "차선" & "앞차 · 조향각"
@@ -2595,7 +3726,7 @@ public class TurzxMonitorMain {
             } else {
                 laneChipStr = "--%";
             }
-            drawTextSmart(c, laneChipStr, 706f, 423f, 24f, 0xFFBDBDC0, false, alignLeft,
+            drawTextSmart(c, laneChipStr, L.laneChipX, L.laneChipY, L.laneChipFs, 0xFFBDBDC0, false, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             String leadText = (s.hasLeadCar && s.leadDistM > 0.5f)
@@ -2605,13 +3736,13 @@ public class TurzxMonitorMain {
                     ? s.steeringAngleDeg
                     : ((s.pathPoly != null && s.pathPoly.length > 2) ? (-s.pathPoly[2] * 40000f) : 0.0f);
             String steerText = String.format(Locale.US, " · %+.1f°", steerDeg);
-            float wLead = drawTextSmart(c, leadText, 1017.2f, 421f, 24f, 0xFFFFFFFF, true, alignLeft,
+            float wLead = drawTextSmart(c, leadText, L.leadChipX, L.leadChipY, L.leadChipFs, 0xFFFFFFFF, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
-            drawTextSmart(c, steerText, 1017.2f + wLead, 421f, 24f, 0xFFBDBDC0, false, alignLeft,
+            drawTextSmart(c, steerText, L.leadChipX + wLead, L.leadChipY, L.leadChipFs, 0xFFBDBDC0, false, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             // =================================================================
-            // 4. COLUMN 3 TOP: NOW PLAYING MEDIA (x = 1202..1908, y = 12..225)
+            // 4. COLUMN 3 TOP: NOW PLAYING MEDIA
             // =================================================================
             if (s.albumArtBitmap != null && bmpCls.isInstance(s.albumArtBitmap)) {
                 try {
@@ -2625,7 +3756,7 @@ public class TurzxMonitorMain {
                     int bw = artBmpW;
                     int bh = artBmpH;
                     if (bw > 0 && bh > 0) {
-                        float ax0 = 1234f, ay0 = 32f, ax1 = 1406f, ay1 = 204f, aRad = 18f;
+                        float ax0 = L.artX0, ay0 = L.artY0, ax1 = L.artX1, ay1 = L.artY1, aRad = L.artRad;
                         float dstW = ax1 - ax0;
                         float dstH = ay1 - ay0;
                         setRf.invoke(rf, ax0, ay0, ax1, ay1);
@@ -2690,57 +3821,62 @@ public class TurzxMonitorMain {
                 mSub = (s.mediaSource != null && !s.mediaSource.isEmpty()) ? s.mediaSource : "Bluetooth · USB · Radio";
             }
 
-            drawTextSmart(c, truncateText(mTitle, 16), 1436f, 81f, 48f, 0xFFFFFFFF, true, alignLeft,
+            drawTextSmart(c, truncateText(mTitle, L.titleMaxChars), L.mediaTextX, L.mediaTitleY, L.mediaTitleFs,
+                    0xFFFFFFFF, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
-            drawTextSmart(c, truncateText(mSub, 24), 1436f, 131f, 30f, 0xFFBDBDC0, false, alignLeft,
+            drawTextSmart(c, truncateText(mSub, L.subMaxChars), L.mediaTextX, L.mediaSubY, L.mediaSubFs,
+                    0xFFBDBDC0, false, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             int curSec = hasRealMedia ? Math.max(0, s.mediaPositionSec) : 0;
             int durSec = hasRealMedia ? Math.max(0, s.mediaDurationSec) : 0;
             float mediaPct = (durSec > 0) ? Math.min(100f, (curSec * 100f) / durSec) : 0f;
             drawBarFillOnly(c, rf, pFill, setRf, drawRoundRect, setColor,
-                    1436f, 154.5f, 388.9f, 10f, mediaPct, 0xFFFFFFFF);
+                    L.mediaTextX, L.mediaBarY, L.mediaBarW, L.mediaBarH, mediaPct, 0xFFFFFFFF);
 
-            drawTextSmart(c, formatSecMinTwoDigit(curSec), 1436f, 196f, 26f, 0xFFFFFFFF, true, alignLeft,
+            drawTextSmart(c, formatSecMinTwoDigit(curSec), L.mediaTextX, L.mediaCurTimeY, L.mediaTimeFs,
+                    0xFFFFFFFF, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
-            drawTextSmart(c, formatSecMinTwoDigit(durSec), 1824.9f, 195f, 26f, 0xFF8A8C92, false, alignRight,
+            drawTextSmart(c, formatSecMinTwoDigit(durSec), L.mediaDurTimeX, L.mediaDurTimeY, L.mediaTimeFs,
+                    0xFF8A8C92, false, alignRight,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             // =================================================================
-            // 5. COLUMN 3 BOTTOM: DATC CLIMATE (x = 1202..1908, y = 237..450)
+            // 5. DATC CLIMATE (COLUMN 3 BOTTOM ON 9.2" / PERSISTENT BOTTOM TASKBAR ON 12.3")
             // =================================================================
-            // Driver set temperature (1228, 297) + Indoor temperature after static "실내 " (1275.5, 337)
             String drNum = !s.hvacOn ? "OFF" : formatHvacTempNumberOnly(s.hvacDrTempC);
             String drDeg = (!s.hvacOn || "LO".equals(drNum) || "HI".equals(drNum)) ? "" : "°";
             int drColor = s.hvacOn ? 0xFFFFFFFF : 0xFF8A8C92;
-            drawValuePlusUnit(c, drNum, drDeg, 1228f, 297f, 48f, drColor, 26f, 0xFF8A8C92, 1f,
+            drawValuePlusUnit(c, drNum, drDeg, L.drvTempX, L.hvacTempY, 48f, drColor, 26f, 0xFF8A8C92, 1f,
                     alignLeft, pPubBold, pPubMed, pSysBold, pSysMed,
                     setColor, setTextSize, setTextAlign, measureText, drawText);
 
             String inStr = (s.inCarTempC > -50.0)
                     ? String.format(Locale.US, "%.1f°", s.inCarTempC)
                     : "22.5°";
-            drawTextSmart(c, inStr, 1275.5f, 337f, 24f, 0xFFBDBDC0, true, alignLeft,
+            drawTextSmart(c, inStr, L.inTempX, L.hvacEnvY, 24f, 0xFFBDBDC0, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            // Passenger set temperature (right-aligned at 1882, 297) + Outdoor temperature after static "실외 "
-            String psNum = !s.hvacOn ? "OFF" : (s.hvacDriverOnly ? "DRV" : formatHvacTempNumberOnly(s.hvacPsTempC));
-            boolean psHasDeg = s.hvacOn && !s.hvacDriverOnly && !"LO".equals(psNum) && !"HI".equals(psNum);
-            int psColor = (s.hvacOn && !s.hvacDriverOnly) ? 0xFFFFFFFF : 0xFF8A8C92;
-            if (psHasDeg) {
-                float wDeg = drawTextSmart(c, "°", 1882f, 297f, 26f, 0xFF8A8C92, true, alignRight,
-                        pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
-                drawTextSmart(c, psNum, 1882f - wDeg - 1f, 297f, 48f, psColor, true, alignRight,
-                        pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
-            } else {
-                drawTextSmart(c, psNum, 1882f, 297f, 48f, psColor, true, alignRight,
-                        pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+            if (L.showPasTemp) {
+                String psNum = !s.hvacOn ? "OFF" : (s.hvacDriverOnly ? "DRV" : formatHvacTempNumberOnly(s.hvacPsTempC));
+                boolean psHasDeg = s.hvacOn && !s.hvacDriverOnly && !"LO".equals(psNum) && !"HI".equals(psNum);
+                int psColor = (s.hvacOn && !s.hvacDriverOnly) ? 0xFFFFFFFF : 0xFF8A8C92;
+                if (psHasDeg) {
+                    float wDeg = drawTextSmart(c, "°", L.pasTempX, L.hvacTempY, 26f, 0xFF8A8C92, true, alignRight,
+                            pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+                    drawTextSmart(c, psNum, L.pasTempX - wDeg - 1f, L.hvacTempY, 48f, psColor, true, alignRight,
+                            pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+                } else {
+                    drawTextSmart(c, psNum, L.pasTempX, L.hvacTempY, 48f, psColor, true, alignRight,
+                            pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
+                }
             }
 
             String outStr = (s.outdoorTempC > -50.0)
                     ? String.format(Locale.US, "%.1f°", s.outdoorTempC)
                     : "18.0°";
-            drawTextSmart(c, outStr, 1882f, 337f, 24f, 0xFFBDBDC0, true, alignRight,
+            drawTextSmart(c, outStr, L.outTempX, L.hvacEnvY, 24f, 0xFFBDBDC0, true,
+                    L.outTempAlignRight ? alignRight : alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             // Center Airflow Arrows (composite active arrows from bmpActiveShell)
@@ -2750,33 +3886,34 @@ public class TurzxMonitorMain {
             boolean dirDown = s.hvacOn && (bm == 2 || bm == 3 || bm == 4 || bm == 8 || bm == 9 || bm < 0);
             if (bmpActiveShell != null) {
                 if (dirUp) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1396, 260, 1425, 286);
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1425, 260, 1445, 284);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.dirUpA);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.dirUpB);
                 }
                 if (dirMid) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1396, 287, 1425, 304);
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1425, 285, 1446, 307);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.dirMidA);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.dirMidB);
                 }
                 if (dirDown) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1396, 305, 1425, 331);
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1425, 308, 1445, 331);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.dirDownA);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.dirDownB);
                 }
             }
 
             // Center Fan Step & 7-Bar Rail
             int fanStep = !s.hvacOn ? 0 : ((s.hvacBlowerStep >= 0) ? Math.min(7, s.hvacBlowerStep) : 3);
             if (fanStep > 0) {
-                drawTextSmart(c, String.valueOf(fanStep), 1687f, 287f, 32f, 0xFFFFFFFF, true, alignRight,
+                drawTextSmart(c, String.valueOf(fanStep), L.fanStepX, L.fanStepY, 32f, 0xFFFFFFFF, true, alignRight,
                         pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
                 if (bmpActiveShell != null) {
-                    int barRightX = Math.round(1539.4f + (fanStep - 1) * 26.3f + 20f);
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1538, 298, barRightX, 336);
+                    int barRightX = Math.round(L.fanBarBase + (fanStep - 1) * L.fanBarStep + L.fanBarSegW);
+                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect,
+                            L.fanBarCopyX0, L.fanBarCopyY0, barRightX, L.fanBarCopyY1);
                 }
             } else {
                 if (bmpActiveShell != null) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1650, 256, 1720, 292);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.fanOffClear);
                 }
-                drawTextSmart(c, "OFF", 1715f, 287f, 32f, 0xFF8A8C92, true, alignRight,
+                drawTextSmart(c, "OFF", L.fanOffX, L.fanStepY, 32f, 0xFF8A8C92, true, alignRight,
                         pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
             }
 
@@ -2784,32 +3921,32 @@ public class TurzxMonitorMain {
             // [1:AUTO] [2:A/C] [3:HEAT] [4:FRONT DEFOG] [5:REAR DEFOG/MIRROR] [6:RECIRC] [7:SYNC]
             if (bmpActiveShell != null) {
                 if (s.hvacOn && s.hvacAuto) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1226, 374, 1315, 436);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.hvacBtns[0]);
                 }
                 if (s.hvacOn && s.hvacAc) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1320, 374, 1411, 436);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.hvacBtns[1]);
                 }
                 if (s.hvacOn && s.hvacHeat) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1416, 374, 1505, 436);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.hvacBtns[2]);
                 }
                 if (s.hvacOn && (s.hvacFrontDefog || dirUp)) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1510, 374, 1599, 436);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.hvacBtns[3]);
                 }
                 if (s.hvacRearDefog) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1604, 374, 1693, 436);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.hvacBtns[4]);
                 }
                 if (s.hvacRecirc) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1698, 374, 1789, 436);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.hvacBtns[5]);
                 }
                 if (s.hvacOn && s.hvacSync) {
-                    copySpriteRect(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, 1794, 374, 1884, 436);
+                    copySpriteBox(c, bmpActiveShell, sRect, dRect, setRect, drawBmpRect, L.hvacBtns[6]);
                 }
             }
         }
 
         /**
-         * 1:1 port of renderCommaAdasCanvas() from turzx_92_mockup.html (lines 2264-2750).
-         * Renders into Column 2 at (ox=610, oy=14, W=578, H=434).
+         * 1:1 port of renderCommaAdasCanvas() from turzx_92_mockup.html.
+         * Renders into Column 2 at (ox=610, oy=14, W=578, H=434 or 692).
          */
         private static void drawCommaAdasRoad3D(
                 Object c,
@@ -2837,6 +3974,7 @@ public class TurzxMonitorMain {
                 Class<?> canvasCls,
                 Class<?> paintCls,
                 Class<?> pathCls,
+                HudLayout L,
                 TelemetrySnapshot s
         ) throws Exception {
             if (roadMethods == null) {
@@ -2887,19 +4025,19 @@ public class TurzxMonitorMain {
             Object path = roadPath;
 
             int saveCount = ((Integer) saveM.invoke(c)).intValue();
-            clipRectM.invoke(c, 609f, 13f, 1189f, 449f);
+            clipRectM.invoke(c, 609f, 13f, 1189f, L.roadClipBottomY);
 
             float ox = 610f;
             float oy = 14f;
             float W = 578f;
-            float H = 434f;
-            float horizonY = 130f;
+            float H = L.roadH;
+            float horizonY = L.roadHorizonY;
 
-            // Camera intrinsics in 578x434 pixel space
+            // Camera intrinsics in 578xH pixel space
             float u0 = W * 0.565f;
             float v0 = horizonY;
             float fx = 395f;
-            float fy = 950f;
+            float fy = L.roadFy;
             float camH = 1.35f;
 
             boolean hasRealLead = s.hasLeadCar && s.leadDistM > 0.5f;
@@ -5440,6 +6578,10 @@ public class TurzxMonitorMain {
 
                 int acRaw = ((Integer) cachedNoArgMethod(sc, "airConEleConsum").invoke(svc)).intValue();
                 int htrRaw = ((Integer) cachedNoArgMethod(sc, "heaterEleConsum").invoke(svc)).intValue();
+                try {
+                    liveSnapshot.headLampStatus = ((Integer) cachedNoArgMethod(sc, "getAFLS11_HeadLampStatus").invoke(svc)).intValue();
+                } catch (Throwable ignored) {
+                }
                 double acKw = parseTmPowerWattsToKw(acRaw, 10210);
                 double htrKw = parseTmPowerWattsToKw(htrRaw, 10210);
                 if (acKw >= 0.0 || htrKw >= 0.0) {
@@ -6184,6 +7326,7 @@ public class TurzxMonitorMain {
             c.tpmsFrPsi = liveSnapshot.tpmsFrPsi;
             c.tpmsRlPsi = liveSnapshot.tpmsRlPsi;
             c.tpmsRrPsi = liveSnapshot.tpmsRrPsi;
+            c.headLampStatus = liveSnapshot.headLampStatus;
             if (liveSnapshot.pathPoly != null) {
                 c.pathPoly = (float[]) liveSnapshot.pathPoly.clone();
             }
@@ -6270,6 +7413,7 @@ public class TurzxMonitorMain {
             config.hudRoadEnabled = loaded.hudRoadEnabled;
             config.usbIncrementalEncode = loaded.usbIncrementalEncode;
             config.renderParallel = loaded.renderParallel;
+            config.hudDesignTesla = loaded.hudDesignTesla;
             config.telemetryPollMs = loaded.telemetryPollMs;
             LiveTuning.loadFrom(config);
             config.commaIp = loaded.commaIp;
@@ -6661,7 +7805,7 @@ public class TurzxMonitorMain {
                 Object header = llCls.getConstructor(ctxCls).newInstance(sysContext);
                 setOrientation.invoke(header, 0);
                 setGravity.invoke(header, 16); // CENTER_VERTICAL
-                addView.invoke(header, newText(ctxCls, tvCls, viewCls, "TURZX 9.2 HUD 진단", 34f, 0xFFF8FAFC, true),
+                addView.invoke(header, newText(ctxCls, tvCls, viewCls, "TURZX HUD 진단", 34f, 0xFFF8FAFC, true),
                         llLpCtor.newInstance(-2, -2));
                 Object sub = newText(ctxCls, tvCls, viewCls, "", 22f, 0xFF94A3B8, false);
                 Object subLp = llLpWCtor.newInstance(0, -2, 1f);
@@ -6989,7 +8133,7 @@ public class TurzxMonitorMain {
             if (!rst.isEmpty()) {
                 sb.append("\n").append(rst);
             }
-            List<String[]> rec = FpsBench.recent(2);
+            List<String[]> rec = FpsBench.recent(1); // 8 tuning rows: keep the panel within the screen
             for (int i = 0; i < rec.size(); i++) {
                 sb.append("\n").append(rec.get(i)[0]).append("\n   ").append(rec.get(i)[1]);
             }
@@ -7070,7 +8214,7 @@ public class TurzxMonitorMain {
         static final int[] TARGET_FPS_STEPS = new int[]{5, 8, 10, 12, 15, 20, 25};
         static final int[] PANEL_FPS_STEPS = new int[]{0, 10, 15, 20, 25, 30};
         static final int[] POLL_MS_STEPS = new int[]{100, 150, 200, 300, 500, 1000};
-        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기", "부분 인코딩", "렌더 방식"};
+        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기", "부분 인코딩", "렌더 방식", "디자인"};
 
         static volatile int jpegQuality = 70;
         static volatile int targetFps = 12;
@@ -7080,6 +8224,8 @@ public class TurzxMonitorMain {
         static volatile boolean incrementalEncode = true;
         /** true: render || encode on two cores (v1.4.4 pipeline); false: render then encode, one core at a time. */
         static volatile boolean parallelPipeline = false;
+        /** v1.5.0: Tesla-style HUD (default) vs the classic Chromium 1:1 HUD. */
+        static volatile boolean teslaDesign = true;
         /** Set when panelFps changed: the sender thread pushes CMD 0x0F to the connected panel. */
         static volatile boolean panelFpsDirty = false;
 
@@ -7091,6 +8237,7 @@ public class TurzxMonitorMain {
             pollMs = Math.max(50, Math.min(2000, c.telemetryPollMs));
             incrementalEncode = c.usbIncrementalEncode;
             parallelPipeline = c.renderParallel;
+            teslaDesign = c.hudDesignTesla;
         }
 
         static void saveTo(MonitorConfig c) {
@@ -7101,6 +8248,7 @@ public class TurzxMonitorMain {
             c.telemetryPollMs = pollMs;
             c.usbIncrementalEncode = incrementalEncode;
             c.renderParallel = parallelPipeline;
+            c.hudDesignTesla = teslaDesign;
         }
 
         /** Next value above (dir > 0) / below (dir < 0) cur in the step list; stays at the ends. */
@@ -7131,8 +8279,10 @@ public class TurzxMonitorMain {
                     return pollMs + "ms";
                 case 5:
                     return incrementalEncode ? "ON" : "OFF";
-                default:
+                case 6:
                     return parallelPipeline ? "멀티코어" : "싱글코어";
+                default:
+                    return teslaDesign ? "신규" : "기존";
             }
         }
 
@@ -7140,7 +8290,8 @@ public class TurzxMonitorMain {
             return "q" + jpegQuality + " · " + targetFps + "fps · 패널" + (panelFps > 0 ? String.valueOf(panelFps) : "끔")
                     + " · 도로" + (roadEnabled ? "ON" : "OFF") + " · 수집" + pollMs
                     + " · 부분" + (incrementalEncode ? "ON" : "OFF")
-                    + " · " + (parallelPipeline ? "멀티코어" : "싱글코어");
+                    + " · " + (parallelPipeline ? "멀티코어" : "싱글코어")
+                    + " · " + (teslaDesign ? "신규" : "기존");
         }
 
         /** Panel [－]/[＋] handler: applies immediately and restarts the measurement for the new combination. */
@@ -7169,8 +8320,11 @@ public class TurzxMonitorMain {
                 case 5:
                     incrementalEncode = !incrementalEncode;
                     break;
-                default:
+                case 6:
                     parallelPipeline = !parallelPipeline;
+                    break;
+                default:
+                    teslaDesign = !teslaDesign;
                     break;
             }
             FpsBench.restart(label(), System.currentTimeMillis());
@@ -7199,6 +8353,9 @@ public class TurzxMonitorMain {
         /** Dashboard button: loads the frames once and starts the A -> B -> C sequence. Returns a banner text. */
         static synchronized String start(long nowMs) {
             if (!TurzxUsbDriver.isConnected()) return "패널 테스트: USB 미연결";
+            if (TurzxUsbDriver.getConnectedPid() != TURZX_USB_PID_92) {
+                return "패널 테스트: 9.2\"(464×1920) 전용 패턴 · 현재 " + TurzxFrameRenderer.getActivePanelLabel() + " 연결됨";
+            }
             if (frames == null) {
                 byte[][] f = new byte[ASSETS.length][];
                 for (int i = 0; i < ASSETS.length; i++) {
@@ -7954,14 +9111,19 @@ public class TurzxMonitorMain {
                         .append(", hud_road=").append(cfg.hudRoadEnabled)
                         .append(", usb_incremental_encode=").append(cfg.usbIncrementalEncode)
                         .append(", render_parallel=").append(cfg.renderParallel)
+                        .append(", hud_design=").append(cfg.hudDesignTesla ? "tesla" : "classic")
                         .append(", telemetry_poll_ms=").append(cfg.telemetryPollMs)
                         .append(", comma_ip=").append(cfg.commaIp)
                         .append(", auto_update=").append(cfg.autoUpdate)
                         .append(", pos=(").append(cfg.x).append(",").append(cfg.y).append(")\n");
             }
 
-            sb.append("\n--- [2] TURZX 9.2\" USB Driver & /sys/bus/usb/devices Scan ---\n");
+            sb.append("\n--- [2] TURZX USB Driver & /sys/bus/usb/devices Scan ---\n");
             sb.append("USB Connected   : ").append(TurzxUsbDriver.isConnected()).append("\n");
+            sb.append("Active Panel    : ").append(TurzxFrameRenderer.getActivePanelLabel())
+                    .append(" (1cbe:").append(TurzxUsbDriver.getConnectedPidHex())
+                    .append(", ").append(TurzxFrameRenderer.getActiveResolutionString())
+                    .append(", fw=").append(TurzxUsbDriver.getConnectedFirmware()).append(")\n");
             sb.append("USB Status      : ").append(TurzxUsbDriver.getStatusText()).append("\n");
             sb.append("Pushed Frames   : ").append(TurzxUsbDriver.getPushedFrames())
                     .append(String.format(Locale.US, " (Live FPS: %.1f)\n", TurzxUsbDriver.getLiveFps()));
@@ -7982,6 +9144,9 @@ public class TurzxMonitorMain {
                     .append(" | dashboard=").append(TurzxOverlayController.isDashboardVisible() ? "shown" : "hidden").append("\n");
             sb.append("Recent Keys     : ").append(HotkeyWatcher.getRecentKeysText()).append("\n");
             sb.append("Live Tuning     : ").append(LiveTuning.label()).append("\n");
+            sb.append("HUD Design      : ").append(LiveTuning.teslaDesign ? "tesla" : "classic")
+                    .append(" | tesla assets ready=").append(TurzxFrameRenderer.TeslaHud.isReady())
+                    .append(" | headLampStatus=").append(TelemetryCollector.getLatestSnapshot().headLampStatus).append("\n");
             sb.append("Panel RST test  : ").append(PanelRstTest.reportLine()).append("\n");
             List<String[]> bench = FpsBench.recent(FpsBench.MAX_HISTORY);
             for (int i = bench.size() - 1; i >= 0; i--) {
@@ -9578,6 +10743,10 @@ public class TurzxMonitorMain {
         sb.append("}");
         sb.append(",\"usb\":{");
         sb.append("\"connected\":").append(TurzxUsbDriver.isConnected());
+        sb.append(",\"panel\":\"").append(escapeJson(TurzxFrameRenderer.getActivePanelLabel())).append("\"");
+        sb.append(",\"pid\":\"").append(escapeJson(TurzxUsbDriver.getConnectedPidHex())).append("\"");
+        sb.append(",\"resolution\":\"").append(escapeJson(TurzxFrameRenderer.getActiveResolutionString())).append("\"");
+        sb.append(",\"firmware\":\"").append(escapeJson(TurzxUsbDriver.getConnectedFirmware())).append("\"");
         sb.append(",\"frames\":").append(TurzxUsbDriver.getPushedFrames());
         sb.append(String.format(Locale.US, ",\"fps\":%.1f", TurzxUsbDriver.getLiveFps()));
         sb.append(",\"jpeg_encoder\":\"").append(escapeJson(TurzxFrameRenderer.getLastEncoderName())).append("\"");
@@ -11210,6 +12379,7 @@ public class TurzxMonitorMain {
                 else if ("hud_road".equals(k)) cfg.hudRoadEnabled = !"0".equals(v) && !"false".equalsIgnoreCase(v);
                 else if ("usb_incremental_encode".equals(k)) cfg.usbIncrementalEncode = !"0".equals(v) && !"false".equalsIgnoreCase(v);
                 else if ("render_parallel".equals(k)) cfg.renderParallel = !"0".equals(v) && !"false".equalsIgnoreCase(v);
+                else if ("hud_design".equals(k)) cfg.hudDesignTesla = !"classic".equalsIgnoreCase(v) && !"0".equals(v);
                 else if ("telemetry_poll_ms".equals(k)) cfg.telemetryPollMs = Math.max(50, Math.min(2000, parseIntSafe(v, 200)));
                 else if ("comma_ip".equals(k)) cfg.commaIp = v;
                 else if ("auto_update".equals(k)) cfg.autoUpdate = !"0".equals(v) && !"false".equalsIgnoreCase(v);
@@ -11250,6 +12420,7 @@ public class TurzxMonitorMain {
                     + "hud_road=" + (cfg.hudRoadEnabled ? 1 : 0) + "\n"
                     + "usb_incremental_encode=" + (cfg.usbIncrementalEncode ? 1 : 0) + "\n"
                     + "render_parallel=" + (cfg.renderParallel ? 1 : 0) + "\n"
+                    + "hud_design=" + (cfg.hudDesignTesla ? "tesla" : "classic") + "\n"
                     + "telemetry_poll_ms=" + cfg.telemetryPollMs + "\n"
                     + "comma_ip=" + (cfg.commaIp != null ? cfg.commaIp : "") + "\n"
                     + "auto_update=" + (cfg.autoUpdate ? 1 : 0) + "\n"
@@ -11541,6 +12712,13 @@ public class TurzxMonitorMain {
     private static int parseIntSafe(String s, int def) {
         if (s == null) return def;
         try { return Integer.parseInt(s.trim()); } catch (Throwable e) { return def; }
+    }
+
+    private static boolean i123cells() {
+        byte[] raw = TurzxFrameRenderer.readJarAssetBytesPublic("tesla_layout_123.txt");
+        if (raw == null) return false;
+        TurzxFrameRenderer.TeslaHud.Layout l = TurzxFrameRenderer.TeslaHud.parseLayout(new String(raw, UTF8));
+        return l.fields.containsKey("cellMax") && l.fields.containsKey("cellDiff");
     }
 
     private static void assertTrue(boolean cond, String msg) {
@@ -12244,7 +13422,7 @@ public class TurzxMonitorMain {
             tc.hudRoadEnabled = false;
             tc.telemetryPollMs = 300;
             LiveTuning.loadFrom(tc);
-            assertTrue(LiveTuning.label().equals("q60 · 20fps · 패널끔 · 도로OFF · 수집300 · 부분ON · 싱글코어"), "tuning: label " + LiveTuning.label());
+            assertTrue(LiveTuning.label().equals("q60 · 20fps · 패널끔 · 도로OFF · 수집300 · 부분ON · 싱글코어 · 신규"), "tuning: label " + LiveTuning.label());
             MonitorConfig tc2 = new MonitorConfig();
             LiveTuning.saveTo(tc2);
             assertTrue(tc2.usbJpegQuality == 60 && tc2.usbFps == 20 && !tc2.hudRoadEnabled && tc2.telemetryPollMs == 300,
@@ -12382,8 +13560,112 @@ public class TurzxMonitorMain {
                     "rst: finished after three phases");
             String rr = PanelRstTest.reportLine();
             assertTrue(rr.startsWith("A 2✓ 0✗ 12ms · B 0✓ 1✗ · C 0✓ 0✗"), "rst: summary " + rr);
+
+            // v1.4.9: Multi-panel support (9.2" 0x0092, 8.8" 0x0088, 12.3" 0x0123)
+            assertTrue(isSupportedTurzxPid("0092") && isSupportedTurzxPid("0088") && isSupportedTurzxPid("0123"),
+                    "pid: supported TURZX PIDs");
+            assertTrue(!isSupportedTurzxPid("0000") && !isSupportedTurzxPid(null),
+                    "pid: unsupported PIDs rejected");
+            byte[] png720 = buildTransparentOverlayPng720x1920();
+            assertTrue(png720 != null && png720.length > 64, "png720: generated");
+            int ihdrW720 = ((png720[16] & 0xFF) << 24) | ((png720[17] & 0xFF) << 16)
+                    | ((png720[18] & 0xFF) << 8) | (png720[19] & 0xFF);
+            int ihdrH720 = ((png720[20] & 0xFF) << 24) | ((png720[21] & 0xFF) << 16)
+                    | ((png720[22] & 0xFF) << 8) | (png720[23] & 0xFF);
+            assertTrue(ihdrW720 == 720 && ihdrH720 == 1920,
+                    "png720: IHDR 720x1920 (" + ihdrW720 + "x" + ihdrH720 + ")");
+
+            byte[] assetBase720 = TurzxFrameRenderer.readJarAssetBytesPublic("base_shell_720.png");
+            byte[] assetAct720 = TurzxFrameRenderer.readJarAssetBytesPublic("active_shell_720.png");
+            byte[] assetCol2720 = TurzxFrameRenderer.readJarAssetBytesPublic("col2_hud_section_720.png");
+            assertTrue(assetBase720 != null && assetBase720.length > 4096, "assets720: base_shell_720.png bundled");
+            assertTrue(assetAct720 != null && assetAct720.length > 4096, "assets720: active_shell_720.png bundled");
+            assertTrue(assetCol2720 != null && assetCol2720.length > 2048, "assets720: col2_hud_section_720.png bundled");
+            int col2W720 = ((assetCol2720[16] & 0xFF) << 24) | ((assetCol2720[17] & 0xFF) << 16)
+                    | ((assetCol2720[18] & 0xFF) << 8) | (assetCol2720[19] & 0xFF);
+            int col2H720 = ((assetCol2720[20] & 0xFF) << 24) | ((assetCol2720[21] & 0xFF) << 16)
+                    | ((assetCol2720[22] & 0xFF) << 8) | (assetCol2720[23] & 0xFF);
+            assertTrue(col2W720 == 582 && col2H720 == 580,
+                    "assets720: col2_hud_section_720.png 582x580 (" + col2W720 + "x" + col2H720 + ")");
+            assertTrue(TurzxFrameRenderer.LAYOUT_720.drvTempX == 36f
+                            && !TurzxFrameRenderer.LAYOUT_720.showPasTemp
+                            && TurzxFrameRenderer.LAYOUT_720.outTempX == 251.5f
+                            && TurzxFrameRenderer.LAYOUT_462.showPasTemp
+                            && TurzxFrameRenderer.LAYOUT_462.drvTempX == 1228f,
+                    "layout720: persistent bottom climate taskbar (no pasTemp, inline outTemp)");
+
+            TurzxFrameRenderer.setActivePanelByPid(TURZX_USB_PID_123);
+            assertTrue("12.3\"".equals(TurzxFrameRenderer.getActivePanelLabel())
+                            && "1920x720".equals(TurzxFrameRenderer.getActiveResolutionString())
+                            && TurzxFrameRenderer.getActiveHudHeight() == 720
+                            && TurzxFrameRenderer.getActivePanelJpegWidth() == 720,
+                    "panel: 0x0123 -> 12.3\" 1920x720 / pad 720");
+            TurzxFrameRenderer.setActivePanelByPid(TURZX_USB_PID_88);
+            assertTrue("8.8\"".equals(TurzxFrameRenderer.getActivePanelLabel())
+                            && "1920x462".equals(TurzxFrameRenderer.getActiveResolutionString())
+                            && TurzxFrameRenderer.getActivePanelJpegWidth() == 480,
+                    "panel: 0x0088 -> 8.8\" 1920x462 / pad 480");
+            TurzxFrameRenderer.setActivePanelByPid(TURZX_USB_PID_92);
+            assertTrue("9.2\"".equals(TurzxFrameRenderer.getActivePanelLabel())
+                            && "1920x462".equals(TurzxFrameRenderer.getActiveResolutionString())
+                            && TurzxFrameRenderer.getActivePanelJpegWidth() == 464,
+                    "panel: 0x0092 -> 9.2\" 1920x462 / pad 464");
         } catch (Exception e) {
             throw new RuntimeException("v1.4.4 pipeline / road self-test failed", e);
+        }
+
+        // v1.5.0: Tesla-style HUD layouts + lamp logic + design setting
+        try {
+            String[] layouts = {"tesla_layout_92.txt", "tesla_layout_123.txt"};
+            for (int i = 0; i < layouts.length; i++) {
+                byte[] raw = TurzxFrameRenderer.readJarAssetBytesPublic(layouts[i]);
+                assertTrue(raw != null && raw.length > 500, "tesla: " + layouts[i] + " bundled");
+                TurzxFrameRenderer.TeslaHud.Layout lay = TurzxFrameRenderer.TeslaHud.parseLayout(new String(raw, UTF8));
+                String[] needF = {"speed", "soc", "dte", "bms", "soh", "kw", "title", "dr", "fanNum", "inT", "outT", "limit"};
+                for (int k = 0; k < needF.length; k++) {
+                    assertTrue(lay.fields.containsKey(needF[k]), "tesla: " + layouts[i] + " field " + needF[k]);
+                }
+                String[] needR = {"viz", "pill", "pwr", "prog", "art", "limit", "wheel", "tbt", "tpms", "auto",
+                        "airFace", "airFoot", "prndP", "prndD", "chip_ac", "chip_heat", "chip_fdef", "chip_rdef", "chip_recirc", "fan6"};
+                for (int k = 0; k < needR.length; k++) {
+                    assertTrue(lay.rect(needR[k]) != null, "tesla: " + layouts[i] + " rect " + needR[k]);
+                }
+                float[] viz = lay.rect("viz");
+                assertTrue(viz[0] >= 0f && viz[2] > 600f && viz[1] + viz[3] <= (i == 0 ? 462f : 720f), "tesla: viz inside the panel");
+                TurzxFrameRenderer.TeslaHud.Field soc = lay.fields.get("soc");
+                assertTrue("%".equals(soc.unit) && soc.size > 40f && soc.bold, "tesla: soc field with % unit");
+                assertTrue(lay.fields.get("dte").align == 'R' && "km".equals(lay.fields.get("dte").unit), "tesla: dte right aligned with km");
+                assertTrue(lay.sizes.containsKey("tbtDist") && lay.sizes.containsKey("tpms"), "tesla: TBT / TPMS typography");
+            }
+            assertTrue(i123cells(), "tesla: 12.3 layout has the cell voltage row");
+            String[] sprites = {"tesla_base.png", "tesla_active.png", "tesla_base_720.png", "tesla_active_720.png",
+                    "tesla_ego_off.png", "tesla_ego_tail.png", "tesla_ego_brake.png", "tesla_park.png", "tesla_lead.png"};
+            for (int k = 0; k < sprites.length; k++) {
+                byte[] b = TurzxFrameRenderer.readJarAssetBytesPublic(sprites[k]);
+                assertTrue(b != null && b.length > 4096, "tesla: sprite " + sprites[k]);
+            }
+            TurzxFrameRenderer.TeslaHud.Layout bad = TurzxFrameRenderer.TeslaHud.parseLayout("F:x\t1\nR:y\tz\t1\t2\t3\n# c\n");
+            assertTrue(bad.fields.isEmpty() && bad.rects.isEmpty(), "tesla: malformed layout lines are skipped");
+            assertTrue(TurzxFrameRenderer.TeslaHud.estimateBrake("D", 0, 0.0, 0.0), "brake: stopped in D");
+            assertTrue(TurzxFrameRenderer.TeslaHud.estimateBrake("D", 60, 2.0, 5.0), "brake: decelerating");
+            assertTrue(TurzxFrameRenderer.TeslaHud.estimateBrake("D", 60, 0.0, -25.0), "brake: strong regen");
+            assertTrue(!TurzxFrameRenderer.TeslaHud.estimateBrake("D", 60, 0.2, 18.0), "brake: cruising");
+            assertTrue(!TurzxFrameRenderer.TeslaHud.estimateBrake("P", 0, 0.0, 0.0), "brake: parked");
+            assertTrue(TurzxFrameRenderer.TeslaHud.headLampsOn(3) && !TurzxFrameRenderer.TeslaHud.headLampsOn(0)
+                    && !TurzxFrameRenderer.TeslaHud.headLampsOn(-1), "head lamps: raw status");
+            MonitorConfig dc = new MonitorConfig();
+            assertTrue(dc.hudDesignTesla, "design: tesla by default");
+            dc.hudDesignTesla = false;
+            File dcf = File.createTempFile("turzx_cfg_design", ".conf");
+            dcf.deleteOnExit();
+            dcf.delete();
+            saveMonitorConfig(dcf, dc);
+            assertTrue(!loadMonitorConfig(dcf).hudDesignTesla, "design: hud_design=classic roundtrip");
+            dcf.delete();
+            assertTrue(TurzxOverlayController.controlValueTvs.length == LiveTuning.ROW_LABELS.length, "design: 8 tuning rows sized");
+            assertTrue("신규".equals(LiveTuning.valueText(7)), "design: tuning value text");
+        } catch (Exception e) {
+            throw new RuntimeException("v1.5.0 Tesla HUD self-test failed", e);
         }
 
         System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + Chromium 1:1 HUD Assets + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");

@@ -1,0 +1,1190 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TURZX HUD 테슬라 스타일</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  /* ===== Tesla-style dark palette (also the Java renderer's colour table) ===== */
+  :root {
+    --bg: #000000;          /* panel background */
+    --card: #17181B;        /* cards */
+    --card-hi: #202226;     /* raised elements inside cards */
+    --track: #2A2C31;       /* empty bars / tracks */
+    --txt: #F5F5F7;         /* primary */
+    --txt2: #8E9099;        /* secondary */
+    --txt3: #5A5D64;        /* labels / inactive */
+    --off: #34363C;         /* inactive icons */
+    --blue: #3E6AE1;        /* Tesla blue: autopilot path, active */
+    --blue-hi: #6E95FF;     /* blue text on dark */
+    --cool: #7EA6FF;        /* A/C (cooling) */
+    --heat: #FF9A5C;        /* heater */
+    --green: #3DD68C;       /* regeneration */
+    --amber: #F5A623;       /* low tyre / low battery / close lead */
+    --red: #E31937;         /* Tesla red: critical / speed camera */
+    --num: 'Public Sans', 'Noto Sans KR', sans-serif;
+    --kr: 'Noto Sans KR', 'Public Sans', 'Malgun Gothic', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #0B0B0C; }
+  body { color: var(--txt); font-family: var(--kr); min-height: 100vh; }
+
+  /* ===== Review page chrome ===== */
+  .toolbar {
+    position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px;
+    padding: 12px 20px; background: #101012f2; border-bottom: 1px solid #1E1F22; backdrop-filter: blur(6px);
+  }
+  .toolbar h1 { font-size: 15px; font-weight: 700; margin-right: auto; }
+  .toolbar h1 small { color: #7D8088; font-weight: 500; margin-left: 8px; }
+  .ctl { display: flex; align-items: center; gap: 8px; color: #8A8D95; font-size: 12px; }
+  .seg { display: inline-flex; border: 1px solid #2B2D32; border-radius: 8px; overflow: hidden; }
+  .seg button { background: transparent; color: #A7AAB2; border: 0; padding: 7px 12px; font: 600 12.5px var(--kr); cursor: pointer; }
+  .seg button + button { border-left: 1px solid #2B2D32; }
+  .seg button.on { background: #3E6AE133; color: #EEF2FF; }
+  .seg button:focus-visible { outline: 2px solid var(--blue-hi); outline-offset: -2px; }
+  main { padding: 24px 20px 56px; display: flex; flex-direction: column; align-items: center; gap: 30px; }
+  figure { width: 100%; max-width: 1440px; }
+  figure[hidden] { display: none; }
+  figcaption { margin-top: 10px; color: #7D8088; font-size: 13px; }
+  figcaption b { color: #CDD0D6; }
+  .frame { position: relative; width: 100%; border-radius: 12px; overflow: hidden; background: #000; box-shadow: 0 0 0 7px #000, 0 0 0 8px #26272b, 0 18px 50px #0008; }
+  .notes { width: 100%; max-width: 1440px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .note { background: #111214; border: 1px solid #1E1F23; border-radius: 12px; padding: 16px 18px; }
+  .note h3 { font-size: 14px; margin-bottom: 8px; }
+  .note ul { padding-left: 18px; color: #A6A9B1; font-size: 13px; line-height: 1.65; }
+  .note li b { color: #E4E6EA; }
+
+  /* ===== Panel ===== */
+  .lcd { position: absolute; left: 0; top: 0; width: 960px; background: var(--bg); transform-origin: 0 0; overflow: hidden; }
+  .lcd[data-m="92"] { height: 231px; }
+  .lcd[data-m="123"] { height: 360px; }
+  .num { font-family: var(--num); font-variant-numeric: tabular-nums; letter-spacing: -0.015em; }
+  .lbl { font-size: 10px; font-weight: 500; color: var(--txt2); }
+  .card { position: absolute; background: var(--card); border-radius: 14px; overflow: hidden; }
+
+  /* --- Driving visualisation (with speed, limits and turn-by-turn) --- */
+  .viz { background: linear-gradient(180deg, #24262B 0%, #17181C 45%, #101114 100%); }
+  .viz canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .vleft { position: absolute; left: 14px; top: 10px; display: flex; flex-direction: column; gap: var(--vleft-gap); }
+  .vspeed { display: flex; align-items: flex-start; gap: 9px; }
+  .prnd { display: flex; flex-direction: column; gap: 1px; margin-top: 4px; font: 600 9.5px var(--num); color: var(--txt3); line-height: 1.15; }
+  .prnd span.on { color: var(--txt); font-weight: 700; }
+  .speed { line-height: 0.9; }
+  .speed .num { font-size: var(--spd-fs); font-weight: 500; }
+  .speed .u { display: block; font: 500 10px var(--num); color: var(--txt2); margin-top: 4px; letter-spacing: 0.02em; }
+  .limits { display: flex; align-items: center; gap: 8px; }
+  .limit { width: var(--lim-d); height: var(--lim-d); border-radius: 50%; background: #fff; border: 3.5px solid var(--red); display: grid; place-items: center; flex: none; }
+  .limit .num { color: #111; font-weight: 700; font-size: var(--lim-fs); }
+  .limit.road { border-color: var(--blue); }   /* no camera event: current road speed limit */
+  .ap { display: flex; align-items: center; gap: 4px; }
+  .ap svg { width: 20px; height: 20px; }
+  .ap .num { font-size: 15px; font-weight: 600; color: var(--blue-hi); }
+  .ap.off .num { color: var(--txt3); }
+  .sect { font-size: 9.5px; color: var(--txt2); white-space: nowrap; line-height: 1.3; }
+  .sect b { font-family: var(--num); color: var(--txt); font-weight: 600; }
+  .tbt {
+    position: absolute; right: 10px; top: 10px; display: flex; align-items: center; gap: 9px;
+    padding: var(--tbt-pad); border-radius: 12px; background: rgba(14, 15, 18, 0.86); border: 1px solid #2A2C31; max-width: var(--tbt-max);
+  }
+  .tbt svg { flex: none; width: var(--turn-sz); height: var(--turn-sz); }
+  .tbt-txt { min-width: 0; line-height: 1.05; }
+  .tbt-txt .num { font-size: var(--nav-fs); font-weight: 600; }
+  .tbt-txt .u { font: 500 11px var(--num); color: var(--txt2); margin-left: 2px; }
+  .tbt-txt .road { display: block; font-size: 10.5px; color: var(--txt2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; }
+  .tbt-txt .road b { font-family: var(--num); color: var(--txt); font-weight: 600; margin-left: 4px; }
+  .tbt.idle .tbt-txt .road { margin-top: 0; font-size: 11px; }
+  .ap .wheel { display: inline-flex; width: 20px; height: 20px; transform-origin: 50% 50%; will-change: transform; }
+  .vtpms {
+    position: absolute; right: 8px; bottom: 8px; display: grid; grid-template-columns: auto var(--tp-car-w) auto;
+    grid-template-rows: auto auto auto; column-gap: 7px; row-gap: 1px; align-items: center;
+    padding: 6px 9px 5px; border-radius: 10px; background: rgba(14, 15, 18, 0.86); border: 1px solid #2A2C31;
+  }
+  .vtpms.top { top: 10px; bottom: auto; }
+  .vtpms svg { grid-row: 1 / span 2; grid-column: 2; width: var(--tp-car-w); height: var(--tp-car-h); }
+  .vtpms .num { font-size: var(--tp-fs); font-weight: 600; line-height: 1.1; }
+  .vtpms .l { text-align: right; }
+  .vtpms .warn { color: var(--amber); }
+  .vtpms .psi { grid-column: 1 / span 3; text-align: center; font: 500 8.5px var(--num); color: var(--txt3); margin-top: 1px; }
+  .vbot { position: absolute; left: 14px; right: 14px; bottom: 9px; display: flex; justify-content: space-between; font-size: 9.5px; color: var(--txt3); }
+  .vbot b { font-family: var(--num); color: var(--txt2); font-weight: 600; }
+
+  /* --- Battery card --- */
+  .bat { padding: 12px 14px; display: flex; flex-direction: column; }
+  .bat-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .bat-main { display: flex; justify-content: space-between; align-items: flex-end; margin-top: 2px; }
+  .soc .num { font-size: var(--soc-fs); font-weight: 600; line-height: 1; }
+  .soc .u { font: 500 15px var(--num); color: var(--txt2); margin-left: 1px; }
+  .range { text-align: right; line-height: 1; }
+  .range .num { font-size: var(--rng-fs); font-weight: 600; }
+  .range .u { font: 500 12px var(--num); color: var(--txt2); margin-left: 2px; }
+  .range .eff { display: block; font: 500 10px var(--num); color: var(--txt2); margin-top: 4px; }
+  .pillbar { position: relative; height: var(--pill-h); border-radius: 99px; background: var(--track); margin-top: 8px; overflow: hidden; flex: none; }
+  .pillbar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 99px; background: var(--txt); }
+  .pillbar.low i { background: var(--amber); }
+  .pillbar .tick { position: absolute; top: 2px; bottom: 2px; width: 1.5px; background: #00000066; }
+  .kv { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: var(--kv-gap); }
+  .kv div { background: var(--card-hi); border-radius: 9px; padding: 5px 8px 6px; }
+  .kv .lbl { display: block; font-size: 9.5px; }
+  .kv .num { font-size: var(--kv-fs); font-weight: 600; line-height: 1.15; }
+  .kv .u { font: 500 10px var(--num); color: var(--txt2); margin-left: 1px; }
+  .kv.cells { margin-top: 8px; }
+  .pwr { margin-top: auto; }
+  .pwr-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .pwr-head .num { font-size: 13px; font-weight: 600; }
+  .pwr-bar { position: relative; height: 5px; border-radius: 3px; background: var(--track); margin-top: 5px; }
+  .pwr-bar i { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+  .pwr-bar .zero { position: absolute; top: -3px; bottom: -3px; width: 2px; border-radius: 1px; background: #C9CBD1; }
+
+  /* --- Tyres card --- */
+  .tyre { display: grid; align-items: center; justify-items: center; }
+  .tyre .lbl { position: absolute; left: 12px; top: 10px; }
+  .tyre-grid { display: grid; grid-template-columns: 1fr auto 1fr; grid-template-rows: 1fr 1fr; column-gap: var(--ty-gap); align-items: center; }
+  .tyre-grid svg { grid-row: 1 / span 2; grid-column: 2; width: var(--car-w); height: var(--car-h); }
+  .tyre-grid .num { font-size: var(--ty-fs); font-weight: 600; line-height: 1; }
+  .tyre-grid .l { text-align: right; }
+  .tyre-grid .warn { color: var(--amber); }
+  .tyre-grid .u { display: block; font: 500 8.5px var(--num); color: var(--txt3); margin-top: 2px; }
+
+  /* --- Media card --- */
+  .media { padding: var(--md-pad); display: flex; flex-direction: column; }
+  .md-top { display: flex; gap: 12px; min-width: 0; }
+  .media[data-layout="stack"] .md-top { flex-direction: column; gap: 12px; }
+  .art { flex: none; width: var(--art); height: var(--art); border-radius: 8px; background: linear-gradient(135deg, #5A3E8C 0%, #2B5DA8 55%, #1C8C80 100%); position: relative; overflow: hidden; }
+  .art::after { content: "♪"; position: absolute; inset: 0; display: grid; place-items: center; color: #ffffffd0; font-size: calc(var(--art) * 0.38); }
+  .md-txt { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 3px; }
+  .md-src { font-size: 9.5px; color: var(--txt3); font-weight: 500; }
+  .md-title { font-family: var(--num); font-weight: 600; font-size: var(--mt-fs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .md-artist { font-size: var(--ma-fs); color: var(--txt2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .md-bottom { margin-top: auto; }
+  .md-prog { height: 3px; border-radius: 2px; background: var(--track); overflow: hidden; }
+  .md-prog i { display: block; height: 100%; background: var(--txt); }
+  .md-row { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; font: 500 10px var(--num); color: var(--txt2); }
+  .md-ctrl { display: flex; align-items: center; gap: var(--ctrl-gap); color: var(--txt); }
+  .md-ctrl svg { width: var(--ctrl-sz); height: var(--ctrl-sz); }
+  .md-ctrl .pp { width: calc(var(--ctrl-sz) + 6px); height: calc(var(--ctrl-sz) + 6px); }
+
+  /* --- Bottom climate bar --- */
+  .bar { position: absolute; left: 8px; right: 8px; display: flex; align-items: center; gap: var(--bar-gap); padding: 0 8px; }
+  .bar .sep { width: 1px; align-self: stretch; margin: 5px 0; background: #1F2125; flex: none; }
+  .cl-temp { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .cl-temp .num { font-size: var(--temp-fs); font-weight: 600; line-height: 1; }
+  .cl-temp .num.heat { color: var(--heat); }
+  .cl-temp .num.cool { color: var(--cool); }
+  .cl-temp .num.off { color: var(--txt3); }
+  .state { font-size: var(--st-fs); font-weight: 700; padding: 3px 8px; border-radius: 99px; background: var(--card-hi); color: var(--txt2); }
+  .state.heat { background: #FF9A5C24; color: var(--heat); }
+  .state.cool { background: #7EA6FF24; color: var(--cool); }
+  .state.auto { font-family: var(--num); letter-spacing: 0.04em; background: #121316; border: 1px solid #1E2024; color: var(--txt3); }
+  .state.auto.on { background: #3E6AE12E; border-color: #3E6AE166; color: var(--blue-hi); }
+  .cl-air { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+  .cl-air .env { margin-left: 6px; padding-left: 12px; border-left: 1px solid #1F2125; }
+  .cl-air .seat { width: var(--seat-sz); height: var(--seat-sz); flex: none; }
+  .fanlv { display: flex; align-items: center; gap: 6px; }
+  .fanlv .lbl { font-size: var(--st-fs); }
+  .fanlv .num { font-size: calc(var(--st-fs) + 5px); font-weight: 600; }
+  .fanlv .bars { display: flex; gap: 2px; align-items: flex-end; height: var(--bars-h); }
+  .fanlv .bars i { width: 3.5px; border-radius: 1px; background: var(--track); }
+  .fanlv .bars i.on { background: var(--blue-hi); }
+  .chips { flex: 1; display: flex; gap: var(--chip-gap); min-width: 0; }
+  .chip {
+    flex: 1 1 0; min-width: 0; height: var(--chip-h); border-radius: 99px; display: flex; align-items: center; justify-content: center; gap: 4px;
+    background: #121316; border: 1px solid #1E2024; color: var(--txt3); font-size: var(--chip-fs); font-weight: 700; white-space: nowrap;
+  }
+  .chip svg { width: var(--chip-ic); height: var(--chip-ic); flex: none; }
+  .chip.txt { font-family: var(--num); font-size: var(--chip-fs); font-weight: 700; letter-spacing: 0.04em; }
+  .chip.on { background: #3E6AE12E; border-color: #3E6AE166; color: var(--txt); }
+  .chip.on svg { color: var(--blue-hi); }
+  .chip.on.heat { background: #FF9A5C26; border-color: #FF9A5C66; }
+  .chip.on.heat svg { color: var(--heat); }
+  .chip.on.cool svg { color: var(--cool); }
+  .env { display: flex; flex-direction: column; gap: 2px; font-size: 9.5px; color: var(--txt3); white-space: nowrap; line-height: 1.15; }
+  .env b { font: 600 calc(var(--st-fs) + 1.5px) var(--num); color: var(--txt2); margin-left: 4px; }
+
+  body.shot { background: #000; }
+  body.shot .toolbar, body.shot .notes, body.shot figcaption { display: none; }
+  body.shot main { padding: 0; display: block; }
+  body.shot figure { max-width: none; }
+  body.shot .frame { border-radius: 0; box-shadow: none; }
+</style>
+</head>
+<body>
+  <div class="toolbar" role="toolbar" aria-label="시안 보기 설정">
+    <h1>TURZX HUD · 테슬라 스타일<small>v4 · 9.2" 1920×462 / 12.3" 1920×720</small></h1>
+    <div class="ctl">패널
+      <div class="seg" id="segModel"><button data-v="both" class="on">둘 다</button><button data-v="92">9.2"</button><button data-v="123">12.3"</button></div>
+    </div>
+    <div class="ctl">상황
+      <div class="seg" id="segScene"><button data-v="drive" class="on">주행</button><button data-v="regen">회생·근접</button><button data-v="park">정차·경고</button></div>
+    </div>
+    <div class="ctl">램프
+      <div class="seg" id="segLamp"><button data-v="scene" class="on">장면값</button><button data-v="off">끔</button><button data-v="head">전조등</button><button data-v="brake">제동등</button><button data-v="both">둘 다</button></div>
+    </div>
+    <div class="ctl">애니메이션
+      <div class="seg" id="segAnim"><button data-v="on" class="on">켜기</button><button data-v="off">끄기</button></div>
+    </div>
+  </div>
+
+  <main>
+    <figure id="fig92"><div class="frame" id="frame92"></div>
+      <figcaption><b>TURZX 9.2"</b> 1920×462 px · 960×231 dp</figcaption></figure>
+    <figure id="fig123"><div class="frame" id="frame123"></div>
+      <figcaption><b>TURZX 12.3"</b> 1920×720 px · 960×360 dp</figcaption></figure>
+
+    <section class="notes" aria-label="디자인 노트">
+      <div class="note"><h3>이번 수정</h3><ul>
+        <li><b>TBT를 주행 화면 안으로</b> — 회전 안내를 시각화 오른쪽 위 카드로. 제한속도 · 크루즈는 테슬라처럼 속도 바로 아래.</li>
+        <li><b>공조 하단 바</b> — 온도 숫자 색으로 난방(주황)/냉방(파랑), 옆에 상태 태그. 앉은 사람 아이콘의 화살표로 바람 방향(상체 · 발), 풍량은 숫자 + 막대.</li>
+        <li>설정온도 옆 <b>AUTO</b>는 항상 표시: 자동 = 파랑, 수동/꺼짐 = 흐리게(냉방/난방은 온도 숫자 색으로). 기능 칩: <b>A/C</b>는 글자, <b>HEAT(온도계) · 앞유리 · 뒷유리 · 내기</b>는 심벌. 켜짐 = 색 채움, 꺼짐 = 흐리게. 조절처럼 보이는 ‹ › 는 제거.</li>
+      </ul></div>
+      <div class="note"><h3>유지한 것</h3><ul>
+        <li>배터리 카드: 표시 SOC · 주행가능 · <b>BMS · SOH</b> · 온도 · 전력(회생 초록).</li>
+        <li>내 차 이미지는 실제 3D 모델을 렌더링한 스프라이트 — <i>"2019 Kia e-Niro" by tonielpro520, CC BY 4.0</i> (1세대 DE, 2021 니로 EV와 동일 차체).</li>
+        <li>(대체용 SVG) 내 차는 <b>기아 니로 EV 2021</b>(크로스오버 비율 · 루프 스포일러/보조제동등 · 루프랙 · 샤크핀 · 리어 와이퍼 · 코너 감싸는 테일램프 · 검은 클래딩 · 스키드 플레이트), 앞차는 일반 세단 모델.</li>
+        <li>차량 모델은 세분화된 3D 표현(차체 음영 · 유리 반사 · 램프 바 · 사이드미러 · 타이어 · 디퓨저), 패널에서는 미리 그린 PNG 스프라이트.</li>
+        <li>타이어 공기압은 주행 화면 오른쪽 아래 칩(위에서 본 차 + 네 바퀴 psi, 저압은 주황). 조수석 설정 온도는 표시하지 않음.</li>
+        <li>램프: 주행 중 내 차는 꺼짐 / 미등(전조등 ON) / 제동 3가지 렌더 이미지, P에서는 사진 위에 전조등 · DRL · 바닥 빛 · 리어램프 빛을 덧그림.</li>
+        <li>P(주차)에서는 도로 대신 <b>주차된 내 차 사진</b>만 무대 조명 위에 표시(타이어 칩은 오른쪽 위로).</li>
+        <li>회전 안내 카드는 목적지 안내 중일 때만 표시(목적지 없으면 숨김).</li>
+        <li>제한속도: 단속카메라 이벤트 중에는 <b style="color:var(--red)">빨간 원</b>, 이벤트가 없으면 현재 도로 제한속도를 <b style="color:var(--blue-hi)">파란 원</b>으로.</li>
+        <li>조향각은 숫자 없이 크루즈 옆 <b>핸들 아이콘이 실제로 회전</b>하는 것으로만 표시.</li>
+      </ul></div>
+      <div class="note"><h3>Android 렌더러로 옮길 때</h3><ul>
+        <li>내 차 · 앞차 모델과 공조 아이콘은 미리 그린 스프라이트, 켜짐/꺼짐은 두 벌을 잘라 붙이기.</li>
+        <li>카드 · 라벨은 정적 배경, 숫자 · 막대 · 칩 상태만 매 프레임.</li>
+      </ul></div>
+    </section>
+  </main>
+
+<script>
+(() => {
+  "use strict";
+
+  // Sample telemetry (fields that exist in /status.json: soc, bmsSoc, soh, dteKm, climate.blowerMode, ...)
+  const SCENES = {
+    drive: {
+      soc: 74.5, bmsSoc: 71.8, soh: 98.1, dte: 342, eff: 5.6, remainKwh: 30.3, kw: 18.4, batT: 24.0, cellMax: 4.02, cellMin: 4.00, cellDiff: 20,
+      tpms: [38, 38, 39, 39], gear: "D", speed: 78, cruise: 80,
+      tbt: { dist: "280", unit: "m", road: "판교JC", next: "+450m", turn: "right" },
+      sdi: { mode: "section", limit: 80, dist: "2.3 km", avg: 80, road: 100 },
+      lane: 98, lead: 42, steer: 2.4, curve: 0.0009,
+      lights: { head: false, brake: false },
+      media: { src: "Bluetooth", title: "Supernova", artist: "aespa · Armageddon", pos: 104, dur: 178, playing: true },
+      hvac: { on: true, dr: 21.5, inT: 22.5, outT: 18.0, fan: 3, auto: true, ac: true, heat: false, fdef: false, rdef: false, recirc: true, sync: false,
+              air: { def: false, face: true, foot: true } }
+    },
+    regen: {
+      soc: 61.2, bmsSoc: 58.4, soh: 98.1, dte: 268, eff: 6.4, remainKwh: 24.9, kw: -32.5, batT: 27.0, cellMax: 3.92, cellMin: 3.89, cellDiff: 30,
+      tpms: [38, 38, 39, 39], gear: "D", speed: 64, cruise: 0,
+      tbt: { dist: "1.2", unit: "km", road: "분당수서로", next: "+3.4km", turn: "left" },
+      sdi: { mode: "traffic", limit: 60, dist: "340 m", avg: 0, road: 70 },
+      lane: 91, lead: 14, steer: -6.8, curve: -0.0022,
+      lights: { head: true, brake: true },
+      media: { src: "FM 89.1", title: "출발", artist: "김동률 · 동률", pos: 33, dur: 245, playing: true },
+      hvac: { on: true, dr: 23.0, inT: 23.5, outT: 9.0, fan: 5, auto: false, ac: false, heat: true, fdef: true, rdef: true, recirc: false, sync: true,
+              air: { def: true, face: false, foot: true } }
+    },
+    park: {
+      soc: 14.2, bmsSoc: 12.0, soh: 97.9, dte: 52, eff: 5.1, remainKwh: 5.8, kw: 0.8, batT: 31.0, cellMax: 3.55, cellMin: 3.51, cellDiff: 40,
+      tpms: [38, 37, 38, 28], gear: "P", speed: 0, cruise: 0,
+      tbt: { dist: "", unit: "", road: "목적지를 설정하세요", next: "", turn: "none" },
+      sdi: { mode: "none", limit: 0, dist: "", avg: 0, road: 50 },
+      lane: 0, lead: 0, steer: 0, curve: 0,
+      lights: { head: false, brake: false },
+      media: { src: "USB", title: "일시정지됨", artist: "미디어를 선택하세요", pos: 0, dur: 0, playing: false },
+      hvac: { on: false, dr: 0, inT: 29.5, outT: 31.0, fan: 0, auto: false, ac: false, heat: false, fdef: false, rdef: false, recirc: false, sync: false,
+              air: { def: false, face: false, foot: false } }
+    }
+  };
+
+  // Card rectangles (dp) per panel
+  const GEO = {
+    "92": {
+      h: 231,
+      viz: [8, 8, 436, 181], bat: [452, 8, 236, 181], media: [696, 8, 256, 181], cells: false,
+      mediaLayout: "row", bar: { y: 193, h: 34 },
+      vars: { "--spd-fs": "50px", "--vleft-gap": "7px", "--lim-d": "30px", "--lim-fs": "12.5px",
+              "--tbt-pad": "6px 10px 6px 8px", "--tbt-max": "170px", "--turn-sz": "26px", "--nav-fs": "20px",
+              "--soc-fs": "36px", "--rng-fs": "21px", "--pill-h": "9px", "--kv-fs": "15px", "--kv-gap": "8px",
+              "--tp-fs": "12.5px", "--tp-car-w": "13px", "--tp-car-h": "29px",
+              "--md-pad": "12px", "--art": "100px", "--mt-fs": "15px", "--ma-fs": "11px",
+              "--bar-gap": "12px", "--temp-fs": "21px", "--st-fs": "9.5px", "--seat-sz": "28px", "--bars-h": "13px",
+              "--chip-h": "26px", "--chip-gap": "6px", "--chip-fs": "11.5px", "--chip-ic": "19px" }
+    },
+    "123": {
+      h: 360,
+      viz: [8, 8, 432, 288], bat: [448, 8, 240, 288], media: [696, 8, 256, 288], cells: true,
+      mediaLayout: "stack", bar: { y: 302, h: 52 },
+      vars: { "--spd-fs": "62px", "--vleft-gap": "10px", "--lim-d": "38px", "--lim-fs": "15px",
+              "--tbt-pad": "9px 14px 9px 11px", "--tbt-max": "200px", "--turn-sz": "36px", "--nav-fs": "26px",
+              "--soc-fs": "42px", "--rng-fs": "24px", "--pill-h": "11px", "--kv-fs": "17px", "--kv-gap": "10px",
+              "--tp-fs": "15px", "--tp-car-w": "17px", "--tp-car-h": "38px",
+              "--md-pad": "16px", "--art": "150px", "--mt-fs": "20px", "--ma-fs": "13px",
+              "--bar-gap": "16px", "--temp-fs": "28px", "--st-fs": "11px", "--seat-sz": "38px", "--bars-h": "17px",
+              "--chip-h": "36px", "--chip-gap": "9px", "--chip-fs": "15px", "--chip-ic": "24px" }
+    }
+  };
+
+  const ICON = {
+    wheel: (on) => `<svg viewBox="0 0 24 24" fill="none" stroke="${on ? "#6E95FF" : "#5A5D64"}" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.2"/><path d="M3.5 10.5h6.3M14.2 10.5h6.3M12 14.2V21"/></svg>`,
+    right: '<svg viewBox="0 0 32 32" fill="none" stroke="#F5F5F7" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 28V17a5 5 0 0 1 5-5h11"/><path d="M21 6l6 6-6 6"/></svg>',
+    left: '<svg viewBox="0 0 32 32" fill="none" stroke="#F5F5F7" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 28V17a5 5 0 0 0-5-5H6"/><path d="M11 6l-6 6 6 6"/></svg>',
+    none: '<svg viewBox="0 0 32 32" fill="none" stroke="#5A5D64" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M16 29s9-8.5 9-15a9 9 0 0 0-18 0c0 6.5 9 15 9 15z"/><circle cx="16" cy="14" r="3"/></svg>',
+    carTop: '<svg viewBox="0 0 30 66" fill="none"><rect x="5" y="2" width="20" height="62" rx="9" stroke="#8E9099" stroke-width="1.6"/><path d="M8 17h14l-2 9H10z" fill="#2A2C31"/><path d="M9 46h12l-1 7H10z" fill="#2A2C31"/><rect x="1.5" y="11" width="3" height="10" rx="1.5" fill="#5A5D64"/><rect x="25.5" y="11" width="3" height="10" rx="1.5" fill="#5A5D64"/><rect x="1.5" y="45" width="3" height="10" rx="1.5" fill="#5A5D64"/><rect x="25.5" y="45" width="3" height="10" rx="1.5" fill="#5A5D64"/></svg>',
+    prev: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>',
+    next: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg>',
+    play: '<svg class="pp" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4v16l13-8z"/></svg>',
+    pause: '<svg class="pp" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>',
+    // Seated occupant facing left with three airflow arrows (windshield / face / feet)
+    seat: `<svg class="seat" viewBox="2 2 36 36" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="27" cy="8" r="3.7" fill="#8E9099"/>
+      <path d="M26 13.5 L28 25 L18 25.5 L17 35" stroke="#8E9099" stroke-width="3.4"/>
+      <path d="M33 11 L32 27.5 H21" stroke="#4A4D55" stroke-width="2"/>
+      <g data-k="airFace" stroke-width="2.6"><path d="M5 18.5 H19"/><path d="M19 18.5 L15.6 15.4 M19 18.5 L15.6 21.6"/></g>
+      <g data-k="airFoot" stroke-width="2.6"><path d="M5 25 L12.5 32.5"/><path d="M12.5 32.5 L12.6 28 M12.5 32.5 L8 32.4"/></g>
+    </svg>`,
+    auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M10 14c0-3.5 1-6.5 3.5-6.5S16 11 10 14z"/><path d="M10 14c3.5 0 6.5 1 6.5 3.5S13 20 10 14z"/><path d="M10 14c0 3.5-1 6.5-3.5 6.5S4 17 10 14z"/><path d="M10 14c-3.5 0-6.5-1-6.5-3.5S7 8 10 14z"/><text x="15.2" y="8.6" fill="currentColor" stroke="none" font-family="Public Sans, sans-serif" font-size="9" font-weight="800">A</text></svg>',
+    ac: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5v19M3.8 7.25l16.4 9.5M3.8 16.75l16.4-9.5"/><path d="M9.3 3.8L12 6.3l2.7-2.5M9.3 20.2L12 17.7l2.7 2.5M3.5 10.9l3.6-.9-1-3.5M20.5 13.1l-3.6.9 1 3.5M6.1 17.5l1-3.5-3.6-.9M17.9 6.5l-1 3.5 3.6.9"/></svg>',
+    heat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M7.2 14.2V4.8a2.3 2.3 0 0 1 4.6 0v9.4a4.1 4.1 0 1 1-4.6 0z"/><circle cx="9.5" cy="17.6" r="1.6" fill="currentColor"/><path d="M9.5 16V9"/><path d="M15.6 15.6c-.9-1 .9-1.9 0-2.9s.9-1.9 0-2.9s.9-1.9 0-2.9M19.4 15.6c-.9-1 .9-1.9 0-2.9s.9-1.9 0-2.9s.9-1.9 0-2.9"/></svg>',
+    fdef: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6.9 16.4L3 8.3Q12 2.6 21 8.3L17.1 16.4"/><path d="M8.4 22.2c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3M12 22.2c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3M15.6 22.2c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3"/><path d="M7.05 9.7L8.4 8.2l1.35 1.5M10.65 9.7L12 8.2l1.35 1.5M14.25 9.7L15.6 8.2l1.35 1.5"/></svg>',
+    rdef: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.2" y="3.6" width="17.6" height="12.4" rx="2.6"/><path d="M8.4 22.2c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3M12 22.2c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3M15.6 22.2c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3c-1.1-1.15 1.1-2.15 0-3.3"/><path d="M7.05 9.7L8.4 8.2l1.35 1.5M10.65 9.7L12 8.2l1.35 1.5M14.25 9.7L15.6 8.2l1.35 1.5"/></svg>',
+    recirc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2 17.5h1.6M20.4 17.5H22v-3.2l-2.6-1.2-3-4.1H8.2L5 13.1l-3 1v3.4"/><path d="M8.5 15.2a3.5 3 0 1 1 6.8.8"/><path d="M15.3 16l1.6-2M15.3 16l-2.3-.6"/></svg>',
+    sync: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>'
+  };
+  const CHIPS = [
+    ["ac", "A/C", "cool", true], ["heat", "HEAT", "heat"], ["fdef", "앞유리", ""],
+    ["rdef", "뒷유리", ""], ["recirc", "내기", ""]
+  ];
+
+  const box = (r) => `left:${r[0]}px;top:${r[1]}px;width:${r[2]}px;height:${r[3]}px`;
+
+  function buildLcd(m) {
+    const g = GEO[m];
+    const lcd = document.createElement("div");
+    lcd.className = "lcd";
+    lcd.dataset.m = m;
+    Object.entries(g.vars).forEach(([k, v]) => lcd.style.setProperty(k, v));
+    lcd.innerHTML = `
+      <div class="card viz" style="${box(g.viz)}">
+        <canvas data-k="road"></canvas>
+        <div class="vleft">
+          <div class="vspeed">
+            <div class="prnd" data-k="prnd"><span>P</span><span>R</span><span>N</span><span>D</span></div>
+            <div class="speed"><span class="num" data-k="speed"></span><span class="u">km/h</span></div>
+          </div>
+          <div class="limits">
+            <div class="limit" data-k="limBox"><span class="num" data-k="limit"></span></div>
+            <div class="ap" data-k="apBox"><span class="wheel" data-k="apIcon"></span><span class="num" data-k="cruise"></span></div>
+          </div>
+          <div class="sect" data-k="sect"></div>
+        </div>
+        <div class="tbt" data-k="tbtBox">
+          <span data-k="turn"></span>
+          <div class="tbt-txt"><span class="num" data-k="navDist"></span><span class="u" data-k="navUnit"></span>
+            <span class="road"><span data-k="navRoad"></span><b data-k="navNext"></b></span></div>
+        </div>
+        <div class="vbot"><span>차선 <b data-k="lane"></b></span></div>
+        <div class="vtpms" aria-label="타이어 공기압">
+          <span class="num l" data-k="tp0"></span>${ICON.carTop}<span class="num" data-k="tp1"></span>
+          <span class="num l" data-k="tp2"></span><span class="num" data-k="tp3"></span>
+          <span class="psi">psi</span>
+        </div>
+      </div>
+
+      <div class="card bat" style="${box(g.bat)}">
+        <div class="bat-head"><span class="lbl">배터리 <span style="color:var(--txt3)" data-k="remain"></span></span><span class="lbl">주행가능</span></div>
+        <div class="bat-main">
+          <div class="soc"><span class="num" data-k="soc"></span><span class="u">%</span></div>
+          <div class="range"><span class="num" data-k="dte"></span><span class="u">km</span><span class="eff" data-k="eff"></span></div>
+        </div>
+        <div class="pillbar" data-k="pill"><i data-k="pillFill"></i><span class="tick" style="left:20%"></span><span class="tick" style="left:80%"></span></div>
+        <div class="kv">
+          <div><span class="lbl">BMS</span><span class="num" data-k="bms"></span><span class="u">%</span></div>
+          <div><span class="lbl">SOH</span><span class="num" data-k="soh"></span><span class="u">%</span></div>
+          <div><span class="lbl">온도</span><span class="num" data-k="batT"></span><span class="u">°C</span></div>
+        </div>
+        ${g.cells ? `<div class="kv cells">
+          <div><span class="lbl">셀 최고</span><span class="num" data-k="cellMax"></span><span class="u">V</span></div>
+          <div><span class="lbl">셀 최저</span><span class="num" data-k="cellMin"></span><span class="u">V</span></div>
+          <div><span class="lbl">셀 편차</span><span class="num" data-k="cellDiff"></span><span class="u">mV</span></div>
+        </div>` : ""}
+        <div class="pwr">
+          <div class="pwr-head"><span class="lbl" data-k="pwrLbl"></span><span><span class="num" data-k="kw"></span><span class="lbl"> kW</span></span></div>
+          <div class="pwr-bar"><i data-k="pwrFill"></i><span class="zero" style="left:28%"></span></div>
+        </div>
+      </div>
+
+      <div class="card media" data-layout="${g.mediaLayout}" style="${box(g.media)}">
+        <div class="md-top">
+          <div class="art"></div>
+          <div class="md-txt">
+            <span class="md-src" data-k="src"></span>
+            <span class="md-title" data-k="title"></span>
+            <span class="md-artist" data-k="artist"></span>
+          </div>
+        </div>
+        <div class="md-bottom">
+          <div class="md-prog"><i data-k="prog"></i></div>
+          <div class="md-row"><span data-k="pos"></span><span data-k="dur"></span></div>
+        </div>
+      </div>
+
+      <div class="bar" style="top:${g.bar.y}px;height:${g.bar.h}px">
+        <div class="cl-temp"><span class="num" data-k="dr"></span><span class="state" data-k="hstate"></span></div>
+        <div class="sep"></div>
+        <div class="cl-air">${ICON.seat}
+          <div class="fanlv"><span class="lbl">풍량</span><span class="num" data-k="fanNum"></span>
+            <span class="bars" data-k="fan">${Array.from({ length: 7 }, (_, i) => `<i style="height:${30 + i * 11.6}%"></i>`).join("")}</span></div>
+          <div class="env"><span>실내<b data-k="inT"></b></span><span>실외<b data-k="outT"></b></span></div>
+        </div>
+        <div class="sep"></div>
+        <div class="chips">${CHIPS.map(([k, label, tone, isText]) => `<span class="chip ${tone}${isText ? " txt" : ""}" data-mode="${k}" title="${label}" aria-label="${label}">${isText ? label : ICON[k]}</span>`).join("")}</div>
+      </div>`;
+    return lcd;
+  }
+
+  const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+  function render(lcd, s) {
+    const $ = (k) => lcd.querySelector(`[data-k="${k}"]`);
+    const set = (k, v) => { const el = $(k); if (el) el.textContent = v; };
+
+    // Visualisation overlays: speed, limits, turn-by-turn
+    Array.from($("prnd").children).forEach((el) => el.classList.toggle("on", el.textContent === s.gear));
+    set("speed", s.speed);
+    // Camera event -> red-ring limit of the camera; no event -> blue-ring limit of the current road
+    const camera = s.sdi.mode !== "none" && s.sdi.limit > 0;
+    const shownLimit = camera ? s.sdi.limit : (s.sdi.road || 0);
+    $("limBox").style.display = shownLimit > 0 ? "grid" : "none";
+    $("limBox").classList.toggle("road", !camera);
+    set("limit", shownLimit);
+    $("apIcon").innerHTML = ICON.wheel(s.cruise > 0);
+    // Steering angle shown only visually: the wheel turns like the real one (openpilot: + = left = counter-clockwise)
+    $("apIcon").style.transform = `rotate(${(-s.steer).toFixed(1)}deg)`;
+    $("apBox").classList.toggle("off", !(s.cruise > 0));
+    set("cruise", s.cruise > 0 ? s.cruise : "");
+    $("sect").innerHTML = s.sdi.mode === "section" ? `구간단속 <b>${s.sdi.dist}</b> · 평균 <b>${s.sdi.avg}</b>`
+      : (s.sdi.mode === "traffic" ? `과속카메라 <b>${s.sdi.dist}</b>` : "");
+    $("turn").innerHTML = ICON[s.tbt.turn] || ICON.none;
+    // No destination (no turn-by-turn distance) -> hide the TBT card entirely
+    $("tbtBox").style.display = s.tbt.dist ? "flex" : "none";
+    set("navDist", s.tbt.dist);
+    set("navUnit", s.tbt.unit);
+    set("navRoad", s.tbt.road);
+    set("navNext", s.tbt.next);
+    set("lane", s.lane > 0 ? s.lane + "%" : "--");
+    const parked = s.gear === "P";
+    lcd.querySelector(".vbot").style.display = parked ? "none" : "";
+    lcd.querySelector(".vtpms").classList.toggle("top", parked && !s.tbt.dist);
+
+    // Battery
+    set("soc", s.soc.toFixed(1));
+    $("soc").style.color = s.soc < 20 ? "var(--amber)" : "";
+    set("dte", s.dte);
+    set("eff", `${s.eff.toFixed(1)} km/kWh`);
+    set("remain", `· 잔여 ${s.remainKwh.toFixed(1)} kWh`);
+    $("pill").classList.toggle("low", s.soc < 20);
+    $("pillFill").style.width = s.soc + "%";
+    set("bms", s.bmsSoc.toFixed(1));
+    set("soh", s.soh.toFixed(1));
+    set("batT", s.batT.toFixed(1));
+    set("cellMax", s.cellMax.toFixed(2));
+    set("cellMin", s.cellMin.toFixed(2));
+    set("cellDiff", s.cellDiff);
+    const kw = s.kw;
+    set("kw", (kw > 0 ? "+" : kw < 0 ? "−" : "") + Math.abs(kw).toFixed(1));
+    $("kw").style.color = kw < -0.05 ? "var(--green)" : "";
+    set("pwrLbl", kw < -0.05 ? "회생 제동" : (kw > 0.05 ? "출력" : "대기"));
+    const zero = 28; // % position of 0 kW: regen 0..-60 left, power 0..+150 right
+    const f = $("pwrFill");
+    if (kw >= 0) {
+      const w = Math.min(1, kw / 150) * (100 - zero);
+      f.style.left = zero + "%"; f.style.width = w + "%"; f.style.background = "var(--txt)";
+    } else {
+      const w = Math.min(1, -kw / 60) * zero;
+      f.style.left = (zero - w) + "%"; f.style.width = w + "%"; f.style.background = "var(--green)";
+    }
+
+    // Tyres
+    s.tpms.forEach((p, i) => {
+      const el = $("tp" + i);
+      el.textContent = p;
+      el.classList.toggle("warn", p > 0 && p < 31);
+    });
+
+    // Media
+    const md = s.media;
+    set("src", md.src);
+    set("title", md.title);
+    set("artist", md.artist);
+    $("prog").style.width = (md.dur > 0 ? (md.pos / md.dur) * 100 : 0) + "%";
+    set("pos", fmt(md.pos));
+    set("dur", md.dur > 0 ? "-" + fmt(md.dur - md.pos) : "--:--");
+
+    // Climate: temperature tinted by heating / cooling, airflow arrows, fan level, function chips
+    const h = s.hvac;
+    const tone = !h.on ? "off" : (h.heat ? "heat" : (h.ac ? "cool" : ""));
+    const dr = $("dr");
+    dr.textContent = h.on ? h.dr.toFixed(1) + "°" : "OFF";
+    dr.className = "num " + tone;
+    const st = $("hstate");
+    // Only the AUTO state is tagged next to the set temperature (heating / cooling show in the number colour)
+    st.textContent = "AUTO";
+    st.className = "state auto" + (h.on && h.auto ? " on" : "");
+    const arrow = (k, on) => { const el = $(k); el.setAttribute("stroke", on ? "#6E95FF" : "#34363C"); };
+    arrow("airFace", h.on && h.air.face);
+    arrow("airFoot", h.on && h.air.foot);
+    set("fanNum", h.on ? h.fan : "-");
+    Array.from($("fan").children).forEach((el, i) => el.classList.toggle("on", h.on && i < h.fan));
+    set("inT", h.inT.toFixed(1) + "°");
+    set("outT", h.outT.toFixed(1) + "°");
+    lcd.querySelectorAll(".chip").forEach((el) => {
+      const k = el.dataset.mode;
+      el.classList.toggle("on", !!h[k] && (h.on || k === "rdef"));
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tesla-style visualisation: white lane lines, blue path, rear-view ego car, grey lead car
+  // ---------------------------------------------------------------------------
+  function carShape(ctx, cx, by, w, body, glass, tail, shadowA) {
+    const h = w * 0.78;
+    ctx.fillStyle = `rgba(0,0,0,${shadowA})`;
+    ctx.beginPath(); ctx.ellipse(cx, by - h * 0.02, w * 0.6, h * 0.11, 0, 0, Math.PI * 2); ctx.fill();
+    const g = ctx.createLinearGradient(0, by - h, 0, by);
+    g.addColorStop(0, body[0]);
+    g.addColorStop(1, body[1]);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(cx - w * 0.5, by - h * 0.12);
+    ctx.quadraticCurveTo(cx - w * 0.52, by - h * 0.5, cx - w * 0.44, by - h * 0.56);
+    ctx.lineTo(cx - w * 0.3, by - h * 0.92);
+    ctx.quadraticCurveTo(cx, by - h * 1.0, cx + w * 0.3, by - h * 0.92);
+    ctx.lineTo(cx + w * 0.44, by - h * 0.56);
+    ctx.quadraticCurveTo(cx + w * 0.52, by - h * 0.5, cx + w * 0.5, by - h * 0.12);
+    ctx.quadraticCurveTo(cx, by + h * 0.02, cx - w * 0.5, by - h * 0.12);
+    ctx.fill();
+    ctx.fillStyle = glass;
+    ctx.beginPath();
+    ctx.moveTo(cx - w * 0.36, by - h * 0.6);
+    ctx.lineTo(cx - w * 0.26, by - h * 0.86);
+    ctx.quadraticCurveTo(cx, by - h * 0.92, cx + w * 0.26, by - h * 0.86);
+    ctx.lineTo(cx + w * 0.36, by - h * 0.6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = tail;
+    ctx.beginPath();
+    ctx.roundRect(cx - w * 0.42, by - h * 0.5, w * 0.84, Math.max(2, h * 0.06), h * 0.03);
+    ctx.fill();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Detailed car model (rear, slightly elevated view) as SVG -> Image. On the panel this becomes a pre-rendered
+  // PNG sprite that is only scaled per frame, so the detail costs nothing at runtime.
+  // viewBox 200 x 160; the bottom of the shadow (y = 158) is the ground contact line.
+  // ---------------------------------------------------------------------------
+  function carSvg(c) {
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 160">
+  <defs>
+    <radialGradient id="sh" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#000" stop-opacity="${c.shadow}"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="${c.b0}"/><stop offset="0.45" stop-color="${c.b1}"/><stop offset="1" stop-color="${c.b2}"/>
+    </linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#000" stop-opacity="0.34"/><stop offset="0.16" stop-color="#000" stop-opacity="0.06"/>
+      <stop offset="0.5" stop-color="#000" stop-opacity="0"/><stop offset="0.84" stop-color="#000" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0.34"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${c.g0}"/><stop offset="1" stop-color="${c.g1}"/></linearGradient>
+    <linearGradient id="lamp" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FF5A6E"/><stop offset="1" stop-color="#B0101F"/></linearGradient>
+    <filter id="glow" x="-20%" y="-200%" width="140%" height="500%"><feGaussianBlur stdDeviation="${c.glow}"/></filter>
+  </defs>
+  <ellipse cx="100" cy="146" rx="99" ry="12" fill="url(#sh)"/>
+  <!-- tyres peeking out under the body -->
+  <rect x="17" y="126" width="27" height="24" rx="6" fill="#0A0B0D"/>
+  <rect x="156" y="126" width="27" height="24" rx="6" fill="#0A0B0D"/>
+  <rect x="21" y="140" width="19" height="6" rx="3" fill="#1C1F24"/>
+  <rect x="160" y="140" width="19" height="6" rx="3" fill="#1C1F24"/>
+  <!-- side mirrors -->
+  <path d="M33 61 Q22 60 20 66 Q24 70 36 68 Z" fill="${c.b1}"/>
+  <path d="M167 61 Q178 60 180 66 Q176 70 164 68 Z" fill="${c.b1}"/>
+  <path d="M22 66 Q26 68.5 35 67.5" stroke="#000" stroke-opacity="0.25" stroke-width="1.2" fill="none"/>
+  <path d="M178 66 Q174 68.5 165 67.5" stroke="#000" stroke-opacity="0.25" stroke-width="1.2" fill="none"/>
+  <!-- body silhouette -->
+  <path id="sil" d="M14 132 C10 118 10 104 16 96 C20 86 26 78 34 72 L52 34 C56 26 64 22 74 21 L126 21 C136 22 144 26 148 34 L166 72
+    C174 78 180 86 184 96 C190 104 190 118 186 132 C184 140 176 144 166 144 L34 144 C24 144 16 140 14 132 Z" fill="url(#body)"/>
+  <path d="M14 132 C10 118 10 104 16 96 C20 86 26 78 34 72 L52 34 C56 26 64 22 74 21 L126 21 C136 22 144 26 148 34 L166 72
+    C174 78 180 86 184 96 C190 104 190 118 186 132 C184 140 176 144 166 144 L34 144 C24 144 16 140 14 132 Z" fill="url(#side)"/>
+  <!-- panoramic glass roof + rear window -->
+  <path d="M61 33 L66 25 Q68 23.5 72 23.5 L128 23.5 Q132 23.5 134 25 L139 33 Z" fill="url(#glass)"/>
+  <path d="M70 31 L74 25.5 L92 25.5 L84 31 Z" fill="#fff" fill-opacity="0.10"/>
+  <path d="M44 70 L58 38 C60 35 63 34 67 34 L133 34 C137 34 140 35 142 38 L156 70 C140 73.5 60 73.5 44 70 Z" fill="url(#glass)"/>
+  <path d="M60 66 L70 38 L92 38 L74 67 Z" fill="#fff" fill-opacity="0.09"/>
+  <path d="M96 67.5 L112 38 L120 38 L104 68 Z" fill="#fff" fill-opacity="0.05"/>
+  <!-- C-pillar highlights + spoiler lip -->
+  <path d="M52.5 35 L35 71.5" stroke="#fff" stroke-opacity="${c.hl}" stroke-width="1.3" fill="none"/>
+  <path d="M147.5 35 L165 71.5" stroke="#fff" stroke-opacity="${c.hl}" stroke-width="1.3" fill="none"/>
+  <path d="M45 72.5 C70 77 130 77 155 72.5" stroke="#fff" stroke-opacity="${c.hl}" stroke-width="1.6" fill="none"/>
+  <path d="M46 74.5 C70 79 130 79 154 74.5" stroke="#000" stroke-opacity="0.16" stroke-width="1.2" fill="none"/>
+  <!-- trunk crease -->
+  <path d="M28 92 C60 97 140 97 172 92" stroke="#fff" stroke-opacity="${c.hl * 0.8}" stroke-width="1.2" fill="none"/>
+  <!-- tail lamps: full-width light bar + corner clusters -->
+  <path d="M24 101 C60 107.5 140 107.5 176 101" stroke="${c.lampOn}" stroke-width="7" fill="none" filter="url(#glow)" opacity="${c.glowA}"/>
+  <path d="M24 101 C60 107.5 140 107.5 176 101" stroke="#E31937" stroke-width="2.6" fill="none" stroke-linecap="round"/>
+  <path d="M16.5 97 L46 103 L44.5 111 L19 106.5 Q15.5 102 16.5 97 Z" fill="url(#lamp)"/>
+  <path d="M183.5 97 L154 103 L155.5 111 L181 106.5 Q184.5 102 183.5 97 Z" fill="url(#lamp)"/>
+  <path d="M20 100.5 L42 105" stroke="#FFD2D8" stroke-opacity="0.75" stroke-width="1.2"/>
+  <path d="M180 100.5 L158 105" stroke="#FFD2D8" stroke-opacity="0.75" stroke-width="1.2"/>
+  <!-- bumper, plate recess, reflectors, diffuser -->
+  <path d="M20 119 C60 123.5 140 123.5 180 119" stroke="#000" stroke-opacity="0.18" stroke-width="1.3" fill="none"/>
+  <rect x="78" y="111" width="44" height="13" rx="2.5" fill="#000" fill-opacity="0.22"/>
+  <rect x="81" y="113" width="38" height="9" rx="1.5" fill="${c.plate}"/>
+  <rect x="27" y="127" width="13" height="3" rx="1.5" fill="#8E1222"/>
+  <rect x="160" y="127" width="13" height="3" rx="1.5" fill="#8E1222"/>
+  <path d="M50 134 L150 134 L143 144 L57 144 Z" fill="#23272D"/>
+  <path d="M66 136 L64 143 M82 136 L81 143 M100 136 L100 143 M118 136 L119 143 M134 136 L136 143" stroke="#3A3F47" stroke-width="1.2"/>
+</svg>`;
+  }
+
+  const CAR_EGO = { b0: "#FBFBFC", b1: "#E2E4E8", b2: "#A9AEB6", g0: "#2C3139", g1: "#14171C", hl: 0.75, plate: "#E9EBEE",
+                    lampOn: "#FF2A44", glow: 3.2, glowA: 0.75, shadow: 0.6 };
+  const CAR_LEAD = { b0: "#A9ADB5", b1: "#80858E", b2: "#555A62", g0: "#262A31", g1: "#121418", hl: 0.35, plate: "#8E9198",
+                     lampOn: "#FF2A44", glow: 2.6, glowA: 0.6, shadow: 0.45 };
+  // Kia Niro EV 2021 (1st gen, DE) rear view: crossover hatch, upright rear glass with wiper, roof spoiler with
+  // high-mount stop lamp, roof rails + shark fin, corner-wrapping tail lamps with boomerang LED line, plate on the
+  // tailgate, black wheel-arch / bumper cladding, silver skid plate, vertical bumper reflectors.
+  // Generic oval badge instead of the brand logo. viewBox 200 x 170, ground contact at y = 166.
+  function niroSvg(c) {
+    const mirror = (d) => d; // shapes are written for both sides explicitly
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 170">
+  <defs>
+    <radialGradient id="sh" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#000" stop-opacity="${c.shadow}"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="${c.b0}"/><stop offset="0.5" stop-color="${c.b1}"/><stop offset="1" stop-color="${c.b2}"/>
+    </linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#000" stop-opacity="0.32"/><stop offset="0.14" stop-color="#000" stop-opacity="0.05"/>
+      <stop offset="0.5" stop-color="#000" stop-opacity="0"/><stop offset="0.86" stop-color="#000" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0.32"/>
+    </linearGradient>
+    <linearGradient id="roof" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${c.b1}"/><stop offset="1" stop-color="${c.b0}"/></linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${c.g0}"/><stop offset="1" stop-color="${c.g1}"/></linearGradient>
+    <linearGradient id="lamp" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FF5C70"/><stop offset="0.55" stop-color="#C8142A"/><stop offset="1" stop-color="#7E0A18"/></linearGradient>
+    <linearGradient id="skid" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#B9BEC5"/><stop offset="1" stop-color="#7C8189"/></linearGradient>
+    <filter id="glow" x="-30%" y="-80%" width="160%" height="260%"><feGaussianBlur stdDeviation="${c.glow}"/></filter>
+  </defs>
+  <ellipse cx="100" cy="158" rx="99" ry="12" fill="url(#sh)"/>
+  <!-- tyres + black wheel-arch cladding -->
+  <rect x="16" y="136" width="28" height="27" rx="6" fill="#0A0B0D"/>
+  <rect x="156" y="136" width="28" height="27" rx="6" fill="#0A0B0D"/>
+  <rect x="20" y="153" width="20" height="6" rx="3" fill="#1C1F24"/>
+  <rect x="160" y="153" width="20" height="6" rx="3" fill="#1C1F24"/>
+  <!-- side mirrors -->
+  <path d="M31 64 Q18 62 16 69 Q20 73.5 33 71.5 Z" fill="${c.b1}"/>
+  <path d="M169 64 Q182 62 184 69 Q180 73.5 167 71.5 Z" fill="${c.b1}"/>
+  <path d="M18 69.5 Q22 72 32 71" stroke="#000" stroke-opacity="0.28" stroke-width="1.2" fill="none"/>
+  <path d="M182 69.5 Q178 72 168 71" stroke="#000" stroke-opacity="0.28" stroke-width="1.2" fill="none"/>
+  <!-- roof (seen from above) with rails and shark fin -->
+  <path d="M48 30 L55 17.5 Q56.5 16 59 16 L141 16 Q143.5 16 145 17.5 L152 30 Z" fill="url(#roof)"/>
+  <path d="M51.5 29 L58 17" stroke="#2A2D33" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M148.5 29 L142 17" stroke="#2A2D33" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M94.5 25 Q99.5 15.5 106 25 Z" fill="#1E2126"/>
+  <!-- body silhouette (taller, more upright crossover rear) -->
+  <path d="M16 146 C12 132 12 112 16 100 C18 92 22 86 28 82 L40 46 C43 36 50 30 60 28 L140 28 C150 30 157 36 160 46 L172 82
+    C178 86 182 92 184 100 C188 112 188 132 184 146 C182 152 176 154 168 154 L32 154 C24 154 18 152 16 146 Z" fill="url(#body)"/>
+  <path d="M16 146 C12 132 12 112 16 100 C18 92 22 86 28 82 L40 46 C43 36 50 30 60 28 L140 28 C150 30 157 36 160 46 L172 82
+    C178 86 182 92 184 100 C188 112 188 132 184 146 C182 152 176 154 168 154 L32 154 C24 154 18 152 16 146 Z" fill="url(#side)"/>
+  <!-- roof spoiler with high-mount stop lamp -->
+  <path d="M43 39 C49 31 58 29.5 67 29.5 L133 29.5 C142 29.5 151 31 157 39 C140 41.5 60 41.5 43 39 Z" fill="${c.b1}"/>
+  <path d="M44 39.5 C60 42 140 42 156 39.5" stroke="#000" stroke-opacity="0.22" stroke-width="1.2" fill="none"/>
+  <rect x="85" y="33.3" width="30" height="2.6" rx="1.3" fill="${c.stop}"/>
+  <!-- upright rear glass + wiper -->
+  <path d="M41 75 L47 43.5 C49 41.5 53 40.5 57 40.5 L143 40.5 C147 40.5 151 41.5 153 43.5 L159 75 C140 78.5 60 78.5 41 75 Z" fill="url(#glass)"/>
+  <path d="M56 72 L63 44 L84 44 L70 73 Z" fill="#fff" fill-opacity="0.09"/>
+  <path d="M92 74 L104 44 L112 44 L100 74.5 Z" fill="#fff" fill-opacity="0.05"/>
+  <path d="M100 73 L76 61" stroke="#0B0C0E" stroke-width="1.8" stroke-linecap="round"/>
+  <circle cx="100" cy="73.2" r="2" fill="#0B0C0E"/>
+  <!-- D-pillar highlights -->
+  <path d="M40.6 47 L28.6 81.5" stroke="#fff" stroke-opacity="${c.hl}" stroke-width="1.3" fill="none"/>
+  <path d="M159.4 47 L171.4 81.5" stroke="#fff" stroke-opacity="${c.hl}" stroke-width="1.3" fill="none"/>
+  <path d="M42 77 C60 80.5 140 80.5 158 77" stroke="#000" stroke-opacity="0.14" stroke-width="1.2" fill="none"/>
+  <!-- tail lamps: wrap around the corners, boomerang LED signature -->
+  <path d="M17 97 C19 89 24 84 31 82 L55 85.5 Q57.5 86.5 56.5 89 L53 97 Q52 99 49 99 L20.5 102.5 Q16 101.5 17 97 Z" fill="url(#lamp)"/>
+  <path d="M183 97 C181 89 176 84 169 82 L145 85.5 Q142.5 86.5 143.5 89 L147 97 Q148 99 151 99 L179.5 102.5 Q184 101.5 183 97 Z" fill="url(#lamp)"/>
+  <path d="M22 92 L51.5 90.5 L48.5 96.5" stroke="${c.led}" stroke-width="5" fill="none" filter="url(#glow)" opacity="${c.glowA}"/>
+  <path d="M178 92 L148.5 90.5 L151.5 96.5" stroke="${c.led}" stroke-width="5" fill="none" filter="url(#glow)" opacity="${c.glowA}"/>
+  <path d="M22 92 L51.5 90.5 L48.5 96.5" stroke="#FFE1E5" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M178 92 L148.5 90.5 L151.5 96.5" stroke="#FFE1E5" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- tailgate: badge, plate + plate lamp, lower edge -->
+  <ellipse cx="100" cy="92" rx="9.5" ry="4.6" fill="none" stroke="${c.badge}" stroke-width="1.5"/>
+  <rect x="75" y="104" width="50" height="15" rx="2.6" fill="#000" fill-opacity="0.2"/>
+  <rect x="78" y="106" width="44" height="10.5" rx="1.6" fill="${c.plate}"/>
+  <path d="M30 122.5 C60 126.5 140 126.5 170 122.5" stroke="#000" stroke-opacity="0.24" stroke-width="1.3" fill="none"/>
+  <!-- black bumper cladding, silver skid plate, vertical reflectors -->
+  <path d="M17.5 139 C50 143.5 150 143.5 182.5 139 L184.5 146 C183 151.5 176.5 154 168 154 L32 154 C23.5 154 17 151.5 15.5 146 Z" fill="#1B1D21"/>
+  <path d="M13.2 116 C19 117.5 25 123 28 131 C30.5 138 34.5 144.5 42 146.5 L42 154 L32 154 C24 154 18 152 16 146 C12.8 136 12.4 125 13.2 116 Z" fill="#1B1D21"/>
+  <path d="M186.8 116 C181 117.5 175 123 172 131 C169.5 138 165.5 144.5 158 146.5 L158 154 L168 154 C176 154 182 152 184 146 C187.2 136 187.6 125 186.8 116 Z" fill="#1B1D21"/>
+  <path d="M14 117 C19.5 118.6 24.6 123.6 27.2 130.6" stroke="#fff" stroke-opacity="0.12" stroke-width="1" fill="none"/>
+  <path d="M186 117 C180.5 118.6 175.4 123.6 172.8 130.6" stroke="#fff" stroke-opacity="0.12" stroke-width="1" fill="none"/>
+  <path d="M64 142 L136 142 L130 152.5 L70 152.5 Z" fill="url(#skid)"/>
+  <rect x="22" y="129" width="4" height="8.5" rx="2" fill="#8E1222"/>
+  <rect x="174" y="129" width="4" height="8.5" rx="2" fill="#8E1222"/>
+</svg>`;
+  }
+  const NIRO_EGO = { b0: "#FCFCFD", b1: "#E4E6EA", b2: "#AEB3BB", g0: "#2C3139", g1: "#14171C", hl: 0.7, plate: "#E9EBEE",
+                     led: "#FF3048", glow: 2.6, glowA: 0.85, stop: "#5A1018", badge: "#8E939B", shadow: 0.6 };
+  const MODEL_SEDAN = { svg: (c) => carSvg(c), vbW: 200, vbH: 160, span: 172, contactY: 158, topY: 21 };
+  const MODEL_NIRO = { svg: (c) => niroSvg(c), vbW: 200, vbH: 170, span: 176, contactY: 166, topY: 16 };
+
+  // Rendered sprite of the real car (3D model "2019 Kia e-Niro" by tonielpro520, CC BY 4.0), rear view at 18° elevation
+  const MODEL_NIRO_IMG = {
+    src: "turzx_niro_rear_off.png", wScale: 1.13, fallback: null,
+    variants: { off: "turzx_niro_rear_off.png", tail: "turzx_niro_rear_tail.png", brake: "turzx_niro_rear_brake.png" },
+    carW: 560, carH: 555, margin: 54.19, size: [668, 664]   // sprite metrics from make_lamp_sprites.py
+  };
+  let lampMode = "scene";
+  /** Effective lamp state: scene telemetry unless the review toolbar overrides it. */
+  function lampsOf(s) {
+    if (lampMode === "off") return { head: false, brake: false };
+    if (lampMode === "head") return { head: true, brake: false };
+    if (lampMode === "brake") return { head: false, brake: true };
+    if (lampMode === "both") return { head: true, brake: true };
+    return s.lights || { head: false, brake: false };
+  }
+  const carImgs = {};
+  function carImage(key, model, colors) {
+    if (!carImgs[key]) {
+      const img = new Image();
+      img.onload = () => { try { draw(); } catch (e) { /* first layout pass */ } };
+      img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(model.svg(colors));
+      carImgs[key] = img;
+    }
+    return carImgs[key];
+  }
+  /** Draws a car model with its ground contact at (cx, by); w = body width in px. Returns the body height. */
+  function drawCar(ctx, key, model, colors, cx, by, w) {
+    if (model.src) {
+      const ikey = key + "|" + model.src;
+      if (!carImgs[ikey]) {
+        const img = new Image();
+        img.onload = () => { try { draw(); } catch (e) { /* first layout pass */ } };
+        img.src = model.src;
+        carImgs[ikey] = img;
+      }
+      const img = carImgs[ikey];
+      if (img.complete && img.naturalWidth > 0 && model.carW) {
+        // Sprite with a glow margin: place the car body, let the bloom spill over
+        const k = (w * model.wScale) / model.carW;
+        const bodyH = model.carH * k;
+        const sh = ctx.createRadialGradient(cx, by - bodyH * 0.02, 0, cx, by - bodyH * 0.02, model.carW * k * 0.58);
+        sh.addColorStop(0, "rgba(0,0,0,0.55)");
+        sh.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.save();
+        ctx.translate(cx, by - bodyH * 0.02);
+        ctx.scale(1, 0.14);
+        ctx.translate(-cx, -(by - bodyH * 0.02));
+        ctx.fillStyle = sh;
+        ctx.fillRect(cx - model.carW * k * 0.6, by - bodyH * 0.02 - model.carW * k * 0.6, model.carW * k * 1.2, model.carW * k * 1.2);
+        ctx.restore();
+        ctx.drawImage(img, cx - (model.carW / 2 + model.margin) * k, by - (model.carH + model.margin) * k,
+                      model.size[0] * k, model.size[1] * k);
+        return bodyH * 0.95;
+      }
+      if (img.complete && img.naturalWidth > 0) {
+        const fullW = w * model.wScale, fullH = fullW * img.naturalHeight / img.naturalWidth;
+        const sh = ctx.createRadialGradient(cx, by - fullH * 0.02, 0, cx, by - fullH * 0.02, fullW * 0.58);
+        sh.addColorStop(0, "rgba(0,0,0,0.55)");
+        sh.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.save();
+        ctx.translate(cx, by - fullH * 0.02);
+        ctx.scale(1, 0.14);
+        ctx.translate(-cx, -(by - fullH * 0.02));
+        ctx.fillStyle = sh;
+        ctx.fillRect(cx - fullW * 0.6, by - fullH * 0.02 - fullW * 0.6, fullW * 1.2, fullW * 1.2);
+        ctx.restore();
+        ctx.drawImage(img, cx - fullW / 2, by - fullH, fullW, fullH);
+        return fullH * 0.95;
+      }
+      if (model.fallback) return drawCar(ctx, key + "-fb", model.fallback, colors, cx, by, w);
+      return 0;
+    }
+    const img = carImage(key, model, colors);
+    const k = w / model.span;              // px per SVG unit
+    const fullW = model.vbW * k, fullH = model.vbH * k;
+    if (img.complete && img.naturalWidth > 0) {
+      ctx.drawImage(img, cx - fullW / 2, by - model.contactY * k, fullW, fullH);
+    }
+    return (model.contactY - model.topY) * k;
+  }
+
+  // Parked (gear P): no road, only the car photo on a softly lit floor
+  const PARK_IMG = new Image();
+  PARK_IMG.onload = () => { try { draw(); } catch (e) { /* first layout pass */ } };
+  PARK_IMG.src = "turzx_niro_ev_park.png";
+  // Lamp positions in turzx_niro_ev_park.png (960 x 470)
+  const PARK_LAMPS = {
+    head: [[345, 210], [390, 202]], headFar: [42, 192], drl: [[348, 303], [356, 348]], rear: [938, 145]
+  };
+  function glowAt(ctx, x, y, r, rgb, a) {
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, `rgba(${rgb},${a})`);
+    g.addColorStop(0.35, `rgba(${rgb},${a * 0.45})`);
+    g.addColorStop(1, `rgba(${rgb},0)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+  function drawParked(ctx, W, H, s) {
+    const floorY = H * 0.9;
+    const glow = ctx.createRadialGradient(W * 0.58, floorY, 0, W * 0.58, floorY, W * 0.55);
+    glow.addColorStop(0, "rgba(255,255,255,0.10)");
+    glow.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
+    if (!(PARK_IMG.complete && PARK_IMG.naturalWidth > 0)) return;
+    const w = Math.min(W * 0.78, H * 1.36);
+    const h = w * PARK_IMG.naturalHeight / PARK_IMG.naturalWidth;
+    const cx = W * 0.58, bottom = H * 0.96;
+    ctx.save();
+    ctx.translate(cx, bottom - h * 0.05);
+    ctx.scale(1, 0.12);
+    const sh = ctx.createRadialGradient(0, 0, 0, 0, 0, w * 0.52);
+    sh.addColorStop(0, "rgba(0,0,0,0.65)");
+    sh.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = sh;
+    ctx.fillRect(-w * 0.6, -w * 0.6, w * 1.2, w * 1.2);
+    ctx.restore();
+    const L = lampsOf(s || {});
+    const k = w / 960, left = cx - w / 2, top = bottom - h;
+    const P = (pt) => [left + pt[0] * k, top + pt[1] * k];
+    if (L.head) {
+      // light pool on the floor in front of the car (the car faces front-left)
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const [fx, fy] = [left + 120 * k, bottom - 6 * k];
+      ctx.translate(fx, fy);
+      ctx.scale(1, 0.22);
+      const pool = ctx.createRadialGradient(0, 0, 0, 0, 0, w * 0.5);
+      pool.addColorStop(0, "rgba(220,235,255,0.22)");
+      pool.addColorStop(1, "rgba(220,235,255,0)");
+      ctx.fillStyle = pool;
+      ctx.fillRect(-w * 0.55, -w * 0.55, w * 1.1, w * 1.1);
+      ctx.restore();
+    }
+    ctx.drawImage(PARK_IMG, left, top, w, h);
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    if (L.head) {
+      for (const pt of PARK_LAMPS.head) {
+        const [x, y] = P(pt);
+        glowAt(ctx, x, y, 70 * k, "205,225,255", 0.35);
+        glowAt(ctx, x, y, 20 * k, "245,250,255", 0.95);
+      }
+      const [fx2, fy2] = P(PARK_LAMPS.headFar);
+      glowAt(ctx, fx2, fy2, 42 * k, "205,225,255", 0.35);
+      glowAt(ctx, fx2, fy2, 13 * k, "245,250,255", 0.9);
+      for (const pt of PARK_LAMPS.drl) {
+        const [x, y] = P(pt);
+        glowAt(ctx, x, y, 40 * k, "190,225,255", 0.4);
+      }
+    }
+    if (L.head || L.brake) {
+      const [rx, ry] = P(PARK_LAMPS.rear);
+      if (L.brake) {
+        glowAt(ctx, rx, ry, 110 * k, "255,25,45", 0.55);
+        glowAt(ctx, rx, ry, 45 * k, "255,50,70", 0.85);
+        glowAt(ctx, rx, ry, 16 * k, "255,170,180", 1.0);
+      } else {
+        glowAt(ctx, rx, ry, 42 * k, "255,30,50", 0.22);
+        glowAt(ctx, rx, ry, 16 * k, "255,70,85", 0.45);
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawViz(cv, s, phase) {
+    const ctx = cv.getContext("2d");
+    const W = cv.width, H = cv.height;
+    ctx.clearRect(0, 0, W, H);
+    if (s.gear === "P") { drawParked(ctx, W, H, s); return; }
+    const horizon = H * 0.46;
+    const u0 = W * 0.52;
+    const kx = W * 0.58;
+    const NEAR = 5.2;
+    const V = (x) => horizon + (H - horizon) * (NEAR / x);
+    const P = (x, y) => [u0 + kx * ((y + s.curve * x * x * 0.5) / x), V(x)];
+    const xs = [];
+    for (let i = 0; i <= 40; i++) xs.push(NEAR + 90 * Math.pow(i / 40, 2));
+
+    const band = (y0, y1, x0, x1, fill) => {
+      ctx.beginPath();
+      let first = true;
+      for (const x of xs) { if (x < x0 || x > x1) continue; const [u, v] = P(x, y0); first ? ctx.moveTo(u, v) : ctx.lineTo(u, v); first = false; }
+      for (let i = xs.length - 1; i >= 0; i--) { const x = xs[i]; if (x < x0 || x > x1) continue; const [u, v] = P(x, y1); ctx.lineTo(u, v); }
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+    };
+    const line = (y, w, rgb, alpha, dashed) => {
+      for (let i = 0; i < xs.length - 1; i++) {
+        const x0 = xs[i], x1 = xs[i + 1];
+        if (dashed && Math.floor((x0 + phase) / 3.5) % 2) continue;
+        const [a, av] = P(x0, y - w), [b, bv] = P(x0, y + w), [c, cv2] = P(x1, y + w), [d, dv] = P(x1, y - w);
+        ctx.fillStyle = `rgba(${rgb},${alpha * Math.max(0.05, 1 - x0 / 80)})`;
+        ctx.beginPath(); ctx.moveTo(a, av); ctx.lineTo(b, bv); ctx.lineTo(c, cv2); ctx.lineTo(d, dv); ctx.closePath(); ctx.fill();
+      }
+    };
+
+    band(-5.4, 5.4, 0, 99, "rgba(255,255,255,0.025)");
+    line(-5.4, 0.06, "160,164,172", 0.55, false);
+    line(5.4, 0.06, "160,164,172", 0.55, false);
+    line(-3.6, 0.055, "230,232,236", 0.55, true);
+    line(3.6, 0.055, "230,232,236", 0.55, true);
+    line(-1.8, 0.07, "245,245,247", 0.9, false);
+    line(1.8, 0.07, "245,245,247", 0.9, false);
+
+    const leadX = s.lead > 0 ? 6.2 + Math.pow(Math.max(6, s.lead), 0.62) * 1.05 + 4 : 0;
+    const crit = s.lead > 0 && s.lead <= 12, close = s.lead > 0 && s.lead <= 18;
+    if (s.gear === "D" || s.gear === "R") {
+      const end = leadX > 0 ? leadX - 1.5 : 60;
+      const rgb = crit ? "227,25,55" : (close ? "245,166,35" : (s.cruise > 0 ? "62,106,225" : "200,205,215"));
+      const a0 = s.cruise > 0 || close ? 0.55 : 0.18;
+      const gr = ctx.createLinearGradient(0, H, 0, V(end));
+      gr.addColorStop(0, `rgba(${rgb},${a0})`);
+      gr.addColorStop(1, `rgba(${rgb},0)`);
+      band(-1.65, 1.65, NEAR, end, gr);
+    }
+
+    if (leadX > 0) {
+      const [cx, by] = P(leadX, 0);
+      const [lx] = P(leadX, -0.95), [rx] = P(leadX, 0.95);
+      const w = Math.abs(rx - lx);
+      const hLead = drawCar(ctx, "lead", MODEL_SEDAN, CAR_LEAD, cx, by, w);
+      ctx.font = `600 ${Math.round(W / 30)}px "Public Sans", sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillStyle = crit ? "#FF4D63" : (close ? "#F5A623" : "#C9CBD1");
+      ctx.fillText(`${Math.round(s.lead)} m`, cx, by - hLead - W / 90);
+    }
+
+    // Ego car sized by the panel height so a close lead car stays visible on the low 9.2" panel
+    MODEL_NIRO_IMG.fallback = MODEL_NIRO;
+    const L = lampsOf(s);
+    MODEL_NIRO_IMG.src = MODEL_NIRO_IMG.variants[L.brake ? "brake" : (L.head ? "tail" : "off")];
+    drawCar(ctx, "ego", MODEL_NIRO_IMG, NIRO_EGO, u0, H * 0.985, Math.min(W * 0.165, H * 0.27));
+  }
+
+  // ---------------------------------------------------------------------------
+  const params = new URLSearchParams(location.search);
+  const shot = params.get("shot");
+  const panels = {};
+  ["92", "123"].forEach((m) => {
+    const frame = document.getElementById("frame" + m);
+    frame.style.aspectRatio = `960 / ${GEO[m].h}`;
+    const lcd = buildLcd(m);
+    frame.appendChild(lcd);
+    panels[m] = { frame, lcd, cv: lcd.querySelector('[data-k="road"]') };
+  });
+
+  let scene = params.get("scene") || "drive";
+  let animate = !shot;
+  let phase = 0;
+  let last = performance.now();
+  let live = JSON.parse(JSON.stringify(SCENES[scene]));
+
+  // ---------------------------------------------------------------------------
+  // Asset capture + layout export for the Android renderer (tools/make_tesla_assets.py)
+  //   ?shot=92&cap=base    static layer: dynamic text / road / overlays hidden, every state OFF
+  //   ?shot=92&cap=active  same layer with every state ON (chips, AUTO, airflow arrows, fan bars, PRND)
+  //   window.__exportLayout() -> tab separated lines, coordinates in panel pixels (dp * 2)
+  // ---------------------------------------------------------------------------
+  const CAP = params.get("cap");
+  const TEXT_KEYS = ["speed", "cruise", "sect", "navDist", "navRoad", "navNext", "lane", "remain", "soc", "dte", "eff",
+    "bms", "soh", "batT", "cellMax", "cellMin", "cellDiff", "kw", "pwrLbl", "src", "title", "artist", "pos", "dur",
+    "dr", "fanNum", "inT", "outT", "limit"];
+  const RIGHT_KEYS = new Set(["dte", "eff", "kw", "dur"]);
+  const CENTER_KEYS = new Set(["limit"]);
+
+  /** A unit span on the same line right after a value ("%", "km", "°C"); block labels like "km/h" stay static. */
+  function isInlineUnit(u) {
+    return !!u && !u.dataset.k && getComputedStyle(u).display !== "block"
+      && (u.classList.contains("u") || u.classList.contains("unit") || u.classList.contains("deg"));
+  }
+  function applyCapture(lcd, mode) {
+    const hide = (el) => { if (el) el.style.visibility = "hidden"; };
+    lcd.querySelector('[data-k="road"]').style.visibility = "hidden";
+    ["tbtBox", "limBox", "apBox", "sect", "prog", "pillFill", "pwrFill"].forEach((k) => hide(lcd.querySelector(`[data-k="${k}"]`)));
+    hide(lcd.querySelector(".vtpms"));
+    hide(lcd.querySelector(".vbot"));
+    TEXT_KEYS.forEach((k) => {
+      const el = lcd.querySelector(`[data-k="${k}"]`);
+      if (!el) return;
+      hide(el);
+      const u = el.nextElementSibling;
+      if (isInlineUnit(u)) hide(u);
+    });
+    // kW unit label sits in a separate span after the number
+    lcd.querySelectorAll(".pwr-head .lbl").forEach((el) => { if (!el.dataset.k) hide(el); });
+    const on = mode === "active";
+    lcd.querySelectorAll(".prnd span").forEach((el) => el.classList.toggle("on", on));
+    lcd.querySelectorAll(".chip").forEach((el) => el.classList.toggle("on", on));
+    const st = lcd.querySelector('[data-k="hstate"]');
+    st.textContent = "AUTO";
+    st.className = "state auto" + (on ? " on" : "");
+    st.style.display = "";
+    lcd.querySelectorAll('[data-k="fan"] i').forEach((el) => el.classList.toggle("on", on));
+    ["airFace", "airFoot"].forEach((k) => lcd.querySelector(`[data-k="${k}"]`).setAttribute("stroke", on ? "#6E95FF" : "#34363C"));
+    lcd.querySelector(".cl-temp .num").style.visibility = "hidden";
+  }
+
+  function rgbaToHex(c) {
+    const m = c.match(/rgba?\(([^)]+)\)/);
+    if (!m) return "FFFFFFFF";
+    const p = m[1].split(",").map((v) => parseFloat(v));
+    const a = p.length > 3 ? Math.round(p[3] * 255) : 255;
+    return [a, p[0], p[1], p[2]].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("").toUpperCase();
+  }
+  function baselineOf(el) {
+    const probe = document.createElement("span");
+    probe.style.cssText = "display:inline-block;width:0;height:0;vertical-align:baseline;";
+    el.appendChild(probe);
+    const y = probe.getBoundingClientRect().top;
+    probe.remove();
+    return y;
+  }
+
+  window.__leadSvg = () => carSvg(CAR_LEAD);
+  window.__exportLayout = function () {
+    const m = shot;
+    const lcd = panels[m].lcd;
+    const base = lcd.getBoundingClientRect();
+    const X = (v) => ((v - base.left) * 2).toFixed(1);
+    const Y = (v) => ((v - base.top) * 2).toFixed(1);
+    const D = (v) => (v * 2).toFixed(1);
+    const out = ["# key\tx\tbaseline\tsizePx\tbold\tcolorARGB\talign\tmaxW\tunitText\tunitSize\tunitBold\tunitColor\tgapPx"];
+    for (const k of TEXT_KEYS) {
+      const el = lcd.querySelector(`[data-k="${k}"]`);
+      if (!el) continue;
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      const align = RIGHT_KEYS.has(k) ? "R" : (CENTER_KEYS.has(k) ? "C" : "L");
+      let unit = ["", "0", "0", "00000000", "0"];
+      let right = r.right;
+      const u = el.nextElementSibling;
+      if (isInlineUnit(u)) {
+        const ucs = getComputedStyle(u);
+        const ur = u.getBoundingClientRect();
+        unit = [u.textContent, D(parseFloat(ucs.fontSize)), parseInt(ucs.fontWeight, 10) >= 600 ? "1" : "0",
+          rgbaToHex(ucs.color), D(Math.max(0, ur.left - r.right))];
+        right = ur.right;
+      }
+      if (k === "kw") {
+        const kl = el.parentElement.querySelector(".lbl");
+        if (kl) {
+          const kcs = getComputedStyle(kl);
+          const kr = kl.getBoundingClientRect();
+          unit = [kl.textContent.trim(), D(parseFloat(kcs.fontSize)), "0", rgbaToHex(kcs.color), D(Math.max(0, kr.left - r.right) + 3)];
+          right = kr.right;
+        }
+      }
+      const x = align === "R" ? right : (align === "C" ? (r.left + r.right) / 2 : r.left);
+      const clip = cs.overflow === "hidden" || cs.textOverflow === "ellipsis";
+      const maxW = clip ? D(el.clientWidth) : (k === "sect" || k === "navRoad" ? D(260) : "0");
+      out.push(["F:" + k, X(x), Y(baselineOf(el)), D(parseFloat(cs.fontSize)), parseInt(cs.fontWeight, 10) >= 600 ? "1" : "0",
+        rgbaToHex(cs.color), align, maxW].concat(unit).join("\t"));
+    }
+    const rect = (name, el, extra) => {
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      out.push(["R:" + name, X(r.left), Y(r.top), D(r.width), D(r.height)].concat(extra || []).join("\t"));
+    };
+    rect("viz", lcd.querySelector(".viz"), [D(14)]);
+    rect("pill", lcd.querySelector('[data-k="pill"]'));
+    rect("pwr", lcd.querySelector(".pwr-bar"));
+    rect("prog", lcd.querySelector(".md-prog"));
+    rect("art", lcd.querySelector(".art"), [D(8)]);
+    rect("limit", lcd.querySelector('[data-k="limBox"]'));
+    rect("wheel", lcd.querySelector('[data-k="apIcon"]'));
+    rect("tbt", lcd.querySelector('[data-k="tbtBox"]'), [D(12)]);
+    rect("tpms", lcd.querySelector(".vtpms"), [D(10)]);
+    rect("auto", lcd.querySelector('[data-k="hstate"]'));
+    rect("airFace", lcd.querySelector('[data-k="airFace"]'));
+    rect("airFoot", lcd.querySelector('[data-k="airFoot"]'));
+    lcd.querySelectorAll(".prnd span").forEach((el) => rect("prnd" + el.textContent, el));
+    lcd.querySelectorAll(".chip").forEach((el) => rect("chip_" + el.dataset.mode, el));
+    lcd.querySelectorAll('[data-k="fan"] i').forEach((el, i) => rect("fan" + i, el));
+    // TBT / TPMS chip typography (drawn procedurally in Java)
+    const nd = lcd.querySelector('[data-k="navDist"]');
+    const tp = lcd.querySelector('[data-k="tp0"]');
+    out.push(["S:tbtDist", D(parseFloat(getComputedStyle(nd).fontSize))].join("\t"));
+    out.push(["S:tpms", D(parseFloat(getComputedStyle(tp).fontSize))].join("\t"));
+    return out.join("\n");
+  };
+
+  function fit() {
+    Object.values(panels).forEach(({ frame, lcd, cv }) => {
+      const scale = shot ? 1 : frame.clientWidth / 960;
+      lcd.style.transform = `scale(${scale})`;
+      if (shot) frame.style.width = "960px";
+      const dpr = shot ? 2 : Math.min(3, (window.devicePixelRatio || 1) * scale);
+      cv.width = Math.round(cv.parentElement.clientWidth * dpr);
+      cv.height = Math.round(cv.parentElement.clientHeight * dpr);
+    });
+    draw();
+  }
+  function draw() {
+    Object.values(panels).forEach(({ lcd, cv }) => {
+      render(lcd, live);
+      drawViz(cv, live, phase);
+      if (CAP) applyCapture(lcd, CAP);
+    });
+  }
+  function setScene(v) { scene = v; live = JSON.parse(JSON.stringify(SCENES[scene])); draw(); }
+  function tick(now) {
+    const dt = Math.min(0.1, (now - last) / 1000);
+    last = now;
+    if (animate) {
+      const base = SCENES[scene];
+      phase += (live.speed / 3.6) * dt;
+      const t = now / 1000;
+      if (base.speed > 0) live.speed = Math.round(base.speed + Math.sin(t * 0.6) * 2);
+      live.kw = +(base.kw + Math.sin(t * 0.9) * Math.max(1.2, Math.abs(base.kw) * 0.12)).toFixed(1);
+      if (base.lead > 0) live.lead = base.lead + Math.sin(t * 0.5) * 1.5;
+      if (base.speed > 0) live.steer = base.steer + Math.sin(t * 0.7) * 35;
+      if (live.media.playing && live.media.dur > 0) live.media.pos = (base.media.pos + t) % live.media.dur;
+      draw();
+    }
+    requestAnimationFrame(tick);
+  }
+  function bindSeg(id, fn) {
+    const seg = document.getElementById(id);
+    seg.addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      seg.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+      fn(b.dataset.v);
+    });
+  }
+  bindSeg("segModel", (v) => {
+    document.getElementById("fig92").hidden = v === "123";
+    document.getElementById("fig123").hidden = v === "92";
+    fit();
+  });
+  bindSeg("segScene", setScene);
+  bindSeg("segAnim", (v) => { animate = v === "on"; });
+  bindSeg("segLamp", (v) => { lampMode = v; draw(); });
+  if (params.get("lamp")) lampMode = params.get("lamp");
+  if (shot) {
+    document.body.classList.add("shot");
+    document.getElementById("fig92").hidden = shot !== "92";
+    document.getElementById("fig123").hidden = shot !== "123";
+  }
+  window.addEventListener("resize", fit);
+  (document.fonts ? document.fonts.ready : Promise.resolve()).then(fit);
+  fit();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
