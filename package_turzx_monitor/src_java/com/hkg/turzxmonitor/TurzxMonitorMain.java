@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.0";
+    public static final String MONITOR_VERSION = "1.5.1";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -1157,9 +1157,8 @@ public class TurzxMonitorMain {
                         needPanel = connected && !screenOffActive;
                     }
                     if (!needPanel && !needLandscape) continue;
-                    MonitorConfig cfg = TurzxOverlayController.getConfig();
                     byte[][] jpegs = TurzxFrameRenderer.encodeHudFrame(
-                            job[0], cfg.usbRotation, LiveTuning.jpegQuality, needPanel, needLandscape);
+                            job[0], LiveTuning.panelRotation(), LiveTuning.jpegQuality, needPanel, needLandscape);
                     if (jpegs != null && jpegs.length == 2) {
                         if (jpegs[0] != null) {
                             latestLandscapeJpeg = jpegs[0];
@@ -7946,7 +7945,18 @@ public class TurzxMonitorMain {
                 addView.invoke(panel, bench, benchLp);
                 benchTv = bench;
                 lastBenchText[0] = "";
-                addView.invoke(bodyRow, panel, llLpCtor.newInstance(520, -1));
+                // v1.5.1: 9 tuning rows + actions + bench may exceed the screen height -> scrollable column
+                Object panelHost = panel;
+                try {
+                    Class<?> svCls = Class.forName("android.widget.ScrollView");
+                    Object sv = svCls.getConstructor(ctxCls).newInstance(sysContext);
+                    svCls.getMethod("setFillViewport", boolean.class).invoke(sv, Boolean.TRUE);
+                    addView.invoke(sv, panel, vgLpCls.getConstructor(int.class, int.class).newInstance(-1, -2));
+                    panelHost = sv;
+                } catch (Throwable svErr) {
+                    panelHost = panel;
+                }
+                addView.invoke(bodyRow, panelHost, llLpCtor.newInstance(520, -1));
 
                 Object grid = llCls.getConstructor(ctxCls).newInstance(sysContext);
                 setOrientation.invoke(grid, 1);
@@ -8214,7 +8224,7 @@ public class TurzxMonitorMain {
         static final int[] TARGET_FPS_STEPS = new int[]{5, 8, 10, 12, 15, 20, 25};
         static final int[] PANEL_FPS_STEPS = new int[]{0, 10, 15, 20, 25, 30};
         static final int[] POLL_MS_STEPS = new int[]{100, 150, 200, 300, 500, 1000};
-        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기", "부분 인코딩", "렌더 방식", "디자인"};
+        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기", "부분 인코딩", "렌더 방식", "디자인", "화면 회전"};
 
         static volatile int jpegQuality = 70;
         static volatile int targetFps = 12;
@@ -8226,6 +8236,8 @@ public class TurzxMonitorMain {
         static volatile boolean parallelPipeline = false;
         /** v1.5.0: Tesla-style HUD (default) vs the classic Chromium 1:1 HUD. */
         static volatile boolean teslaDesign = true;
+        /** v1.5.1: panel picture turned 180 degrees (usb_rotation 90 instead of 270) for upside-down mounting. */
+        static volatile boolean rotate180 = false;
         /** Set when panelFps changed: the sender thread pushes CMD 0x0F to the connected panel. */
         static volatile boolean panelFpsDirty = false;
 
@@ -8238,6 +8250,7 @@ public class TurzxMonitorMain {
             incrementalEncode = c.usbIncrementalEncode;
             parallelPipeline = c.renderParallel;
             teslaDesign = c.hudDesignTesla;
+            rotate180 = c.usbRotation == 90;
         }
 
         static void saveTo(MonitorConfig c) {
@@ -8249,6 +8262,12 @@ public class TurzxMonitorMain {
             c.usbIncrementalEncode = incrementalEncode;
             c.renderParallel = parallelPipeline;
             c.hudDesignTesla = teslaDesign;
+            c.usbRotation = rotate180 ? 90 : 270;
+        }
+
+        /** Portrait rotation handed to the encoder (270 = normal, 90 = picture turned 180 degrees). */
+        static int panelRotation() {
+            return rotate180 ? 90 : 270;
         }
 
         /** Next value above (dir > 0) / below (dir < 0) cur in the step list; stays at the ends. */
@@ -8281,8 +8300,10 @@ public class TurzxMonitorMain {
                     return incrementalEncode ? "ON" : "OFF";
                 case 6:
                     return parallelPipeline ? "멀티코어" : "싱글코어";
-                default:
+                case 7:
                     return teslaDesign ? "신규" : "기존";
+                default:
+                    return rotate180 ? "180°" : "기본";
             }
         }
 
@@ -8291,7 +8312,8 @@ public class TurzxMonitorMain {
                     + " · 도로" + (roadEnabled ? "ON" : "OFF") + " · 수집" + pollMs
                     + " · 부분" + (incrementalEncode ? "ON" : "OFF")
                     + " · " + (parallelPipeline ? "멀티코어" : "싱글코어")
-                    + " · " + (teslaDesign ? "신규" : "기존");
+                    + " · " + (teslaDesign ? "신규" : "기존")
+                    + (rotate180 ? " · 180°" : "");
         }
 
         /** Panel [－]/[＋] handler: applies immediately and restarts the measurement for the new combination. */
@@ -8323,8 +8345,11 @@ public class TurzxMonitorMain {
                 case 6:
                     parallelPipeline = !parallelPipeline;
                     break;
-                default:
+                case 7:
                     teslaDesign = !teslaDesign;
+                    break;
+                default:
+                    rotate180 = !rotate180;
                     break;
             }
             FpsBench.restart(label(), System.currentTimeMillis());
@@ -13662,8 +13687,27 @@ public class TurzxMonitorMain {
             saveMonitorConfig(dcf, dc);
             assertTrue(!loadMonitorConfig(dcf).hudDesignTesla, "design: hud_design=classic roundtrip");
             dcf.delete();
-            assertTrue(TurzxOverlayController.controlValueTvs.length == LiveTuning.ROW_LABELS.length, "design: 8 tuning rows sized");
+            assertTrue(TurzxOverlayController.controlValueTvs.length == LiveTuning.ROW_LABELS.length, "design: 9 tuning rows sized");
             assertTrue("신규".equals(LiveTuning.valueText(7)), "design: tuning value text");
+            // v1.5.1: 180-degree panel rotation
+            MonitorConfig rc = new MonitorConfig();
+            LiveTuning.loadFrom(rc);
+            assertTrue(!LiveTuning.rotate180 && LiveTuning.panelRotation() == 270 && "기본".equals(LiveTuning.valueText(8)),
+                    "rotate: default 270");
+            LiveTuning.adjust(8, +1);
+            assertTrue(LiveTuning.rotate180 && LiveTuning.panelRotation() == 90 && "180°".equals(LiveTuning.valueText(8))
+                    && LiveTuning.label().endsWith(" · 180°"), "rotate: toggled " + LiveTuning.label());
+            LiveTuning.saveTo(rc);
+            assertTrue(rc.usbRotation == 90, "rotate: saved as usb_rotation=90");
+            File rcf = File.createTempFile("turzx_cfg_rot", ".conf");
+            rcf.deleteOnExit();
+            rcf.delete();
+            saveMonitorConfig(rcf, rc);
+            LiveTuning.loadFrom(loadMonitorConfig(rcf));
+            assertTrue(LiveTuning.rotate180, "rotate: roundtrip");
+            rcf.delete();
+            LiveTuning.loadFrom(new MonitorConfig());
+            assertTrue(LiveTuning.ROW_LABELS.length == 9 && "화면 회전".equals(LiveTuning.ROW_LABELS[8]), "rotate: row label");
         } catch (Exception e) {
             throw new RuntimeException("v1.5.0 Tesla HUD self-test failed", e);
         }

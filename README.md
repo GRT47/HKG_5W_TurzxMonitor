@@ -15,6 +15,7 @@
   P(주차)에서는 도로 대신 주차된 차 사진을 표시합니다.
 - **램프**: 전조등(`getAFLS11_HeadLampStatus` > 0)이면 미등/전조등 빛, 제동은 페달 신호가 없어 감속 > 1.3 m/s², 회생 < -15 kW, D/R 정차로 추정합니다.
 - **실험 패널 `디자인`**: 신규 / 기존(이전 Chromium 1:1 HUD). 설정 키 `hud_design=tesla|classic`. 새 디자인 그리기에 실패하면 그 프레임은 기존 HUD로 그립니다.
+- **v1.5.1 `화면 회전`**: 실험 패널 마지막 줄에서 기본 / 180° 선택 (패널을 거꾸로 장착했을 때). 바로 적용되며 [💾저장]하면 `usb_rotation=90`(180°) / `270`(기본)으로 남습니다. 패널 행이 화면보다 길면 스크롤됩니다.
 - **3D 모델 크레딧**: 내 차 이미지는 ["2019 Kia e-Niro"](https://sketchfab.com/3d-models/kia-e-niro-2019-49067e3857bd4081918b7f3f5898eb3c)
   by tonielpro520, licensed under [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/) — 재질 색 지정 · 조명 · 램프 발광을 바꿔 렌더링했습니다.
 
