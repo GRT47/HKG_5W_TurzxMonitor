@@ -64,6 +64,12 @@ def copy_navdy() -> None:
     shutil.copy2(ego / "ego_persp_lamp.png", OUT / "navdy_ego_lamp.png")
     w, h, ax, ay, ppm, dist, cam_h, pitch = (ego / "ego_persp_meta.txt").read_text(encoding="utf-8").splitlines()[1].split()
     lines.append(f"navdy_ego {pitch} 0 {w} {h} {ax} {ay} {ppm}")
+    # v1.5.5 parked top view (front = up in the PNG; anchor = car centre)
+    top = NAVDY / "sprites_top"
+    for name in ("car", "head", "tail"):
+        shutil.copy2(top / f"top_{name}.png", OUT / f"navdy_top_{name}.png")
+    tw, th, tcx, tcy, tppm = (top / "top_meta.txt").read_text(encoding="utf-8").splitlines()[1].split()
+    lines.append(f"navdy_top 90 0 {tw} {th} {tcx} {tcy} {tppm}")
     (OUT / "navdy_meta.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"navdy: {len(lines) - 1} sprites (ego camera {dist} m behind, {cam_h} m high)")
 
@@ -76,21 +82,24 @@ def main() -> int:
     port = bp._get_free_port()
     profile = PKG / "build" / "tesla_profile"
     proc = subprocess.Popen([bp.find_browser(), "--headless=new", "--disable-gpu", "--no-first-run",
-                             "--no-default-browser-check", f"--user-data-dir={profile}",
-                             f"--remote-debugging-port={port}", "--window-size=1920,1080", "about:blank"],
+                             "--allow-file-access-from-files", f"--user-data-dir={profile}",
+                             f"--remote-debugging-port={port}", "about:blank"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         ws = None
         for _ in range(60):
+            time.sleep(0.5)
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=1) as r:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=2) as r:
                     for t in json.loads(r.read().decode()):
                         if t.get("type") == "page" and "webSocketDebuggerUrl" in t:
                             ws = t["webSocketDebuggerUrl"]
-                if ws:
-                    break
             except Exception:
-                time.sleep(0.25)
+                pass
+            if ws:
+                break
+        if not ws:
+            raise RuntimeError("headless browser did not expose a DevTools page")
         cdp = bp._CdpClient(ws)
         cdp.call("Page.enable")
         cdp.call("Emulation.setDeviceMetricsOverride", {"width": 1200, "height": 800, "deviceScaleFactor": 2, "mobile": False})

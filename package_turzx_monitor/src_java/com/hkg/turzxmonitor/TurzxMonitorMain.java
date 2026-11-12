@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.4";
+    public static final String MONITOR_VERSION = "1.5.5";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -3058,6 +3058,7 @@ public class TurzxMonitorMain {
                 float dt = (lastNs == 0L) ? 0f : Math.min(0.2f, (now - lastNs) / 1e9f);
                 lastNs = now;
                 int spd = Math.max(0, s.carrotSpeedKph);
+                BodyProbe.observeSpeed(spd);
                 phase = (phase + (spd / 3.6f) * dt) % 7000f;
                 if (lastSpeed >= 0 && now - lastSpeedNs > 150_000_000L) {
                     double dv = (lastSpeed - spd) / 3.6, dts = (now - lastSpeedNs) / 1e9;
@@ -3121,12 +3122,15 @@ public class TurzxMonitorMain {
             static final class NavMeta {
                 NavSprite[][] sets = new NavSprite[0][];   // sorted by pitch, 25 yaw frames each (12 = straight behind)
                 NavSprite ego = null;
+                NavSprite top = null;                      // parked top view (front = up, anchor = car centre)
             }
 
             private static NavSprite[][] navSets = null;
-            private static NavSprite navEgo = null;
+            private static NavSprite navEgo = null, navTop = null;
+            private static Object topHead = null, topTail = null;
             private static Method navDecode = null;
-            private static Object pTintEgo, pTintLead, pTintOther, pLamp;
+            private static Object pTintEgo, pTintLead, pTintOther, pLamp, pLampHead, pIcon;
+            private static Method mPCubic, mPArcTo, mPAddArc;
             private static Method mSetAlpha;
             // chase camera of the current frame
             private static float camU0, camKx, camH, camHorizon, camEgoD, camCurve;
@@ -3153,6 +3157,10 @@ public class TurzxMonitorMain {
                         if (w <= 0f || h <= 0f || ppm <= 0f) continue;
                         if ("navdy_ego".equals(f[0])) {
                             m.ego = new NavSprite("navdy_ego", pitch, w, h, ax, ay, ppm);
+                            continue;
+                        }
+                        if ("navdy_top".equals(f[0])) {
+                            m.top = new NavSprite("navdy_top_car", pitch, w, h, ax, ay, ppm);
                             continue;
                         }
                         if (idx < 0 || idx > 24) continue;
@@ -3207,6 +3215,7 @@ public class TurzxMonitorMain {
                     NavMeta nm = parseNavMeta(mt != null ? new String(mt, UTF8) : null);
                     navSets = nm.sets;
                     navEgo = nm.ego;
+                    navTop = nm.top;
                     navDecode = dec;
                     if (pTintEgo == null) {
                         Class<?> paintCls = gfxClasses[3];
@@ -3226,6 +3235,23 @@ public class TurzxMonitorMain {
                         setCF.invoke(lamp, pdcf.newInstance(Integer.valueOf(0xFFFF2638), pdCls.getField("SRC_IN").get(null)));
                         paintCls.getMethod("setXfermode", xferCls).invoke(lamp, pdx.newInstance(pdCls.getField("ADD").get(null)));
                         mSetAlpha = paintCls.getMethod("setAlpha", int.class);
+                        Object lampHead = pc.newInstance(Integer.valueOf(3));
+                        setCF.invoke(lampHead, pdcf.newInstance(Integer.valueOf(0xFFE1EEFF), pdCls.getField("SRC_IN").get(null)));
+                        paintCls.getMethod("setXfermode", xferCls).invoke(lampHead, pdx.newInstance(pdCls.getField("ADD").get(null)));
+                        // round-capped stroke paint for telltale icons and door panels
+                        Class<?> styleCls = gfxClasses[4];
+                        Class<?> capCls = Class.forName("android.graphics.Paint$Cap");
+                        Class<?> joinCls = Class.forName("android.graphics.Paint$Join");
+                        Object icon = pc.newInstance(Integer.valueOf(1));
+                        paintCls.getMethod("setStyle", styleCls).invoke(icon, styleCls.getField("STROKE").get(null));
+                        paintCls.getMethod("setStrokeCap", capCls).invoke(icon, capCls.getField("ROUND").get(null));
+                        paintCls.getMethod("setStrokeJoin", joinCls).invoke(icon, joinCls.getField("ROUND").get(null));
+                        Class<?> pathCls = gfxClasses[9], rectFCls = gfxClasses[7];
+                        mPCubic = pathCls.getMethod("cubicTo", float.class, float.class, float.class, float.class, float.class, float.class);
+                        mPArcTo = pathCls.getMethod("arcTo", rectFCls, float.class, float.class);
+                        mPAddArc = pathCls.getMethod("addArc", rectFCls, float.class, float.class);
+                        pLampHead = lampHead;
+                        pIcon = icon;
                         pTintOther = other;
                         pTintLead = lead;
                         pLamp = lamp;
@@ -3456,7 +3482,186 @@ public class TurzxMonitorMain {
                 }
             }
 
+            // ---- v1.5.5 telltales right next to the speed number (always shown: dim grey when off) ----
+            static final int TT_OFF = 0xFF45484F, TT_HEAD = 0xFF3DDC84, TT_HIGH = 0xFF4C8DFF, TT_PBRAKE = 0xFFFF4D4D;
+
+            /** x of the first telltale: speed number's right edge + the exported gap (S:ttGap). */
+            static float telltaleX(Layout l, float speedTextWidth) {
+                Field f = l.fields.get("speed");
+                Float gap = l.sizes.get("ttGap");
+                if (f == null) return -1f;
+                return f.x + speedTextWidth + (gap != null ? gap.floatValue() : 12f);
+            }
+
+            private static void drawTelltales(Object c, String speedText, boolean head, boolean high, boolean pbrake) throws Exception {
+                float[] r0 = L.rect("ttHead"), r1 = L.rect("ttHigh"), r2 = L.rect("ttPbrake");
+                Field f = L.fields.get("speed");
+                if (r0 == null || r1 == null || r2 == null || f == null || pIcon == null) return;
+                float x0 = telltaleX(L, measure(fit(speedText, f.size, f.bold, f.maxW), f.size, f.bold));
+                float[][] rs = {r0, r1, r2};
+                boolean[] on = {head, high, pbrake};
+                int[] col = {TT_HEAD, TT_HIGH, TT_PBRAKE};
+                for (int i = 0; i < 3; i++) {
+                    float x = x0 + (rs[i][0] - r0[0]);
+                    drawTelltaleIcon(c, i, x, rs[i][1], rs[i][2], on[i] ? col[i] : TT_OFF);
+                }
+            }
+
+            /** ISO-style icons on a 32-unit grid (same paths as the mockup's ICON.lowBeam / highBeam / pbrake). */
+            private static void drawTelltaleIcon(Object c, int kind, float x, float y, float size, int color) throws Exception {
+                float u = size / 32f;
+                mSetColor.invoke(pIcon, color);
+                mSetStrokeW.invoke(pIcon, (kind == 2 ? 2.3f : 2.4f) * u);
+                mPReset.invoke(path);
+                if (kind < 2) {
+                    // lamp body (D shape)
+                    mPMove.invoke(path, x + 17 * u, y + 7 * u);
+                    mPCubic.invoke(path, x + 23 * u, y + 7 * u, x + 28 * u, y + 11 * u, x + 28 * u, y + 16 * u);
+                    mPCubic.invoke(path, x + 28 * u, y + 21 * u, x + 23 * u, y + 25 * u, x + 17 * u, y + 25 * u);
+                    mPCubic.invoke(path, x + 15.4f * u, y + 25 * u, x + 14.6f * u, y + 21 * u, x + 14.6f * u, y + 16 * u);
+                    mPCubic.invoke(path, x + 14.6f * u, y + 11 * u, x + 15.4f * u, y + 7 * u, x + 17 * u, y + 7 * u);
+                    mPClose.invoke(path);
+                    if (kind == 0) {          // low beam: rays tilted down
+                        for (float ry : new float[]{10.5f, 15f, 19.5f}) {
+                            mPMove.invoke(path, x + 11 * u, y + ry * u);
+                            mPLine.invoke(path, x + 4 * u, y + (ry + 2.2f) * u);
+                        }
+                    } else {                  // high beam: horizontal rays
+                        for (float ry : new float[]{10.5f, 14.5f, 18.5f, 22.5f}) {
+                            mPMove.invoke(path, x + 11 * u, y + ry * u);
+                            mPLine.invoke(path, x + 4 * u, y + ry * u);
+                        }
+                    }
+                } else {
+                    // parking brake: circle, side arcs, letter P
+                    mSetRf.invoke(rf, x + 7.4f * u, y + 7.4f * u, x + 24.6f * u, y + 24.6f * u);
+                    mPAddArc.invoke(path, rf, 0f, 359.9f);
+                    mSetRf.invoke(rf, x + 4.09f * u, y + 4 * u, x + 28.09f * u, y + 28 * u);
+                    mPAddArc.invoke(path, rf, 145.5f, 69f);
+                    mSetRf.invoke(rf, x + 3.91f * u, y + 4 * u, x + 27.91f * u, y + 28 * u);
+                    mPAddArc.invoke(path, rf, -34.5f, 69f);
+                    mPMove.invoke(path, x + 13.6f * u, y + 20.5f * u);
+                    mPLine.invoke(path, x + 13.6f * u, y + 11.5f * u);
+                    mPLine.invoke(path, x + 17f * u, y + 11.5f * u);
+                    mSetRf.invoke(rf, x + 14.4f * u, y + 11.5f * u, x + 19.6f * u, y + 16.7f * u);
+                    mPArcTo.invoke(path, rf, -90f, 180f);
+                    mPLine.invoke(path, x + 13.6f * u, y + 16.7f * u);
+                }
+                mDrawPath.invoke(c, path, pIcon);
+            }
+
+            // ---- v1.5.5 parked: top view of the same car with lamps and open doors / trunk / hood ----
+            static final int OPEN_RGB = 0xFFA630;
+            // hinge (front edge, model z), length, side (-1 = left = driver)
+            static final float[][] DOOR_GEO = {{1.16f, 1.08f, -1f}, {1.16f, 1.08f, 1f}, {0.06f, 0.98f, -1f}, {0.06f, 0.98f, 1f}};
+
+            private static void strokeLine(Object c, float x0, float y0, float x1, float y1, float w, int color) throws Exception {
+                mSetColor.invoke(pIcon, color);
+                mSetStrokeW.invoke(pIcon, w);
+                mPReset.invoke(path);
+                mPMove.invoke(path, x0, y0);
+                mPLine.invoke(path, x1, y1);
+                mDrawPath.invoke(c, path, pIcon);
+            }
+
             private static void drawParked(Object c, float[] vz, boolean head, boolean brake) throws Exception {
+                if (navTop == null || !navReady() || !navBitmaps(navTop)) {
+                    drawParkedPhoto(c, vz, head, brake);
+                    return;
+                }
+                if (topHead == null) topHead = decodeAssetBitmap(navDecode, "navdy_top_head.png");
+                if (topTail == null) topTail = decodeAssetBitmap(navDecode, "navdy_top_tail.png");
+                float vx = vz[0], vy = vz[1], vw = vz[2], vh = vz[3];
+                final float ppm = Math.min(vw * 0.115f, vh * 0.24f);
+                final float cx = vx + vw * 0.55f, cy = vy + vh * 0.54f;     // car centre, front points right
+                boolean[] d = BodyProbe.doors();
+                glow(c, cx, cy, vw * 0.5f, 0xFFFFFF, 0.07f);
+                if (head) {
+                    // low-beam pools on the floor ahead
+                    for (int side = -1; side <= 1; side += 2) {
+                        float x0 = cx + 2.2f * ppm, y0 = cy + side * 0.62f * ppm, reach = 4.0f * ppm;
+                        Object sh = cRadial.newInstance(x0, y0, reach, new int[]{0x8CD7E8FF, 0x3DD7E8FF, 0x12D7E8FF, 0x00D7E8FF},
+                                new float[]{0f, 0.3f, 0.7f, 1f}, clamp);
+                        mPReset.invoke(path);
+                        mPMove.invoke(path, x0, y0);
+                        mSetRf.invoke(rf, x0 - reach, y0 - reach, x0 + reach, y0 + reach);
+                        float a0 = (float) Math.toDegrees(-0.42 + side * 0.05);
+                        mPArcTo.invoke(path, rf, a0, (float) Math.toDegrees(0.84));
+                        mPClose.invoke(path);
+                        mSetShader.invoke(pAdd, sh);
+                        mDrawPath.invoke(c, path, pAdd);
+                        mSetShader.invoke(pAdd, new Object[]{null});
+                    }
+                }
+                if (head || brake) {
+                    for (int side = -1; side <= 1; side += 2) {
+                        float x0 = cx - 2.3f * ppm, y0 = cy + side * 0.66f * ppm;
+                        if (brake) {
+                            glow(c, x0, y0, 1.25f * ppm, 0xFF192D, 0.55f);
+                            glow(c, x0, y0, 0.45f * ppm, 0xFF3C50, 0.8f);
+                        } else {
+                            glow(c, x0, y0, 0.8f * ppm, 0xFF1E32, 0.28f);
+                        }
+                    }
+                }
+                // open door panels (front hinge, swung out 58 deg)
+                double a = Math.toRadians(58);
+                for (int i = 0; i < 4; i++) {
+                    if (!d[i]) continue;
+                    float hinge = DOOR_GEO[i][0], len = DOOR_GEO[i][1], side = DOOR_GEO[i][2];
+                    float hx = cx + hinge * ppm, hy = cy + side * 0.93f * ppm;
+                    float ex = hx - (float) Math.cos(a) * len * ppm, ey = hy + side * (float) Math.sin(a) * len * ppm;
+                    strokeLine(c, hx, hy, ex, ey, 0.2f * ppm, 0x8C000000 | OPEN_RGB);
+                    strokeLine(c, hx, hy, ex, ey, 0.1f * ppm, 0xFFD9DDE3);
+                    strokeLine(c, hx + (ex - hx) * 0.12f, hy + (ey - hy) * 0.12f, hx + (ex - hx) * 0.8f, hy + (ey - hy) * 0.8f,
+                            0.035f * ppm, 0xD9282C34);
+                }
+                // body: rotated 90 deg so the front points right
+                shadow(c, cx, cy + 0.05f * ppm, 2.55f * ppm, 0.42f, 0.5f);
+                float k = ppm / navTop.ppm;
+                int sc = ((Integer) mSave.invoke(c)).intValue();
+                mTranslate.invoke(c, cx, cy);
+                mRotate.invoke(c, 90f, 0f, 0f);
+                mSetRf.invoke(rf, -navTop.ax * k, -navTop.ay * k, (navTop.w - navTop.ax) * k, (navTop.h - navTop.ay) * k);
+                mSetAlpha.invoke(pTintEgo, 255);
+                mDrawBmpRRF.invoke(c, navTop.bmp, null, rf, pTintEgo);
+                if (head && topHead != null) {
+                    mSetAlpha.invoke(pLampHead, 255);
+                    mDrawBmpRRF.invoke(c, topHead, null, rf, pLampHead);
+                }
+                if ((head || brake) && topTail != null) {
+                    mSetAlpha.invoke(pLamp, brake ? 255 : 166);
+                    mDrawBmpRRF.invoke(c, topTail, null, rf, pLamp);
+                }
+                mRestore.invoke(c, sc);
+                // side mirrors
+                for (int side = -1; side <= 1; side += 2) {
+                    float my = cy + side * 0.93f * ppm + (side < 0 ? -0.2f * ppm : 0f);
+                    roundRect(c, cx + 1.02f * ppm, my, cx + 1.18f * ppm, my + 0.2f * ppm, 0.05f * ppm, 0xFFC9CDD4);
+                }
+                // door openings on the body
+                for (int i = 0; i < 4; i++) {
+                    if (!d[i]) continue;
+                    float hinge = DOOR_GEO[i][0], len = DOOR_GEO[i][1], side = DOOR_GEO[i][2];
+                    float y0 = cy + side * 0.93f * ppm, y1 = cy + side * 0.78f * ppm;
+                    roundRect(c, cx + (hinge - len) * ppm, Math.min(y0, y1), cx + hinge * ppm, Math.max(y0, y1), 0f, 0xBF000000 | OPEN_RGB);
+                }
+                if (d[4]) {   // trunk: liftgate up, reaching past the rear bumper
+                    roundRect(c, cx - 2.95f * ppm, cy - 0.78f * ppm, cx - 2.15f * ppm, cy + 0.78f * ppm, 0.12f * ppm, 0x59000000 | OPEN_RGB);
+                    roundRect(c, cx - 2.88f * ppm, cy - 0.72f * ppm, cx - 2.26f * ppm, cy + 0.72f * ppm, 0.1f * ppm, 0xFFD9DDE3);
+                    roundRect(c, cx - 2.8f * ppm, cy - 0.55f * ppm, cx - 2.5f * ppm, cy + 0.55f * ppm, 0.06f * ppm, 0xD9282C34);
+                }
+                if (d[5]) {   // hood
+                    roundRect(c, cx + 1.66f * ppm, cy - 0.82f * ppm, cx + 2.28f * ppm, cy + 0.82f * ppm, 0.12f * ppm, 0x2E000000 | OPEN_RGB);
+                    mSetColor.invoke(pStroke, 0xE6000000 | OPEN_RGB);
+                    mSetStrokeW.invoke(pStroke, 0.06f * ppm);
+                    mSetRf.invoke(rf, cx + 1.66f * ppm, cy - 0.82f * ppm, cx + 2.28f * ppm, cy + 0.82f * ppm);
+                    mDrawRoundRect.invoke(c, rf, 0.12f * ppm, 0.12f * ppm, pStroke);
+                }
+            }
+
+            /** Pre-v1.5.5 parked view (car photo); used when the top-view sprite is missing. */
+            private static void drawParkedPhoto(Object c, float[] vz, boolean head, boolean brake) throws Exception {
                 float vx = vz[0], vy = vz[1], vw = vz[2], vh = vz[3];
                 glow(c, vx + vw * 0.58f, vy + vh * 0.9f, vw * 0.55f, 0xFFFFFF, 0.10f);
                 if (park == null) return;
@@ -3498,6 +3703,7 @@ public class TurzxMonitorMain {
                     throws Exception {
                 copyActive(c, L.rect("prnd" + gear));
                 field(c, "speed", String.valueOf(spd), 0);
+                drawTelltales(c, String.valueOf(spd), LampProbe.headLampsOn(), BodyProbe.highBeamOn(), BodyProbe.parkingBrakeOn());
                 // speed limit: camera event -> red ring, otherwise the current road limit -> blue ring
                 boolean camera = !(s.carrotSdiType < 0 && s.carrotSdiDistM <= 0);
                 int limit = Math.max(0, s.carrotSdiSpeedLimit);
@@ -5063,7 +5269,9 @@ public class TurzxMonitorMain {
         @Override public void onChangedBattMngAlert(int a) {}
         @Override public void onDPFLampStatChanged(int a) {}
         @Override public void onDigitalKeyDataChanged(byte[] data) {}
-        @Override public void onDoorAllStateChanged(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j) {}
+        @Override public void onDoorAllStateChanged(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j) {
+            BodyProbe.onDoorAll(new int[]{a, b, c, d, e, f, g, h, i, j});
+        }
         @Override public void onDoorLockStateChanged(int a) {}
         @Override public void onDriveModeChanged(int a) {}
         @Override public void onDrvSeatHeaterStatusChanged(int a) {}
@@ -5081,7 +5289,9 @@ public class TurzxMonitorMain {
         }
         @Override public void onModemInfoChanged(byte[] data) {}
         @Override public void onPanic(int a) {}
-        @Override public void onParkBrakeStatusChanged(int a) {}
+        @Override public void onParkBrakeStatusChanged(int a) {
+            BodyProbe.onParkBrake(a, "callback");
+        }
         @Override public void onParkCrashChanged(int a) {}
         @Override public void onRLSeatHeaterStatusChanged(int a) {}
         @Override public void onRRSeatHeaterStatusChanged(int a) {}
@@ -7951,7 +8161,8 @@ public class TurzxMonitorMain {
                     s.tpmsFlPsi, s.tpmsFrPsi, s.tpmsRlPsi, s.tpmsRrPsi)
                     + "OTA " + cut(p.otaStatus, 18) + "\n"
                     + "MAP " + cut(p.hotkeyInfo, 20) + "\n"
-                    + "최근 키 " + cut(recent, 18);
+                    + "최근 키 " + cut(recent, 18) + "\n"
+                    + BodyProbe.dashboardText();
             return b;
         }
 
@@ -8766,6 +8977,10 @@ public class TurzxMonitorMain {
                     try {
                         Object r = args == 0 ? m.invoke(bcm) : m.invoke(bcm, Integer.valueOf(a));
                         v = r instanceof Number || r instanceof Boolean ? fmt(toDouble(r)) : String.valueOf(r);
+                        if (args == 0 && r instanceof Number
+                                && ("getParkingBrakeStatus".equals(m.getName()) || "getParkBrakeStatus".equals(m.getName()))) {
+                            BodyProbe.onParkBrake(((Number) r).intValue(), m.getName());
+                        }
                         if (args == 0 && "getIlluminateStatus".equals(m.getName()) && r instanceof Number) {
                             illumRaw = ((Number) r).intValue();
                         }
@@ -8839,6 +9054,110 @@ public class TurzxMonitorMain {
 
         static void setIllumRawForTest(int raw) {
             illumRaw = raw;
+        }
+    }
+
+    /**
+     * v1.5.5: doors, parking brake and high beam from the head unit's BCM. The value meanings are not confirmed on the
+     * car yet, so the raw values go to the dashboard / report / BODY log events, and "closed" / "released" are learned
+     * while driving (speed > 8 km/h: every door is shut and the parking brake is off).
+     *   IBCMListener.onDoorAllStateChanged(a..j): slots 0..5 tentatively = FL, FR, RL, RR, trunk, hood
+     *   IBCMService.getParkingBrakeStatus() / getParkBrakeStatus(), IBCMListener.onParkBrakeStatusChanged(a)
+     */
+    public static final class BodyProbe {
+        static final String[] DOOR_LABELS = {"운전석", "조수석", "뒷문 좌", "뒷문 우", "트렁크", "후드"};
+        private static volatile int[] doorRaw = null;
+        private static volatile int[] doorClosed = null;      // learned while driving
+        private static volatile int pbrakeRaw = Integer.MIN_VALUE;
+        private static volatile int pbrakeReleased = Integer.MIN_VALUE;
+        private static volatile boolean highBeam = false;
+
+        static void onDoorAll(int[] v) {
+            doorRaw = v.clone();
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < v.length; i++) sb.append(i > 0 ? "," : "").append(v[i]);
+            DebugManager.logEvent("BODY", "onDoorAllStateChanged(" + sb + ")");
+        }
+
+        static void onParkBrake(int v, String src) {
+            if (v != pbrakeRaw) DebugManager.logEvent("BODY", "Parking brake " + src + "=" + v);
+            pbrakeRaw = v;
+        }
+
+        /** Render thread: moving fast means every door is shut and the parking brake is released. */
+        static void observeSpeed(int kph) {
+            if (kph < 8) return;
+            int[] r = doorRaw;
+            if (r != null) {
+                int[] c = doorClosed;
+                if (c == null || !java.util.Arrays.equals(c, r)) {
+                    doorClosed = r.clone();
+                    DebugManager.logEvent("BODY", "Learned closed-door values while driving: " + doorText(r));
+                }
+            }
+            int pb = pbrakeRaw;
+            if (pb != Integer.MIN_VALUE && pb != pbrakeReleased) {
+                pbrakeReleased = pb;
+                DebugManager.logEvent("BODY", "Learned parking brake released value while driving: " + pb);
+            }
+        }
+
+        /** Slot open? Differs from the value learned while driving (or from 0 before anything was learned). */
+        static boolean slotOpen(int slot) {
+            int[] r = doorRaw;
+            if (r == null || slot >= r.length) return false;
+            int[] c = doorClosed;
+            int closed = (c != null && slot < c.length) ? c[slot] : 0;
+            return r[slot] >= 0 && r[slot] != closed;
+        }
+
+        /** {fl, fr, rl, rr, trunk, hood} */
+        static boolean[] doors() {
+            boolean[] d = new boolean[6];
+            for (int i = 0; i < 6; i++) d[i] = slotOpen(i);
+            return d;
+        }
+
+        static boolean parkingBrakeOn() {
+            int raw = pbrakeRaw;
+            if (raw == Integer.MIN_VALUE || raw < 0) return false;
+            if (pbrakeReleased != Integer.MIN_VALUE) return raw != pbrakeReleased;
+            return raw == 1;
+        }
+
+        static boolean highBeamOn() {
+            return highBeam;   // no confirmed signal yet (BCM lamp callback / getters are logged for mapping)
+        }
+
+        static String doorText(int[] r) {
+            if (r == null) return "x";
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < r.length; i++) sb.append(i > 0 ? "," : "").append(r[i]);
+            return sb.toString();
+        }
+
+        static String dashboardText() {
+            return "문 " + doorText(doorRaw) + (doorClosed != null ? "" : " (기준 미학습)") + "\n"
+                    + "P브레이크 " + (pbrakeRaw == Integer.MIN_VALUE ? "x" : String.valueOf(pbrakeRaw))
+                    + (parkingBrakeOn() ? " ON" : " OFF") + (pbrakeReleased != Integer.MIN_VALUE ? "" : " (기준 미학습)");
+        }
+
+        static String reportLine() {
+            StringBuilder open = new StringBuilder();
+            boolean[] d = doors();
+            for (int i = 0; i < 6; i++) if (d[i]) open.append(open.length() > 0 ? "," : "").append(DOOR_LABELS[i]);
+            return "doors raw=" + doorText(doorRaw) + " closed=" + doorText(doorClosed) + " open=[" + open + "]"
+                    + " | parkBrake raw=" + (pbrakeRaw == Integer.MIN_VALUE ? "x" : String.valueOf(pbrakeRaw))
+                    + " released=" + (pbrakeReleased == Integer.MIN_VALUE ? "x" : String.valueOf(pbrakeReleased))
+                    + " on=" + parkingBrakeOn() + " | highBeam=" + highBeam;
+        }
+
+        static void resetForTest() {
+            doorRaw = null;
+            doorClosed = null;
+            pbrakeRaw = Integer.MIN_VALUE;
+            pbrakeReleased = Integer.MIN_VALUE;
+            highBeam = false;
         }
     }
 
@@ -9802,6 +10121,7 @@ public class TurzxMonitorMain {
                     .append(" brakeLights=").append(LampProbe.commaBrake())
                     .append(" | BCM lamp cb=").append(LampProbe.bcmLampText()).append("\n");
             sb.append("BCM lamp getters: ").append(LampProbe.bcmText()).append("\n");
+            sb.append("Body (BCM)      : ").append(BodyProbe.reportLine()).append("\n");
             TelemetrySnapshot trs = TelemetryCollector.getLatestSnapshot();
             sb.append("Traffic sprites : ready=").append(TurzxFrameRenderer.TeslaHud.navReady())
                     .append(" | radar side leads=").append(trs.trafficLeads != null ? trs.trafficLeads.length / 3 : -1)
@@ -14511,6 +14831,43 @@ public class TurzxMonitorMain {
             assertTrue(rsn.trafficLeads != null && rsn.trafficLeads.length == 6 && rsn.trafficLeads[0] == 20f
                     && rsn.trafficLeads[1] == -3.6f && rsn.trafficLeads[3] == 35f && rsn.trafficLeads[4] == 3.5f
                     && rsn.trafficLeads[5] == -2.5f && rsn.trafficMs > 0, "radar: neighbour leads (right-positive y)");
+            // v1.5.5: telltales, top view, BCM body probe
+            assertTrue(nm.top != null && nm.top.w > 100f && nm.top.ppm > 50f
+                    && TurzxFrameRenderer.readJarAssetBytesPublic("navdy_top_car.png") != null
+                    && TurzxFrameRenderer.readJarAssetBytesPublic("navdy_top_head.png") != null
+                    && TurzxFrameRenderer.readJarAssetBytesPublic("navdy_top_tail.png") != null, "top view sprite bundled");
+            for (String lay : new String[]{"tesla_layout_92.txt", "tesla_layout_123.txt"}) {
+                byte[] lb = TurzxFrameRenderer.readJarAssetBytesPublic(lay);
+                TurzxFrameRenderer.TeslaHud.Layout tl = TurzxFrameRenderer.TeslaHud.parseLayout(new String(lb, UTF8));
+                float[] t0 = tl.rect("ttHead"), t1 = tl.rect("ttHigh"), t2 = tl.rect("ttPbrake");
+                assertTrue(t0 != null && t1 != null && t2 != null && t1[0] > t0[0] && t2[0] > t1[0]
+                        && tl.sizes.get("ttGap") != null, "telltales: rects + gap in " + lay);
+                float xNarrow = TurzxFrameRenderer.TeslaHud.telltaleX(tl, 30f), xWide = TurzxFrameRenderer.TeslaHud.telltaleX(tl, 90f);
+                assertTrue(Math.abs((xWide - xNarrow) - 60f) < 0.01f, "telltales follow the speed width");
+            }
+            BodyProbe.resetForTest();
+            assertTrue(!BodyProbe.parkingBrakeOn() && !BodyProbe.doors()[0], "body: unknown -> closed / released");
+            BodyProbe.onDoorAll(new int[]{1, 0, 0, 0, 1, 0, 0, 0, 0, 0});
+            boolean[] bd = BodyProbe.doors();
+            assertTrue(bd[0] && !bd[1] && bd[4], "body: before learning, non-zero = open");
+            BodyProbe.onDoorAll(new int[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+            BodyProbe.onParkBrake(2, "test");
+            assertTrue(!BodyProbe.parkingBrakeOn(), "body: parking brake 2 is not the default 'on' (1)");
+            BodyProbe.onParkBrake(1, "test");
+            assertTrue(BodyProbe.parkingBrakeOn(), "body: parking brake raw 1 = on before learning");
+            BodyProbe.resetForTest();
+            // a car reporting 1 = closed / 2 = open: learned while driving
+            BodyProbe.onDoorAll(new int[]{1, 1, 1, 1, 1, 1, 0, 0, 0, 0});
+            BodyProbe.onParkBrake(1, "test");
+            BodyProbe.observeSpeed(40);
+            assertTrue(!BodyProbe.doors()[0] && !BodyProbe.parkingBrakeOn(), "body: values seen while driving = closed / released");
+            BodyProbe.onDoorAll(new int[]{2, 1, 1, 1, 2, 1, 0, 0, 0, 0});
+            BodyProbe.onParkBrake(2, "test");
+            bd = BodyProbe.doors();
+            assertTrue(bd[0] && !bd[1] && bd[4] && !bd[5] && BodyProbe.parkingBrakeOn(), "body: learned mapping");
+            assertTrue(BodyProbe.reportLine().contains("open=[운전석,트렁크]") && BodyProbe.dashboardText().startsWith("문 2,1,1,1,2,1"),
+                    "body: report " + BodyProbe.reportLine());
+            BodyProbe.resetForTest();
             byte[] shortRadar = new byte[60];
             System.arraycopy(radar, 0, shortRadar, 0, 60);
             assertTrue(radarLeadStructSize(shortRadar, 0, shortRadar.length) == 0, "radar: truncated frame -> no lists");

@@ -25,7 +25,7 @@ PKG_STAGE_DIR = BUILD_DIR / "pkg_stage"
 USB_ROOT_DIR = BUILD_DIR / "usb_root"
 
 OUTER_ZIP_PATH = REPO_ROOT / "HKG_5W_TurzxMonitor_USB.zip"
-MONITOR_VERSION = "1.5.4"
+MONITOR_VERSION = "1.5.5"
 
 PUBLIC_SANS_FONTS = {
     "PublicSans-Bold.ttf": "https://fonts.gstatic.com/s/publicsans/v21/ijwGs572Xtc6ZYQws9YVwllKVG8qX1oyOymu8Z65ww.ttf",
@@ -506,7 +506,7 @@ def build() -> None:
     # 1e. v1.5.0 Tesla-style HUD assets (regenerate with tools/make_tesla_assets.py)
     tesla_dir = BASE_DIR / "design_tesla"
     tesla_files = sorted(tesla_dir.glob("tesla_*")) + sorted(tesla_dir.glob("navdy_*"))
-    if len(tesla_files) < 11 + 153:
+    if len(tesla_files) < 11 + 156:
         raise RuntimeError(f"Tesla HUD assets missing in {tesla_dir} ({len(tesla_files)} files)")
     for f in tesla_files:
         shutil.copy2(f, ASSETS_DIR / f.name)
