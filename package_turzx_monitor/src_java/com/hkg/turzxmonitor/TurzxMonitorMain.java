@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.1";
+    public static final String MONITOR_VERSION = "1.5.2";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -2805,11 +2805,20 @@ public class TurzxMonitorMain {
                 return l;
             }
 
-            /** Brake lamp estimate (no pedal signal yet): decelerating, strong regeneration, or stopped in D/R. */
-            static boolean estimateBrake(String gear, int speedKph, double decelMps2, double totalKw) {
+            /**
+             * Brake lamp. v1.5.2: once the ESC brake pressure (getCylPrsrVal) has been seen live, it alone decides
+             * (pedal pressed in any gear). Otherwise the estimate: stopped in D/R or decelerating harder than 1.6 m/s^2
+             * (the regeneration-power rule lit the lamp while the real one stayed off, so it was dropped).
+             */
+            static boolean brakeLamp(String gear, int speedKph, double decelMps2, boolean pressureLive, double pressure) {
+                if (pressureLive) return !Double.isNaN(pressure) && pressure > LampProbe.CYL_PRESSED;
+                return estimateBrake(gear, speedKph, decelMps2);
+            }
+
+            static boolean estimateBrake(String gear, int speedKph, double decelMps2) {
                 if (!"D".equals(gear) && !"R".equals(gear)) return false;
                 if (speedKph <= 0) return true;
-                return decelMps2 > 1.3 || totalKw < -15.0;
+                return decelMps2 > 1.6;
             }
 
             /** Headlamp status from tmHscanService getAFLS11_HeadLampStatus(): 0 = off, > 0 = lamps on (raw shown in the report). */
@@ -3049,7 +3058,7 @@ public class TurzxMonitorMain {
                 String gear = (s.gearPos != null && !s.gearPos.isEmpty()) ? s.gearPos : "D";
                 boolean head = headLampsOn(s.headLampStatus);
                 double totalKw = s.getTotalPowerKw();
-                boolean brake = estimateBrake(gear, spd, decel, totalKw);
+                boolean brake = brakeLamp(gear, spd, decel, LampProbe.pressureLive(), LampProbe.pressure());
 
                 mDrawBmpXY.invoke(c, base, 0f, 0f, null);
 
@@ -6581,6 +6590,10 @@ public class TurzxMonitorMain {
                     liveSnapshot.headLampStatus = ((Integer) cachedNoArgMethod(sc, "getAFLS11_HeadLampStatus").invoke(svc)).intValue();
                 } catch (Throwable ignored) {
                 }
+                try {
+                    LampProbe.poll(svc, System.currentTimeMillis());
+                } catch (Throwable ignored) {
+                }
                 double acKw = parseTmPowerWattsToKw(acRaw, 10210);
                 double htrKw = parseTmPowerWattsToKw(htrRaw, 10210);
                 if (acKw >= 0.0 || htrKw >= 0.0) {
@@ -7590,17 +7603,18 @@ public class TurzxMonitorMain {
 
             double total = s.getTotalPowerKw();
             String chg = s.fastCharging ? "급속 충전 중" : (s.stdCharging ? "완속 충전 중" : (s.charging ? "충전 중" : "충전 안 함"));
-            b[2] = String.format(Locale.US, "총 %+.1fkW%s\n", total, total < -0.05 ? " (회생)" : "")
-                    + String.format(Locale.US, "구동 %.1f · 공조 %.1f\n",
-                    s.getEffectiveDriveMotorKw(), Math.max(0.0, s.climatePowerKw))
-                    + String.format(Locale.US, "전장 %.1f · 배터리 %.1f\n",
+            boolean chgOn = s.fastCharging || s.stdCharging || s.charging;
+            b[2] = String.format(Locale.US, "총 %+.1fkW%s · 구동 %.1f\n", total, total < -0.05 ? " (회생)" : "",
+                    s.getEffectiveDriveMotorKw())
+                    + String.format(Locale.US, "공조 %.1f · 전장 %.1f · 배터리 %.1f\n", Math.max(0.0, s.climatePowerKw),
                     Math.max(0.0, s.electronicsPowerKw), Math.max(0.0, s.batteryCarePowerKw))
                     + "기어 " + (s.gearPos != null && !s.gearPos.isEmpty() ? s.gearPos : "--")
-                    + " · Ready " + (s.evReady ? "ON" : "OFF") + "\n"
-                    + chg + (s.batteryConditioning ? " · 컨디셔닝" : "") + "\n"
+                    + " · Ready " + (s.evReady ? "ON" : "OFF") + (chgOn ? " · " + chg : "")
+                    + (s.batteryConditioning ? " · 컨디셔닝" : "") + "\n"
                     + "속도 " + Math.max(0, s.carrotSpeedKph) + " · 크루즈 "
-                    + (s.carrotCruiseKph > 0 ? String.valueOf(s.carrotCruiseKph) : "--") + "\n"
-                    + String.format(Locale.US, "조향 %+.1f°", s.steeringAngleDeg);
+                    + (s.carrotCruiseKph > 0 ? String.valueOf(s.carrotCruiseKph) : "--")
+                    + String.format(Locale.US, " · 조향 %+.1f°\n", s.steeringAngleDeg)
+                    + LampProbe.dashboardText();
 
             StringBuilder flags = new StringBuilder();
             if (s.hvacAuto) flags.append(" AUTO");
@@ -8219,6 +8233,137 @@ public class TurzxMonitorMain {
      * MonitorConfig, so experiments take effect on the next frame without touching monitor.conf. Only the panel's
      * [저장] button copies them into the config file; a daemon restart otherwise reverts to the saved config.
      */
+    /**
+     * v1.5.2: lamp / brake candidate signals on tm_hscan_service. Their meaning on the car is not mapped yet, so every
+     * value is shown raw on the dashboard ("전력 · 주행" card) and each change is written to the log as a LAMP event.
+     * getCylPrsrVal() (ESC master-cylinder pressure) drives the brake lamp once it has been seen above zero.
+     */
+    public static final class LampProbe {
+        static final String[] NAMES = {"getAFLS11_HeadLampStatus", "getCGW5_HeadLampStatus", "getCGWCP6_HeadLampStatus",
+                "getLeftLowLampStatus", "getLeftHighLampStatus", "getLeftFrontLampStatus", "getLeftRearLampStatus",
+                "getLeftBifuncLampStatus", "getLeftStopLamp", "getRightStopLamp", "getBrakeNotchStatus", "getLampState",
+                "getCylPrsrVal"};
+        static final String[] SHORT = {"AFLS", "CGW5", "CP6", "Low", "High", "Front", "Rear", "Bifn", "StopL", "StopR",
+                "Notch", "Lamp", "Cyl"};
+        static final int IDX_CYL = 12;
+        /** Brake pressure above this (raw getCylPrsrVal units) = pedal pressed. */
+        static final double CYL_PRESSED = 1.5;
+        static final long POLL_MS = 250L;
+
+        private static Method[] methods = null;
+        private static Class<?> resolvedFor = null;
+        private static long lastPollMs = 0L;
+        private static String lastKey = "";
+        private static volatile String text = "";
+        private static volatile double[] last = null;
+        private static volatile double cylPressure = Double.NaN;
+        private static volatile boolean cylSeen = false;
+
+        /** Telemetry thread (pollTmHscanServiceLocked): reads all candidates at most every POLL_MS. */
+        static void poll(Object svc, long nowMs) {
+            if (svc == null || nowMs - lastPollMs < POLL_MS) return;
+            lastPollMs = nowMs;
+            Class<?> sc = svc.getClass();
+            if (resolvedFor != sc) {
+                Method[] m = new Method[NAMES.length];
+                for (int i = 0; i < NAMES.length; i++) {
+                    try {
+                        m[i] = sc.getMethod(NAMES[i]);
+                    } catch (Throwable ignored) {
+                        m[i] = null;
+                    }
+                }
+                methods = m;
+                resolvedFor = sc;
+            }
+            double[] v = new double[NAMES.length];
+            for (int i = 0; i < NAMES.length; i++) {
+                v[i] = Double.NaN;
+                if (methods[i] == null) continue;
+                try {
+                    v[i] = toDouble(methods[i].invoke(svc));
+                } catch (Throwable ignored) {
+                }
+            }
+            update(v, nowMs);
+        }
+
+        static double toDouble(Object o) {
+            if (o instanceof Number) return ((Number) o).doubleValue();
+            if (o instanceof Boolean) return ((Boolean) o).booleanValue() ? 1.0 : 0.0;
+            return Double.NaN;
+        }
+
+        /** Applies one sample (also the self-test entry point). Returns true when a LAMP event was logged. */
+        static boolean update(double[] v, long nowMs) {
+            double cyl = v[IDX_CYL];
+            cylPressure = cyl;
+            if (!Double.isNaN(cyl) && cyl > 0.05) cylSeen = true;
+            String t = format(v);
+            text = t;
+            last = v.clone();
+            StringBuilder key = new StringBuilder();
+            for (int i = 0; i < v.length; i++) {
+                if (i == IDX_CYL) key.append(!Double.isNaN(cyl) && cyl > CYL_PRESSED ? "B" : "-");
+                else key.append(fmt(v[i])).append(',');
+            }
+            String k = key.toString();
+            if (!k.equals(lastKey)) {
+                boolean first = lastKey.isEmpty();
+                lastKey = k;
+                DebugManager.logEvent("LAMP", (first ? "Initial " : "") + t);
+                return true;
+            }
+            return false;
+        }
+
+        static String fmt(double d) {
+            if (Double.isNaN(d)) return "x";
+            if (d == Math.rint(d) && Math.abs(d) < 1e9) return String.valueOf((long) d);
+            return String.format(Locale.US, "%.1f", d);
+        }
+
+        static String format(double[] v) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < v.length; i++) {
+                if (i > 0) sb.append(' ');
+                sb.append(SHORT[i]).append('=').append(fmt(v[i]));
+            }
+            return sb.toString();
+        }
+
+        /** Raw text of the latest sample ("" before the first poll). */
+        static String text() {
+            return text;
+        }
+
+        /** Two short lines for the dashboard card (the full set is in the report / LAMP log events). */
+        static String dashboardText() {
+            double[] v = last;
+            if (v == null) return "램프 신호 대기 중\n ";
+            return "전조등 A" + fmt(v[0]) + " C" + fmt(v[1]) + " P" + fmt(v[2]) + " · 하향" + fmt(v[3]) + " 상향" + fmt(v[4]) + "\n"
+                    + "제동등 " + fmt(v[8]) + "/" + fmt(v[9]) + " · 브레이크압 " + fmt(v[IDX_CYL]) + (cylSeen ? "" : "?");
+        }
+
+        /** True once getCylPrsrVal() has reported a pressure above zero (the signal is live on this car). */
+        static boolean pressureLive() {
+            return cylSeen;
+        }
+
+        static double pressure() {
+            return cylPressure;
+        }
+
+        static void resetForTest() {
+            lastKey = "";
+            text = "";
+            last = null;
+            cylPressure = Double.NaN;
+            cylSeen = false;
+            lastPollMs = 0L;
+        }
+    }
+
     public static final class LiveTuning {
         static final int[] QUALITY_STEPS = new int[]{50, 55, 60, 65, 70, 75, 80, 85, 90, 95};
         static final int[] TARGET_FPS_STEPS = new int[]{5, 8, 10, 12, 15, 20, 25};
@@ -9172,6 +9317,8 @@ public class TurzxMonitorMain {
             sb.append("HUD Design      : ").append(LiveTuning.teslaDesign ? "tesla" : "classic")
                     .append(" | tesla assets ready=").append(TurzxFrameRenderer.TeslaHud.isReady())
                     .append(" | headLampStatus=").append(TelemetryCollector.getLatestSnapshot().headLampStatus).append("\n");
+            sb.append("Lamp signals    : ").append(LampProbe.text())
+                    .append(" | brakePressureLive=").append(LampProbe.pressureLive()).append("\n");
             sb.append("Panel RST test  : ").append(PanelRstTest.reportLine()).append("\n");
             List<String[]> bench = FpsBench.recent(FpsBench.MAX_HISTORY);
             for (int i = bench.size() - 1; i >= 0; i--) {
@@ -13671,11 +13818,35 @@ public class TurzxMonitorMain {
             }
             TurzxFrameRenderer.TeslaHud.Layout bad = TurzxFrameRenderer.TeslaHud.parseLayout("F:x\t1\nR:y\tz\t1\t2\t3\n# c\n");
             assertTrue(bad.fields.isEmpty() && bad.rects.isEmpty(), "tesla: malformed layout lines are skipped");
-            assertTrue(TurzxFrameRenderer.TeslaHud.estimateBrake("D", 0, 0.0, 0.0), "brake: stopped in D");
-            assertTrue(TurzxFrameRenderer.TeslaHud.estimateBrake("D", 60, 2.0, 5.0), "brake: decelerating");
-            assertTrue(TurzxFrameRenderer.TeslaHud.estimateBrake("D", 60, 0.0, -25.0), "brake: strong regen");
-            assertTrue(!TurzxFrameRenderer.TeslaHud.estimateBrake("D", 60, 0.2, 18.0), "brake: cruising");
-            assertTrue(!TurzxFrameRenderer.TeslaHud.estimateBrake("P", 0, 0.0, 0.0), "brake: parked");
+            assertTrue(TurzxFrameRenderer.TeslaHud.estimateBrake("D", 0, 0.0), "brake: stopped in D");
+            assertTrue(TurzxFrameRenderer.TeslaHud.estimateBrake("D", 60, 2.0), "brake: decelerating");
+            assertTrue(!TurzxFrameRenderer.TeslaHud.estimateBrake("D", 60, 0.0), "brake: regen alone no longer lights");
+            assertTrue(!TurzxFrameRenderer.TeslaHud.estimateBrake("D", 60, 0.2), "brake: cruising");
+            assertTrue(!TurzxFrameRenderer.TeslaHud.estimateBrake("P", 0, 0.0), "brake: parked");
+            // v1.5.2: brake pressure decides once live
+            assertTrue(TurzxFrameRenderer.TeslaHud.brakeLamp("P", 0, 0.0, true, 12.0), "brake: pedal in P");
+            assertTrue(!TurzxFrameRenderer.TeslaHud.brakeLamp("D", 0, 0.0, true, 0.0), "brake: stopped, pedal released");
+            assertTrue(!TurzxFrameRenderer.TeslaHud.brakeLamp("D", 60, 3.0, true, 0.0), "brake: regen decel without pedal");
+            assertTrue(TurzxFrameRenderer.TeslaHud.brakeLamp("D", 0, 0.0, false, Double.NaN), "brake: fallback estimate");
+            LampProbe.resetForTest();
+            double[] lv = new double[LampProbe.NAMES.length];
+            for (int i = 0; i < lv.length; i++) lv[i] = -1;
+            lv[0] = 3; lv[1] = 3; lv[2] = 3; lv[LampProbe.IDX_CYL] = 0.0;
+            lv[11] = Double.NaN;
+            assertTrue(LampProbe.update(lv, 1000L), "lamp: first sample logged");
+            assertTrue(!LampProbe.update(lv, 1250L) && !LampProbe.pressureLive(), "lamp: unchanged sample not logged");
+            assertTrue(LampProbe.text().startsWith("AFLS=3 CGW5=3 CP6=3 Low=-1") && LampProbe.text().contains("Lamp=x")
+                    && LampProbe.text().endsWith("Cyl=0"), "lamp: text " + LampProbe.text());
+            lv[LampProbe.IDX_CYL] = 0.8;
+            assertTrue(!LampProbe.update(lv, 1500L) && LampProbe.pressureLive(), "lamp: light pressure -> live, below pressed");
+            lv[LampProbe.IDX_CYL] = 15.3;
+            assertTrue(LampProbe.update(lv, 1750L) && LampProbe.pressure() > 15.0, "lamp: pedal press logged");
+            assertTrue(LampProbe.dashboardText().equals("전조등 A3 C3 P3 · 하향-1 상향-1\n제동등 -1/-1 · 브레이크압 15.3"),
+                    "lamp: dashboard " + LampProbe.dashboardText());
+            lv[1] = 0;
+            assertTrue(LampProbe.update(lv, 2000L), "lamp: head status change logged");
+            assertTrue(LampProbe.toDouble(Boolean.TRUE) == 1.0 && Double.isNaN(LampProbe.toDouble("a")), "lamp: value conversion");
+            LampProbe.resetForTest();
             assertTrue(TurzxFrameRenderer.TeslaHud.headLampsOn(3) && !TurzxFrameRenderer.TeslaHud.headLampsOn(0)
                     && !TurzxFrameRenderer.TeslaHud.headLampsOn(-1), "head lamps: raw status");
             MonitorConfig dc = new MonitorConfig();
