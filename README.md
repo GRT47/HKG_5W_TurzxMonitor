@@ -8,7 +8,7 @@
 | TURZX 8.8" | PID `0x0088` | `1920 × 462` | `480 × 1920` 세로 JPEG |
 | TURZX 12.3" (v1.5.0~) | PID `0x0123` | `1920 × 720` | `720 × 1920` 세로 JPEG |
 
-연결된 패널을 자동으로 감지해 해상도·레이아웃·이미지를 바꿉니다. 현재 버전: **v1.5.2**
+연결된 패널을 자동으로 감지해 해상도·레이아웃·이미지를 바꿉니다. 현재 버전: **v1.5.3**
 
 ---
 
@@ -26,7 +26,10 @@
 - **배터리 카드**: 잔량(kWh) · SoC · 주행가능거리 · 전비 · BMS · SOH · 배터리 온도 · 셀 최고/최저/편차 · 출력/회생 막대.
 - **미디어 카드**: 큰 앨범 아트, 앱 이름, 제목, 아티스트, 재생 진행(버튼 없음).
 - **공조 바**: 운전석 설정 온도 + `AUTO`(꺼져도 흐리게 표시), 풍향(상체/하체), 풍량, 실내·실외 온도, `A/C` · `HEAT` · 앞유리 · 뒷유리 · 내기 칩.
-- **램프 효과**: 전조등은 `getAFLS11_HeadLampStatus` > 0일 때 켜집니다. 제동등은 ESC 브레이크 압력(`getCylPrsrVal`)이 한 번이라도 0보다 크게 들어오면 그 값(> 1.5)으로 켜고, 신호가 확인되기 전에는 D/R 정차 또는 감속 > 1.6 m/s²로 추정합니다(v1.5.2). 후보 신호 원값은 대시보드 `전력 · 주행` 카드와 리포트 `Lamp signals` 줄, 로그의 `LAMP` 이벤트에서 볼 수 있습니다.
+- **램프 효과** (v1.5.3):
+  - 제동등: 콤마 3X가 연결돼 있으면 `carState.brakeLights`를 그대로 씁니다(opendbc 기준 CAN `TCS13.BrakeLight` 또는 브레이크 페달). 콤마가 없으면 ESC 브레이크 압력(`getCylPrsrVal`, 한 번이라도 0보다 크게 들어온 경우), 그것도 없으면 D/R 정차 또는 감속 > 1.6 m/s²로 추정합니다.
+  - 전조등: 헤드유닛이 미등을 켜면 받는 `com.hkmc.intent.action.SYSTEM_STATE_ILLUMINATE_ON/OFF` 브로드캐스트를 우선 쓰고, 받기 전에는 `IBCMService.getIlluminateStatus()` 값을 씁니다. 이전에 쓰던 `getAFLS11_HeadLampStatus`는 DBC상 AFLS LED 램프 상태(고장 표시 계열)라 켜짐/꺼짐과 무관하게 3으로 나와 더 이상 쓰지 않습니다. 콤마(openpilot)는 전조등 신호를 읽지 않아 보내지 않습니다.
+  - 판단 근거와 원값은 대시보드 `전력 · 주행` 카드 마지막 두 줄, 리포트의 `Lamp sources` / `BCM lamp getters` / `Lamp signals` 줄, 로그의 `LAMP` 이벤트에서 볼 수 있습니다.
 - **기존 디자인으로 되돌리기**: 실험 패널 `디자인` 줄(신규 / 기존) 또는 설정 `hud_design=classic`. 새 디자인 그리기에 실패한 프레임은 자동으로 기존 HUD로 그립니다.
 - **3D 모델 크레딧**: 내 차 이미지는 ["2019 Kia e-Niro"](https://sketchfab.com/3d-models/kia-e-niro-2019-49067e3857bd4081918b7f3f5898eb3c)
   by tonielpro520, licensed under [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/) — 재질 색 지정 · 조명 · 램프 발광을 바꿔 렌더링했습니다.
@@ -131,6 +134,7 @@ python package_turzx_monitor/build_package.py
 
 | 버전 | 내용 |
 |---|---|
+| v1.5.3 | 제동등: 콤마 `carState.brakeLights`(CAN `TCS13.BrakeLight` 또는 페달) 우선. 전조등: 헤드유닛 일루미네이션(`SYSTEM_STATE_ILLUMINATE_ON/OFF`, `IBCMService.getIlluminateStatus`) 기준, BCM 램프 콜백·getter 원값 기록 |
 | v1.5.2 | 램프·브레이크 신호 진단(대시보드 `전력 · 주행` 카드, 로그 `LAMP` 이벤트), 제동등을 브레이크 압력(`getCylPrsrVal`) 기준으로, 회생 출력 기준 제거 |
 | v1.5.1 | 실험 패널 `화면 회전`(기본 / 180°), 실험 패널 스크롤 |
 | v1.5.0 | 테슬라 스타일 HUD(기본값, `디자인` 줄로 전환), 12.3" (`0x0123`, 1920×720) 패널 지원, 전조등/제동등 표시 |

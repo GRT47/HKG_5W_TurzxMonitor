@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.2";
+    public static final String MONITOR_VERSION = "1.5.3";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -2815,6 +2815,13 @@ public class TurzxMonitorMain {
                 return estimateBrake(gear, speedKph, decelMps2);
             }
 
+            /** v1.5.3: the Comma's carState.brakeLights (CAN TCS13 BrakeLight || pedal) wins while it is fresh. */
+            static boolean brakeLamp(String gear, int speedKph, double decelMps2, boolean commaFresh, boolean commaBrake,
+                                     boolean pressureLive, double pressure) {
+                if (commaFresh) return commaBrake;
+                return brakeLamp(gear, speedKph, decelMps2, pressureLive, pressure);
+            }
+
             static boolean estimateBrake(String gear, int speedKph, double decelMps2) {
                 if (!"D".equals(gear) && !"R".equals(gear)) return false;
                 if (speedKph <= 0) return true;
@@ -3056,9 +3063,11 @@ public class TurzxMonitorMain {
                     lastSpeedNs = now;
                 }
                 String gear = (s.gearPos != null && !s.gearPos.isEmpty()) ? s.gearPos : "D";
-                boolean head = headLampsOn(s.headLampStatus);
+                boolean head = LampProbe.headLampsOn();
                 double totalKw = s.getTotalPowerKw();
-                boolean brake = brakeLamp(gear, spd, decel, LampProbe.pressureLive(), LampProbe.pressure());
+                long nowMsL = System.currentTimeMillis();
+                boolean brake = brakeLamp(gear, spd, decel, LampProbe.commaFresh(nowMsL), LampProbe.commaBrake(),
+                        LampProbe.pressureLive(), LampProbe.pressure());
 
                 mDrawBmpXY.invoke(c, base, 0f, 0f, null);
 
@@ -4794,7 +4803,9 @@ public class TurzxMonitorMain {
         @Override public void onIgnitionChanged(int a) {
             TelemetryCollector.onBcmIgnitionChangedCallback(a);
         }
-        @Override public void onLampStatusChanged(int a, int b, int c, int d) {}
+        @Override public void onLampStatusChanged(int a, int b, int c, int d) {
+            LampProbe.onBcmLamp(a, b, c, d);
+        }
         @Override public void onModemInfoChanged(byte[] data) {}
         @Override public void onPanic(int a) {}
         @Override public void onParkBrakeStatusChanged(int a) {}
@@ -5003,6 +5014,8 @@ public class TurzxMonitorMain {
 
         private static final String[] MEDIA_WIDGET_ACTIONS = new String[]{
                 "com.hkmc.audio.btaudio.widgetupdate",
+                LampProbe.ILLUM_ON,
+                LampProbe.ILLUM_OFF,
                 "com.hkmc.dipoaudio.widgetupdate",
                 "com.hkmc.gpmaudio.widgetupdate",
                 "com.hkmc.audio.usb.widgetupdate",
@@ -5245,6 +5258,13 @@ public class TurzxMonitorMain {
 
         public static void onMediaWidgetBroadcast(Object intentObj, Object explicitExtrasObj) {
             if (intentObj == null && explicitExtrasObj == null) return;
+            if (intentObj != null) {
+                try {
+                    Object a0 = intentObj.getClass().getMethod("getAction").invoke(intentObj);
+                    if (a0 != null && LampProbe.onIlluminateAction(String.valueOf(a0))) return;
+                } catch (Throwable ignored) {
+                }
+            }
             try {
                 String action = "";
                 Object extrasObj = explicitExtrasObj;
@@ -6617,6 +6637,12 @@ public class TurzxMonitorMain {
                     }
                 }
 
+                if (bcmService != null) {
+                    try {
+                        LampProbe.pollBcm(bcmService, System.currentTimeMillis());
+                    } catch (Throwable ignored) {
+                    }
+                }
                 if (bcmService != null && bcmGetSpeedKmhMethod != null) {
                     try {
                         float spdKmh = ((Float) bcmGetSpeedKmhMethod.invoke(bcmService)).floatValue();
@@ -7614,7 +7640,7 @@ public class TurzxMonitorMain {
                     + "속도 " + Math.max(0, s.carrotSpeedKph) + " · 크루즈 "
                     + (s.carrotCruiseKph > 0 ? String.valueOf(s.carrotCruiseKph) : "--")
                     + String.format(Locale.US, " · 조향 %+.1f°\n", s.steeringAngleDeg)
-                    + LampProbe.dashboardText();
+                    + LampProbe.dashboardText(System.currentTimeMillis());
 
             StringBuilder flags = new StringBuilder();
             if (s.hvacAuto) flags.append(" AUTO");
@@ -8338,11 +8364,17 @@ public class TurzxMonitorMain {
         }
 
         /** Two short lines for the dashboard card (the full set is in the report / LAMP log events). */
-        static String dashboardText() {
+        static String dashboardText(long nowMs) {
             double[] v = last;
-            if (v == null) return "램프 신호 대기 중\n ";
-            return "전조등 A" + fmt(v[0]) + " C" + fmt(v[1]) + " P" + fmt(v[2]) + " · 하향" + fmt(v[3]) + " 상향" + fmt(v[4]) + "\n"
-                    + "제동등 " + fmt(v[8]) + "/" + fmt(v[9]) + " · 브레이크압 " + fmt(v[IDX_CYL]) + (cylSeen ? "" : "?");
+            String head = "전조등 " + (headLampsOn() ? "ON" : "OFF") + " (" + headSource() + ")"
+                    + (bcmLampText.isEmpty() ? "" : " · BCM " + bcmLampText);
+            String brake;
+            if (commaFresh(nowMs)) {
+                brake = "제동등 " + (commaBrake ? "ON" : "OFF") + " (콤마" + (commaHold ? " · 오토홀드" : "") + ")";
+            } else {
+                brake = "제동등 " + (cylSeen ? "브레이크압" : "추정") + " · 압력 " + (v != null ? fmt(v[IDX_CYL]) : "x");
+            }
+            return head + "\n" + brake;
         }
 
         /** True once getCylPrsrVal() has reported a pressure above zero (the signal is live on this car). */
@@ -8354,6 +8386,161 @@ public class TurzxMonitorMain {
             return cylPressure;
         }
 
+        // ---- v1.5.3: Comma carState brakeLights (TCS13 BrakeLight || brake pedal, opendbc hyundai carstate) ----
+        static final long COMMA_FRESH_MS = 1500L;
+        private static volatile long commaMs = 0L;
+        private static volatile boolean commaBrake = false;
+        private static volatile boolean commaHold = false;
+        private static volatile boolean lastLoggedCommaBrake = false;
+
+        /** CVS1 carState decoder: brakeLights / brakeHoldActive from the Comma 3X. */
+        static void onCommaCarState(boolean brakeLights, boolean brakeHold, long nowMs) {
+            commaBrake = brakeLights;
+            commaHold = brakeHold;
+            boolean firstOrChanged = commaMs == 0L || brakeLights != lastLoggedCommaBrake;
+            commaMs = nowMs;
+            if (firstOrChanged) {
+                lastLoggedCommaBrake = brakeLights;
+                DebugManager.logEvent("LAMP", "Comma brakeLights=" + brakeLights + " brakeHold=" + brakeHold);
+            }
+        }
+
+        static boolean commaFresh(long nowMs) {
+            long t = commaMs;
+            return t > 0L && nowMs - t >= 0L && nowMs - t < COMMA_FRESH_MS;
+        }
+
+        static boolean commaBrake() {
+            return commaBrake;
+        }
+
+        // ---- v1.5.3: head-unit illumination (tail / head lamps on -> screens dim) ----
+        static final String ILLUM_ON = "com.hkmc.intent.action.SYSTEM_STATE_ILLUMINATE_ON";
+        static final String ILLUM_OFF = "com.hkmc.intent.action.SYSTEM_STATE_ILLUMINATE_OFF";
+        /** -1 unknown, 0 off, 1 on (from the ILLUMINATE_ON/OFF broadcast: unambiguous). */
+        private static volatile int illumBroadcast = -1;
+        /** Raw IBCMService.getIlluminateStatus() (Integer.MIN_VALUE = unavailable). */
+        private static volatile int illumRaw = Integer.MIN_VALUE;
+        /** Raw value seen while the broadcast said ON / OFF (learned mapping), MIN_VALUE until seen. */
+        private static volatile int illumRawWhenOn = Integer.MIN_VALUE;
+        private static volatile int illumRawWhenOff = Integer.MIN_VALUE;
+        private static volatile String bcmLampText = "";
+        private static volatile String bcmText = "";
+        private static Method[] bcmMethods = null;
+        private static Class<?> bcmResolvedFor = null;
+        private static long lastBcmPollMs = 0L;
+        private static String lastBcmKey = "";
+
+        /** Broadcast receiver: returns true when the action was an illumination change (consumed). */
+        static boolean onIlluminateAction(String action) {
+            if (action == null) return false;
+            int v;
+            if (ILLUM_ON.equals(action)) v = 1;
+            else if (ILLUM_OFF.equals(action)) v = 0;
+            else return false;
+            illumBroadcast = v;
+            int raw = illumRaw;
+            if (raw != Integer.MIN_VALUE) {
+                if (v == 1) illumRawWhenOn = raw;
+                else illumRawWhenOff = raw;
+            }
+            DebugManager.logEvent("LAMP", "Illumination broadcast " + (v == 1 ? "ON" : "OFF") + " (getIlluminateStatus=" + fmtRaw(raw) + ")");
+            return true;
+        }
+
+        /** IBCMListener.onLampStatusChanged(a, b, c, d): meaning unknown, recorded raw. */
+        static void onBcmLamp(int a, int b, int c, int d) {
+            bcmLampText = a + "," + b + "," + c + "," + d;
+            DebugManager.logEvent("LAMP", "BCM onLampStatusChanged(" + bcmLampText + ")");
+        }
+
+        /** Telemetry thread: every lamp / illumination getter of IBCMService (no-arg, or one int arg 0..3), ~1 Hz. */
+        static void pollBcm(Object bcm, long nowMs) {
+            if (bcm == null || nowMs - lastBcmPollMs < 1000L) return;
+            lastBcmPollMs = nowMs;
+            Class<?> sc = bcm.getClass();
+            if (bcmResolvedFor != sc) {
+                List<Method> found = new ArrayList<Method>();
+                for (Method m : sc.getMethods()) {
+                    String n = m.getName();
+                    if (!(n.startsWith("get") || n.startsWith("is"))) continue;
+                    if (!(n.contains("Illum") || n.contains("Lamp") || n.contains("Light") || n.contains("Brake")
+                            || n.contains("Night"))) continue;
+                    Class<?>[] pt = m.getParameterTypes();
+                    if (pt.length == 0 || (pt.length == 1 && pt[0] == int.class)) found.add(m);
+                }
+                java.util.Collections.sort(found, new java.util.Comparator<Method>() {
+                    @Override
+                    public int compare(Method x, Method y) {
+                        return x.getName().compareTo(y.getName());
+                    }
+                });
+                bcmMethods = found.toArray(new Method[0]);
+                bcmResolvedFor = sc;
+                StringBuilder names = new StringBuilder();
+                for (Method m : bcmMethods) names.append(' ').append(m.getName()).append(m.getParameterTypes().length == 1 ? "(int)" : "()");
+                DebugManager.logEvent("LAMP", "IBCMService lamp getters:" + names);
+            }
+            StringBuilder sb = new StringBuilder();
+            for (Method m : bcmMethods) {
+                int args = m.getParameterTypes().length;
+                for (int a = 0; a < (args == 0 ? 1 : 4); a++) {
+                    String v;
+                    try {
+                        Object r = args == 0 ? m.invoke(bcm) : m.invoke(bcm, Integer.valueOf(a));
+                        v = r instanceof Number || r instanceof Boolean ? fmt(toDouble(r)) : String.valueOf(r);
+                        if (args == 0 && "getIlluminateStatus".equals(m.getName()) && r instanceof Number) {
+                            illumRaw = ((Number) r).intValue();
+                        }
+                    } catch (Throwable t) {
+                        v = "x";
+                    }
+                    if (sb.length() > 0) sb.append(' ');
+                    sb.append(m.getName().replaceFirst("^(get|is)", "")).append(args == 0 ? "" : "[" + a + "]").append('=').append(v);
+                }
+            }
+            String t = sb.toString();
+            bcmText = t;
+            if (!t.equals(lastBcmKey)) {
+                lastBcmKey = t;
+                DebugManager.logEvent("LAMP", "BCM " + t);
+            }
+        }
+
+        static String fmtRaw(int raw) {
+            return raw == Integer.MIN_VALUE ? "x" : String.valueOf(raw);
+        }
+
+        /**
+         * Head/tail lamps on? The ILLUMINATE_ON/OFF broadcast decides when one has been received. Before that the raw
+         * getIlluminateStatus() is used: the value learned from a broadcast if any, otherwise 1 = on.
+         * (getAFLS11_HeadLampStatus is AFLS11 CF_Afls_LedHLStat in the DBC - a lamp fault/LED state that reads 3
+         * whether the lights are on or off - so it is no longer used.)
+         */
+        static boolean headLampsOn() {
+            int b = illumBroadcast;
+            if (b >= 0) return b == 1;
+            int raw = illumRaw;
+            if (raw == Integer.MIN_VALUE) return false;
+            if (illumRawWhenOn != Integer.MIN_VALUE) return raw == illumRawWhenOn;
+            if (illumRawWhenOff != Integer.MIN_VALUE) return raw != illumRawWhenOff;
+            return raw == 1;
+        }
+
+        static String headSource() {
+            if (illumBroadcast >= 0) return "방송";
+            if (illumRaw != Integer.MIN_VALUE) return "BCM " + illumRaw;
+            return "신호 없음";
+        }
+
+        static String bcmText() {
+            return bcmText;
+        }
+
+        static String bcmLampText() {
+            return bcmLampText;
+        }
+
         static void resetForTest() {
             lastKey = "";
             text = "";
@@ -8361,6 +8548,20 @@ public class TurzxMonitorMain {
             cylPressure = Double.NaN;
             cylSeen = false;
             lastPollMs = 0L;
+            commaMs = 0L;
+            commaBrake = false;
+            commaHold = false;
+            lastLoggedCommaBrake = false;
+            illumBroadcast = -1;
+            illumRaw = Integer.MIN_VALUE;
+            illumRawWhenOn = Integer.MIN_VALUE;
+            illumRawWhenOff = Integer.MIN_VALUE;
+            bcmLampText = "";
+            bcmText = "";
+        }
+
+        static void setIllumRawForTest(int raw) {
+            illumRaw = raw;
         }
     }
 
@@ -9319,6 +9520,11 @@ public class TurzxMonitorMain {
                     .append(" | headLampStatus=").append(TelemetryCollector.getLatestSnapshot().headLampStatus).append("\n");
             sb.append("Lamp signals    : ").append(LampProbe.text())
                     .append(" | brakePressureLive=").append(LampProbe.pressureLive()).append("\n");
+            sb.append("Lamp sources    : head=").append(LampProbe.headLampsOn() ? "ON" : "OFF").append(" (").append(LampProbe.headSource())
+                    .append(") | comma brake fresh=").append(LampProbe.commaFresh(System.currentTimeMillis()))
+                    .append(" brakeLights=").append(LampProbe.commaBrake())
+                    .append(" | BCM lamp cb=").append(LampProbe.bcmLampText()).append("\n");
+            sb.append("BCM lamp getters: ").append(LampProbe.bcmText()).append("\n");
             sb.append("Panel RST test  : ").append(PanelRstTest.reportLine()).append("\n");
             List<String[]> bench = FpsBench.recent(FpsBench.MAX_HISTORY);
             for (int i = bench.size() - 1; i >= 0; i--) {
@@ -10207,6 +10413,8 @@ public class TurzxMonitorMain {
                 float steerDeg = bb.getFloat(base + 24);
                 int carrotCruise = bb.getShort(base + 31);
                 int gearShifter = buf[base + 46] & 0xFF;
+                // v1.5.3: brakeHoldActive(bool@28), brakeLights(bool@39) - compact_state.py carState schema
+                LampProbe.onCommaCarState(buf[base + 39] != 0, buf[base + 28] != 0, System.currentTimeMillis());
                 float flPsi = bb.getFloat(base + 57);
                 float frPsi = bb.getFloat(base + 61);
                 float rlPsi = bb.getFloat(base + 65);
@@ -13841,11 +14049,38 @@ public class TurzxMonitorMain {
             assertTrue(!LampProbe.update(lv, 1500L) && LampProbe.pressureLive(), "lamp: light pressure -> live, below pressed");
             lv[LampProbe.IDX_CYL] = 15.3;
             assertTrue(LampProbe.update(lv, 1750L) && LampProbe.pressure() > 15.0, "lamp: pedal press logged");
-            assertTrue(LampProbe.dashboardText().equals("전조등 A3 C3 P3 · 하향-1 상향-1\n제동등 -1/-1 · 브레이크압 15.3"),
-                    "lamp: dashboard " + LampProbe.dashboardText());
+            assertTrue(LampProbe.dashboardText(1750L).equals("전조등 OFF (신호 없음)\n제동등 브레이크압 · 압력 15.3"),
+                    "lamp: dashboard " + LampProbe.dashboardText(1750L));
             lv[1] = 0;
             assertTrue(LampProbe.update(lv, 2000L), "lamp: head status change logged");
             assertTrue(LampProbe.toDouble(Boolean.TRUE) == 1.0 && Double.isNaN(LampProbe.toDouble("a")), "lamp: value conversion");
+            // v1.5.3: Comma brakeLights first, illumination for the head lamps
+            assertTrue(TurzxFrameRenderer.TeslaHud.brakeLamp("D", 60, 0.0, true, true, false, Double.NaN), "brake: comma on");
+            assertTrue(!TurzxFrameRenderer.TeslaHud.brakeLamp("D", 0, 0.0, true, false, true, 20.0), "brake: comma off wins");
+            assertTrue(TurzxFrameRenderer.TeslaHud.brakeLamp("D", 60, 0.0, false, false, true, 20.0), "brake: stale comma -> pressure");
+            LampProbe.resetForTest();
+            LampProbe.onCommaCarState(true, false, 5000L);
+            assertTrue(LampProbe.commaFresh(5500L) && !LampProbe.commaFresh(7000L) && LampProbe.commaBrake(), "lamp: comma freshness");
+            assertTrue(LampProbe.dashboardText(5500L).endsWith("제동등 ON (콤마)"), "lamp: comma dashboard " + LampProbe.dashboardText(5500L));
+            assertTrue(!LampProbe.headLampsOn(), "head: unknown -> off");
+            LampProbe.setIllumRawForTest(1);
+            assertTrue(LampProbe.headLampsOn() && "BCM 1".equals(LampProbe.headSource()), "head: raw 1 guess");
+            LampProbe.setIllumRawForTest(2);
+            assertTrue(LampProbe.onIlluminateAction(LampProbe.ILLUM_ON) && LampProbe.headLampsOn(), "head: broadcast on");
+            assertTrue(LampProbe.onIlluminateAction(LampProbe.ILLUM_OFF) && !LampProbe.headLampsOn()
+                    && "방송".equals(LampProbe.headSource()), "head: broadcast off");
+            assertTrue(!LampProbe.onIlluminateAction("com.hkmc.audio.btaudio.widgetupdate"), "head: other actions pass through");
+            LampProbe.resetForTest();
+            LampProbe.setIllumRawForTest(2);
+            LampProbe.onIlluminateAction(LampProbe.ILLUM_ON);
+            LampProbe.resetForTest();
+            // CVS1 carState with brakeLights set (73-byte payload, byte 39)
+            byte[] cs = new byte[73];
+            cs[0] = 'C'; cs[1] = 'V'; cs[2] = 'S'; cs[3] = '1'; cs[4] = 1;
+            cs[39] = 1;
+            cs[46] = 2;
+            assertTrue(decodeCvs1BinaryPayload(cs, new TelemetrySnapshot()) && LampProbe.commaBrake()
+                    && LampProbe.commaFresh(System.currentTimeMillis()), "lamp: CVS1 brakeLights decoded");
             LampProbe.resetForTest();
             assertTrue(TurzxFrameRenderer.TeslaHud.headLampsOn(3) && !TurzxFrameRenderer.TeslaHud.headLampsOn(0)
                     && !TurzxFrameRenderer.TeslaHud.headLampsOn(-1), "head lamps: raw status");
