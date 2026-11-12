@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.3";
+    public static final String MONITOR_VERSION = "1.5.4";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -274,6 +274,10 @@ public class TurzxMonitorMain {
         public String carrotIp = "";
         public float leadDistM = 0.0f;
         public float leadRelVelKph = 0.0f;
+        public float leadYRightM = 0.0f;      // v1.5.4 radarState leadOne yRel (openpilot: left +) as right-positive metres
+        public float leadAccelMps2 = 0.0f;    // v1.5.4 radarState leadOne aLead
+        public float[] trafficLeads = null;   // v1.5.4 leadsLeft/Right/Left2/Right2: [dRel, yRight, aLead] * n
+        public long trafficMs = 0L;           // when trafficLeads was decoded
         public boolean hasLeadCar = false;
         public float steeringAngleDeg = 0.0f;
         public float laneConfidencePct = 0.0f;
@@ -2884,7 +2888,9 @@ public class TurzxMonitorMain {
                     parkH = ((Integer) bmpCls.getMethod("getHeight").invoke(park)).intValue();
                 }
                 if (mDrawBmpXY == null) initReflection();
-                DebugManager.logEvent("RENDER", "Tesla HUD assets (" + HUD_WIDTH + "x" + hudH + "): layout fields="
+                loadNav(dec);
+                DebugManager.logEvent("RENDER", "Tesla HUD assets (" + HUD_WIDTH + "x" + hudH + "): navdy sets="
+                        + (navSets != null ? navSets.length : 0) + " ego=" + (navEgo != null) + ", layout fields="
                         + L.fields.size() + " rects=" + L.rects.size() + " base=" + (base != null) + " active=" + (active != null)
                         + " ego=" + (egoOff != null) + " park=" + (park != null));
                 return base != null && !L.fields.isEmpty();
@@ -3091,20 +3097,224 @@ public class TurzxMonitorMain {
                 drawClimate(c, s);
             }
 
+            // ---- v1.5.4: Navdy-style car sprites on a chase camera matched to their pitches (turzx_redesign_tesla.html) ----
+            static final float EGO_PITCH_DEG = 14f, EGO_LEN_M = 4.4f;
+
+            /** One sprite frame of design_tesla/navdy_meta.txt; bitmaps are decoded on first use. */
+            static final class NavSprite {
+                final String asset;
+                final float pitch, w, h, ax, ay, ppm;
+                Object bmp, lamp;
+                boolean tried;
+
+                NavSprite(String asset, float pitch, float w, float h, float ax, float ay, float ppm) {
+                    this.asset = asset;
+                    this.pitch = pitch;
+                    this.w = w;
+                    this.h = h;
+                    this.ax = ax;
+                    this.ay = ay;
+                    this.ppm = ppm;
+                }
+            }
+
+            static final class NavMeta {
+                NavSprite[][] sets = new NavSprite[0][];   // sorted by pitch, 25 yaw frames each (12 = straight behind)
+                NavSprite ego = null;
+            }
+
+            private static NavSprite[][] navSets = null;
+            private static NavSprite navEgo = null;
+            private static Method navDecode = null;
+            private static Object pTintEgo, pTintLead, pTintOther, pLamp;
+            private static Method mSetAlpha;
+            // chase camera of the current frame
+            private static float camU0, camKx, camH, camHorizon, camEgoD, camCurve;
+
+            static boolean navReady() {
+                return navSets != null && navSets.length > 0 && navEgo != null && pTintEgo != null;
+            }
+
+            /** navdy_meta.txt lines: "set pitchDeg index width height anchorX anchorY pxPerMetre" (+ one navdy_ego line). */
+            static NavMeta parseNavMeta(String text) {
+                NavMeta m = new NavMeta();
+                if (text == null) return m;
+                java.util.TreeMap<Float, NavSprite[]> bySet = new java.util.TreeMap<Float, NavSprite[]>();
+                for (String line : text.split("\n")) {
+                    String t = line.trim();
+                    if (t.isEmpty() || t.startsWith("#")) continue;
+                    String[] f = t.split("\\s+");
+                    if (f.length < 8) continue;
+                    try {
+                        float pitch = Float.parseFloat(f[1]);
+                        int idx = Integer.parseInt(f[2]);
+                        float w = Float.parseFloat(f[3]), h = Float.parseFloat(f[4]);
+                        float ax = Float.parseFloat(f[5]), ay = Float.parseFloat(f[6]), ppm = Float.parseFloat(f[7]);
+                        if (w <= 0f || h <= 0f || ppm <= 0f) continue;
+                        if ("navdy_ego".equals(f[0])) {
+                            m.ego = new NavSprite("navdy_ego", pitch, w, h, ax, ay, ppm);
+                            continue;
+                        }
+                        if (idx < 0 || idx > 24) continue;
+                        NavSprite[] arr = bySet.get(Float.valueOf(pitch));
+                        if (arr == null) {
+                            arr = new NavSprite[25];
+                            bySet.put(Float.valueOf(pitch), arr);
+                        }
+                        arr[idx] = new NavSprite(f[0] + "_car_" + (idx < 10 ? "0" : "") + idx, pitch, w, h, ax, ay, ppm);
+                    } catch (RuntimeException ignored) {
+                        // malformed line
+                    }
+                }
+                List<NavSprite[]> sets = new ArrayList<NavSprite[]>();
+                for (NavSprite[] arr : bySet.values()) {
+                    boolean full = true;
+                    for (NavSprite sp : arr) if (sp == null) full = false;
+                    if (full) sets.add(arr);
+                }
+                m.sets = sets.toArray(new NavSprite[0][]);
+                return m;
+            }
+
+            /** Yaw frame 0..24 (12 = straight behind, + = car on the right) of a car x m ahead of the camera, y m right. */
+            static int navIndex(float x, float y, float curve, float egoD) {
+                float r = Math.max(0f, x - egoD);
+                double deg = Math.toDegrees(Math.atan2(y + curve * r * r * 0.5f, x) - curve * r);
+                return Math.max(0, Math.min(24, (int) Math.round(deg / 2.0) + 12));
+            }
+
+            /** Index of the set whose render pitch is closest to the real viewing elevation (deg). */
+            static int navSetFor(NavSprite[][] sets, float elevDeg) {
+                int best = 0;
+                for (int i = 1; i < sets.length; i++) {
+                    if (Math.abs(sets[i][0].pitch - elevDeg) < Math.abs(sets[best][0].pitch - elevDeg)) best = i;
+                }
+                return best;
+            }
+
+            /** Radar distance (from the ego front bumper) -> camera distance; mild compression beyond 30 m. */
+            static float camX(float egoD, float d) {
+                return egoD + EGO_LEN_M + (d <= 30f ? d : 30f + (d - 30f) * 0.7f);
+            }
+
+            static float[] tintMatrix(int r, int g, int b, float gain) {
+                return new float[]{r / 255f * gain, 0, 0, 0, 0, 0, g / 255f * gain, 0, 0, 0, 0, 0, b / 255f * gain, 0, 0, 0, 0, 0, 1, 0};
+            }
+
+            private static void loadNav(Method dec) {
+                try {
+                    byte[] mt = readJarAssetBytes("navdy_meta.txt");
+                    NavMeta nm = parseNavMeta(mt != null ? new String(mt, UTF8) : null);
+                    navSets = nm.sets;
+                    navEgo = nm.ego;
+                    navDecode = dec;
+                    if (pTintEgo == null) {
+                        Class<?> paintCls = gfxClasses[3];
+                        Class<?> cfCls = Class.forName("android.graphics.ColorFilter");
+                        Constructor<?> cmcf = Class.forName("android.graphics.ColorMatrixColorFilter").getConstructor(float[].class);
+                        Class<?> pdCls = Class.forName("android.graphics.PorterDuff$Mode");
+                        Constructor<?> pdcf = Class.forName("android.graphics.PorterDuffColorFilter").getConstructor(int.class, pdCls);
+                        Class<?> xferCls = Class.forName("android.graphics.Xfermode");
+                        Constructor<?> pdx = Class.forName("android.graphics.PorterDuffXfermode").getConstructor(pdCls);
+                        Method setCF = paintCls.getMethod("setColorFilter", cfCls);
+                        Constructor<?> pc = paintCls.getConstructor(int.class);
+                        Object ego = pc.newInstance(Integer.valueOf(3)), lead = pc.newInstance(Integer.valueOf(3)), other = pc.newInstance(Integer.valueOf(3));
+                        setCF.invoke(ego, cmcf.newInstance((Object) tintMatrix(236, 239, 244, 1.12f)));
+                        setCF.invoke(lead, cmcf.newInstance((Object) tintMatrix(214, 219, 227, 1.08f)));
+                        setCF.invoke(other, cmcf.newInstance((Object) tintMatrix(150, 156, 166, 0.92f)));
+                        Object lamp = pc.newInstance(Integer.valueOf(3));
+                        setCF.invoke(lamp, pdcf.newInstance(Integer.valueOf(0xFFFF2638), pdCls.getField("SRC_IN").get(null)));
+                        paintCls.getMethod("setXfermode", xferCls).invoke(lamp, pdx.newInstance(pdCls.getField("ADD").get(null)));
+                        mSetAlpha = paintCls.getMethod("setAlpha", int.class);
+                        pTintOther = other;
+                        pTintLead = lead;
+                        pLamp = lamp;
+                        pTintEgo = ego;
+                    }
+                } catch (Throwable t) {
+                    navSets = null;
+                    DebugManager.logError("RENDER", "Navdy car sprites", t);
+                }
+            }
+
+            private static boolean navBitmaps(NavSprite sp) {
+                if (!sp.tried) {
+                    sp.tried = true;
+                    sp.bmp = decodeAssetBitmap(navDecode, sp.asset + ".png");
+                    sp.lamp = decodeAssetBitmap(navDecode, sp.asset + "_lamp.png");
+                }
+                return sp.bmp != null;
+            }
+
+            /** Draws a sprite with its rear-centre ground point at (gx, gy). lamp: 0 off, 1 tail, 2 brake. Returns its height above gy. */
+            private static float drawNav(Object c, NavSprite sp, float gx, float gy, float scale, Object paint, int lamp,
+                                         float alpha) throws Exception {
+                if (!navBitmaps(sp)) return 0f;
+                float x = gx - sp.ax * scale, y = gy - sp.ay * scale, w = sp.w * scale, h = sp.h * scale;
+                shadow(c, x + w / 2f, y + h - h * 0.04f, w * 0.56f, 0.18f, 0.55f * alpha);
+                int a = Math.max(0, Math.min(255, Math.round(alpha * 255f)));
+                mSetAlpha.invoke(paint, a);
+                mSetRf.invoke(rf, x, y, x + w, y + h);
+                mDrawBmpRRF.invoke(c, sp.bmp, null, rf, paint);
+                if (lamp > 0 && sp.lamp != null) {
+                    if (lamp >= 2) {
+                        float g = 0.06f;
+                        mSetAlpha.invoke(pLamp, Math.round(a * 0.55f));
+                        mSetRf.invoke(rf, x - w * g, y - h * g, x + w * (1f + g), y + h * (1f + g));
+                        mDrawBmpRRF.invoke(c, sp.lamp, null, rf, pLamp);
+                        mSetAlpha.invoke(pLamp, a);
+                        mSetRf.invoke(rf, x, y, x + w, y + h);
+                        mDrawBmpRRF.invoke(c, sp.lamp, null, rf, pLamp);
+                        mDrawBmpRRF.invoke(c, sp.lamp, null, rf, pLamp);
+                    } else {
+                        mSetAlpha.invoke(pLamp, Math.round(a * 0.6f));
+                        mDrawBmpRRF.invoke(c, sp.lamp, null, rf, pLamp);
+                    }
+                }
+                return sp.ay * scale;
+            }
+
+            private static float camBend(float x) {
+                float r = Math.max(0f, x - camEgoD);
+                return camCurve * r * r * 0.5f;
+            }
+
+            private static float camU(float x, float y) {
+                return camU0 + camKx * ((y + camBend(x)) / x);
+            }
+
+            private static float camV(float x) {
+                return camHorizon + camKx * camH / x;
+            }
+
+            private static Object roadShader = null;
+
             private static void drawRoad(Object c, TelemetrySnapshot s, float[] vz, String gear, int spd,
                                          boolean head, boolean brake) throws Exception {
                 float vx = vz[0], vy = vz[1], vw = vz[2], vh = vz[3];
-                final float horizon = vy + vh * 0.46f, u0 = vx + vw * 0.52f, kx = vw * 0.58f, near = 5.2f, bottom = vy + vh;
                 float curve = 0f;
                 if (s.pathPoly != null && s.pathPoly.length >= 3) curve = Math.max(-0.0025f, Math.min(0.0025f, s.pathPoly[2]));
                 if (Math.abs(curve) < 1e-6f && Math.abs(s.steeringAngleDeg) > 0.05f) {
                     curve = Math.max(-0.0025f, Math.min(0.0025f, -s.steeringAngleDeg * 0.000025f));
                 }
-                float[] xs = new float[41];
-                for (int i = 0; i <= 40; i++) xs[i] = near + 90f * (i / 40f) * (i / 40f);
+                // Chase camera: the ego car's rear sits on the bottom edge seen EGO_PITCH_DEG from above, its size as before
+                final float bottom = vy + vh, horizon = vy + vh * 0.38f, bottomV = vy + vh * 0.985f;
+                final float tanP = (float) Math.tan(Math.toRadians(EGO_PITCH_DEG));
+                final float kx = (bottomV - horizon) / tanP;
+                final float egoWpx = Math.min(vw * 0.165f, vh * 0.27f) * 1.13f;
+                final float egoD = 1.9f * kx / egoWpx;
+                camU0 = vx + vw * 0.52f;
+                camKx = kx;
+                camEgoD = egoD;
+                camH = egoD * tanP;
+                camHorizon = horizon;
+                camCurve = curve;
+                final float near = kx * camH / (bottom - horizon);
+                float[] xs = new float[45];
+                for (int i = 0; i <= 44; i++) xs[i] = near + 120f * (i / 44f) * (i / 44f);
                 if (lineShaders == null) {
                     // distance fade = vertical gradient (rows only depend on the panel geometry)
-                    int[][] rgbA = {{160, 164, 172, 140}, {230, 232, 236, 140}, {245, 245, 247, 230}};
+                    int[][] rgbA = {{160, 164, 172, 128}, {230, 232, 236, 140}, {245, 245, 247, 230}};
                     lineShaders = new Object[3];
                     for (int k = 0; k < 3; k++) {
                         int col = (rgbA[k][0] << 16) | (rgbA[k][1] << 8) | rgbA[k][2];
@@ -3112,8 +3322,20 @@ public class TurzxMonitorMain {
                                 new int[]{(rgbA[k][3] << 24) | col, (Math.round(rgbA[k][3] * 0.08f) << 24) | col},
                                 new float[]{0f, 1f}, clamp);
                     }
+                    roadShader = cLinear.newInstance(0f, camV(xs[44]), 0f, bottom,
+                            new int[]{0x00FFFFFF, 0x05FFFFFF, 0x09FFFFFF}, new float[]{0f, 0.35f, 1f}, clamp);
                 }
-                float[][] styles = {{5.4f, 0.06f, 0f}, {3.6f, 0.055f, 1f}, {1.8f, 0.07f, 0f}};
+                // road surface (+-9 m) and lane lines: ego lane +-1.8 bright, neighbour lanes to +-5.4 dashed, edges +-9.0
+                mPReset.invoke(path);
+                for (int i = 0; i < xs.length; i++) {
+                    if (i == 0) mPMove.invoke(path, camU(xs[i], -9f), camV(xs[i]));
+                    else mPLine.invoke(path, camU(xs[i], -9f), camV(xs[i]));
+                }
+                for (int i = xs.length - 1; i >= 0; i--) mPLine.invoke(path, camU(xs[i], 9f), camV(xs[i]));
+                mPClose.invoke(path);
+                mSetShader.invoke(pFill, roadShader);
+                mDrawPath.invoke(c, path, pFill);
+                float[][] styles = {{9.0f, 0.06f, 0f}, {5.4f, 0.055f, 1f}, {1.8f, 0.07f, 0f}};
                 for (int k = 0; k < 3; k++) {
                     mPReset.invoke(path);
                     boolean dashed = styles[k][2] > 0f;
@@ -3122,12 +3344,11 @@ public class TurzxMonitorMain {
                         for (int i = 0; i < xs.length - 1; i++) {
                             float x0 = xs[i], x1 = xs[i + 1];
                             if (dashed && (((int) Math.floor((x0 + phase) / 3.5f)) & 1) != 0) continue;
-                            float c0 = curve * x0 * x0 * 0.5f, c1 = curve * x1 * x1 * 0.5f;
-                            float v0 = horizon + (bottom - horizon) * (near / x0), v1 = horizon + (bottom - horizon) * (near / x1);
-                            mPMove.invoke(path, u0 + kx * ((lat - w + c0) / x0), v0);
-                            mPLine.invoke(path, u0 + kx * ((lat + w + c0) / x0), v0);
-                            mPLine.invoke(path, u0 + kx * ((lat + w + c1) / x1), v1);
-                            mPLine.invoke(path, u0 + kx * ((lat - w + c1) / x1), v1);
+                            float v0 = camV(x0), v1 = camV(x1);
+                            mPMove.invoke(path, camU(x0, lat - w), v0);
+                            mPLine.invoke(path, camU(x0, lat + w), v0);
+                            mPLine.invoke(path, camU(x1, lat + w), v1);
+                            mPLine.invoke(path, camU(x1, lat - w), v1);
                             mPClose.invoke(path);
                         }
                     }
@@ -3137,49 +3358,101 @@ public class TurzxMonitorMain {
                 mSetShader.invoke(pFill, new Object[]{null});
 
                 boolean hasLead = s.hasLeadCar && s.leadDistM > 0.5f;
-                float leadX = hasLead ? 6.2f + (float) Math.pow(Math.max(6.0, s.leadDistM), 0.62) * 1.05f + 4f : 0f;
+                float leadX = hasLead ? camX(egoD, s.leadDistM) : 0f;
                 boolean crit = hasLead && s.leadDistM <= 12f, close = hasLead && s.leadDistM <= 18f;
                 if ("D".equals(gear) || "R".equals(gear)) {
-                    float end = hasLead ? leadX - 1.5f : 60f;
+                    float end = hasLead ? leadX - 1.5f : near + 70f;
                     int rgb = crit ? 0xE31937 : (close ? 0xF5A623 : (s.carrotCruiseKph > 0 ? 0x3E6AE1 : 0xC8CDD7));
                     int a0 = (s.carrotCruiseKph > 0 || close) ? 140 : 46;
-                    float vEnd = horizon + (bottom - horizon) * (near / end);
                     mPReset.invoke(path);
+                    boolean first = true;
                     for (int i = 0; i < xs.length && xs[i] <= end; i++) {
-                        float x = xs[i], cc = curve * x * x * 0.5f, v = horizon + (bottom - horizon) * (near / x);
-                        if (i == 0) mPMove.invoke(path, u0 + kx * ((-1.65f + cc) / x), v);
-                        else mPLine.invoke(path, u0 + kx * ((-1.65f + cc) / x), v);
+                        if (first) mPMove.invoke(path, camU(xs[i], -1.65f), camV(xs[i]));
+                        else mPLine.invoke(path, camU(xs[i], -1.65f), camV(xs[i]));
+                        first = false;
                     }
                     for (int i = xs.length - 1; i >= 0; i--) {
                         if (xs[i] > end) continue;
-                        float x = xs[i], cc = curve * x * x * 0.5f, v = horizon + (bottom - horizon) * (near / x);
-                        mPLine.invoke(path, u0 + kx * ((1.65f + cc) / x), v);
+                        mPLine.invoke(path, camU(xs[i], 1.65f), camV(xs[i]));
                     }
                     mPClose.invoke(path);
-                    mSetShader.invoke(pFill, cLinear.newInstance(0f, bottom, 0f, vEnd,
+                    mSetShader.invoke(pFill, cLinear.newInstance(0f, bottom, 0f, camV(Math.max(near + 0.5f, end)),
                             new int[]{(a0 << 24) | rgb, rgb}, new float[]{0f, 1f}, clamp));
                     mDrawPath.invoke(c, path, pFill);
                     mSetShader.invoke(pFill, new Object[]{null});
                 }
-                if (hasLead && lead != null) {
-                    float cc = curve * leadX * leadX * 0.5f;
-                    float cx = u0 + kx * (cc / leadX), by = horizon + (bottom - horizon) * (near / leadX);
-                    float w = Math.abs(kx * (1.9f / leadX));
-                    float fullW = w * (200f / 172f), fullH = fullW * 0.8f;
-                    drawImage(c, lead, cx - fullW / 2f, by - fullH * (158f / 160f), fullW, fullH);
-                    String tag = Math.round(s.leadDistM) + " m";
-                    float size = vw / 30f;
-                    float tw = measure(tag, size, true);
-                    text(c, tag, cx - tw / 2f, by - fullH * (137f / 160f) - vw / 90f, size, true,
-                            crit ? 0xFFFF4D63 : (close ? 0xFFF5A623 : 0xFFC9CBD1));
+
+                // vehicles far -> near: neighbour lanes (fresh radar lists) + lead; sprite per viewing angle / elevation
+                long now = System.currentTimeMillis();
+                float[] tr = (s.carrotConnected && s.trafficLeads != null && now - s.trafficMs < 1500L) ? s.trafficLeads : new float[0];
+                int n = tr.length / 3 + (hasLead ? 1 : 0);
+                float[] cx = new float[n], cy = new float[n];
+                int[] cl = new int[n];
+                boolean[] isLead = new boolean[n];
+                int m = 0;
+                for (int i = 0; i + 2 < tr.length; i += 3, m++) {
+                    cx[m] = camX(egoD, tr[i]);
+                    cy[m] = tr[i + 1];
+                    cl[m] = tr[i + 2] < -1.5f ? 2 : (head ? 1 : 0);
                 }
-                // ego car: lamp variant
+                if (hasLead) {
+                    cx[m] = leadX;
+                    cy[m] = s.leadYRightM;
+                    cl[m] = s.leadAccelMps2 < -1.5f ? 2 : (head ? 1 : 0);
+                    isLead[m] = true;
+                }
+                // insertion sort by distance, farthest first (n <= 13)
+                for (int i = 1; i < n; i++) {
+                    for (int j = i; j > 0 && cx[j] > cx[j - 1]; j--) {
+                        float t = cx[j]; cx[j] = cx[j - 1]; cx[j - 1] = t;
+                        t = cy[j]; cy[j] = cy[j - 1]; cy[j - 1] = t;
+                        int ti = cl[j]; cl[j] = cl[j - 1]; cl[j - 1] = ti;
+                        boolean tb = isLead[j]; isLead[j] = isLead[j - 1]; isLead[j - 1] = tb;
+                    }
+                }
+                boolean nav = navReady();
+                float tagX = 0f, tagY = 0f;
+                boolean tag = false;
+                for (int i = 0; i < n; i++) {
+                    float x = cx[i], y = cy[i];
+                    float gx = camU(x, y), gy = camV(x);
+                    float top;
+                    if (nav) {
+                        float elev = (float) Math.toDegrees(Math.atan2(camH, x));
+                        NavSprite sp = navSets[navSetFor(navSets, elev)][navIndex(x, y, curve, egoD)];
+                        float alpha = Math.max(0.35f, Math.min(1f, 1.3f - (x - egoD) / 90f));
+                        top = drawNav(c, sp, gx, gy, (kx / x) / sp.ppm, isLead[i] ? pTintLead : pTintOther, cl[i], alpha);
+                    } else if (lead != null) {
+                        float w = Math.abs(kx * (1.9f / x)), fullW = w * (200f / 172f), fullH = fullW * 0.8f;
+                        drawImage(c, lead, gx - fullW / 2f, gy - fullH * (158f / 160f), fullW, fullH);
+                        top = fullH * (137f / 160f);
+                    } else {
+                        top = 0f;
+                    }
+                    if (isLead[i]) {
+                        tag = true;
+                        tagX = gx;
+                        tagY = gy - top;
+                    }
+                }
+                if (tag) {
+                    String t = Math.round(s.leadDistM) + " m";
+                    float size = vw / 30f;
+                    float tw = measure(t, size, true);
+                    text(c, t, tagX - tw / 2f, tagY - vw / 120f, size, true, crit ? 0xFFFF4D63 : (close ? 0xFFF5A623 : 0xFFC9CBD1));
+                }
+
+                // ego car on the same camera: rear ground point at (egoD, 0) = bottom edge, true scale
+                int egoLamp = brake ? 2 : (head ? 1 : 0);
+                if (nav && drawNav(c, navEgo, camU(egoD, 0f), camV(egoD), (kx / egoD) / navEgo.ppm, pTintEgo, egoLamp, 1f) > 0f) {
+                    return;
+                }
                 Object ego = brake ? egoBrake : (head ? egoTail : egoOff);
                 if (ego != null) {
                     float w = Math.min(vw * 0.165f, vh * 0.27f), k = (w * 1.13f) / EGO_CAR_W;
-                    float cx = u0, by = vy + vh * 0.985f, bodyH = EGO_CAR_H * k;
-                    shadow(c, cx, by - bodyH * 0.02f, EGO_CAR_W * k * 0.58f, 0.14f, 0.55f);
-                    drawImage(c, ego, cx - (EGO_CAR_W / 2f + EGO_MARGIN) * k, by - (EGO_CAR_H + EGO_MARGIN) * k, EGO_IMG_W * k, EGO_IMG_H * k);
+                    float ex = camU0, by = bottomV, bodyH = EGO_CAR_H * k;
+                    shadow(c, ex, by - bodyH * 0.02f, EGO_CAR_W * k * 0.58f, 0.14f, 0.55f);
+                    drawImage(c, ego, ex - (EGO_CAR_W / 2f + EGO_MARGIN) * k, by - (EGO_CAR_H + EGO_MARGIN) * k, EGO_IMG_W * k, EGO_IMG_H * k);
                 }
             }
 
@@ -7356,6 +7629,10 @@ public class TurzxMonitorMain {
             c.carrotTbtRoad = liveSnapshot.carrotTbtRoad;
             c.carrotIp = liveSnapshot.carrotIp;
             c.leadDistM = liveSnapshot.leadDistM;
+            c.leadYRightM = liveSnapshot.leadYRightM;
+            c.leadAccelMps2 = liveSnapshot.leadAccelMps2;
+            c.trafficLeads = liveSnapshot.trafficLeads;
+            c.trafficMs = liveSnapshot.trafficMs;
             c.leadRelVelKph = liveSnapshot.leadRelVelKph;
             c.hasLeadCar = liveSnapshot.hasLeadCar;
             c.steeringAngleDeg = liveSnapshot.steeringAngleDeg;
@@ -9525,6 +9802,11 @@ public class TurzxMonitorMain {
                     .append(" brakeLights=").append(LampProbe.commaBrake())
                     .append(" | BCM lamp cb=").append(LampProbe.bcmLampText()).append("\n");
             sb.append("BCM lamp getters: ").append(LampProbe.bcmText()).append("\n");
+            TelemetrySnapshot trs = TelemetryCollector.getLatestSnapshot();
+            sb.append("Traffic sprites : ready=").append(TurzxFrameRenderer.TeslaHud.navReady())
+                    .append(" | radar side leads=").append(trs.trafficLeads != null ? trs.trafficLeads.length / 3 : -1)
+                    .append(" age=").append(trs.trafficMs > 0 ? (System.currentTimeMillis() - trs.trafficMs) + "ms" : "never")
+                    .append(String.format(Locale.US, " | lead y=%.1fm a=%.1f", trs.leadYRightM, trs.leadAccelMps2)).append("\n");
             sb.append("Panel RST test  : ").append(PanelRstTest.reportLine()).append("\n");
             List<String[]> bench = FpsBench.recent(FpsBench.MAX_HISTORY);
             for (int i = bench.size() - 1; i >= 0; i--) {
@@ -10566,17 +10848,27 @@ public class TurzxMonitorMain {
                 target.carrotConnected = true;
                 return true;
             }
-            case 13: { // radarState (leadOne starts at offset 8)
+            case 13: { // radarState: leadOne/Two/Right/Left (LeadData) + leadsLeft/Center/Right/Left2/Right2/CutIn lists
                 if (len < 50) return false;
                 float dRel = bb.getFloat(base + 8);
+                float yRel = bb.getFloat(base + 12);
                 float vRel = bb.getFloat(base + 16);
+                float aLead = bb.getFloat(base + 28);
                 boolean status = (buf[base + 49] & 0xFF) != 0;
                 if (status && !Float.isNaN(dRel) && dRel > 0.5f && dRel < 250.0f) {
                     target.leadDistM = dRel;
                     target.leadRelVelKph = vRel * 3.6f;
+                    target.leadYRightM = (!Float.isNaN(yRel) && Math.abs(yRel) < 12f) ? -yRel : 0f;
+                    target.leadAccelMps2 = (!Float.isNaN(aLead) && Math.abs(aLead) < 20f) ? aLead : 0f;
                     target.hasLeadCar = true;
                 } else {
                     target.hasLeadCar = false;
+                }
+                // v1.5.4 neighbour-lane cars (Tesla HUD traffic sprites)
+                int leadSize = radarLeadStructSize(buf, base, len);
+                if (leadSize > 0) {
+                    target.trafficLeads = parseRadarSideLeads(buf, bb, base, len, leadSize);
+                    target.trafficMs = System.currentTimeMillis();
                 }
                 target.carrotConnected = true;
                 return true;
@@ -10585,6 +10877,64 @@ public class TurzxMonitorMain {
                 target.carrotConnected = true;
                 return true;
         }
+    }
+
+    /** radarState lists after the 4 LeadData structs: leadsLeft, leadsCenter, leadsRight, leadsLeft2, leadsRight2, leadsCutIn. */
+    static final int RADAR_LEAD_LISTS = 6;
+    /** LeadData size in the current carrot-wip compact_state schema (10 f32, fcw, status, aLeadTau, modelProb, radar, radarTrackId, jLead, score). */
+    static final int RADAR_LEAD_SIZE = 63;
+
+    /** Offset right after the lead lists for a LeadData size, or -1 if they do not fit the frame. */
+    static int walkRadarLeadLists(byte[] buf, int base, int end, int size) {
+        int off = base + 8 + 4 * size;
+        for (int i = 0; i < RADAR_LEAD_LISTS; i++) {
+            if (off >= end) return -1;
+            int n = buf[off] & 0xFF;
+            off += 1 + n * size;
+            if (off > end) return -1;
+        }
+        return off;
+    }
+
+    /**
+     * The compact schema has no per-struct length, so the LeadData size is found from the frame length: the current
+     * size if the lists end exactly at the frame end, else any size in 42..96 that does, else the current size when
+     * newer top-level fields follow the lists. 0 = cannot tell (lists are then ignored).
+     */
+    static int radarLeadStructSize(byte[] buf, int base, int len) {
+        int end = base + len;
+        if (walkRadarLeadLists(buf, base, end, RADAR_LEAD_SIZE) == end) return RADAR_LEAD_SIZE;
+        for (int size = 42; size <= 96; size++) {
+            if (size != RADAR_LEAD_SIZE && walkRadarLeadLists(buf, base, end, size) == end) return size;
+        }
+        int w = walkRadarLeadLists(buf, base, end, RADAR_LEAD_SIZE);
+        return (w > 0 && w <= end) ? RADAR_LEAD_SIZE : 0;
+    }
+
+    /** Neighbour-lane leads (leadsLeft, leadsRight, leadsLeft2, leadsRight2) as [dRel, yRight, aLead] triples. */
+    static float[] parseRadarSideLeads(byte[] buf, ByteBuffer bb, int base, int len, int size) {
+        int end = base + len;
+        int off = base + 8 + 4 * size;
+        float[] out = new float[36];
+        int n = 0;
+        for (int li = 0; li < RADAR_LEAD_LISTS && off < end; li++) {
+            int cnt = buf[off] & 0xFF;
+            off += 1;
+            boolean side = li == 0 || li == 2 || li == 3 || li == 4;
+            for (int k = 0; k < cnt && off + size <= end; k++, off += size) {
+                if (!side || n >= 12) continue;
+                float d = bb.getFloat(off), y = bb.getFloat(off + 4), a = bb.getFloat(off + 20);
+                boolean st = size <= 41 || buf[off + 41] != 0;
+                if (!st || Float.isNaN(d) || Float.isNaN(y) || d < 1f || d > 160f || Math.abs(y) > 15f) continue;
+                out[n * 3] = d;
+                out[n * 3 + 1] = -y;
+                out[n * 3 + 2] = Float.isNaN(a) ? 0f : a;
+                n++;
+            }
+        }
+        float[] r = new float[n * 3];
+        System.arraycopy(out, 0, r, 0, n * 3);
+        return r;
     }
 
     public static boolean parseBmsUdsPayload(byte[] payload, TelemetrySnapshot target) {
@@ -14114,6 +14464,56 @@ public class TurzxMonitorMain {
             rcf.delete();
             LiveTuning.loadFrom(new MonitorConfig());
             assertTrue(LiveTuning.ROW_LABELS.length == 9 && "화면 회전".equals(LiveTuning.ROW_LABELS[8]), "rotate: row label");
+            // v1.5.4: Navdy car sprites + radarState neighbour leads
+            byte[] nmRaw = TurzxFrameRenderer.readJarAssetBytesPublic("navdy_meta.txt");
+            TurzxFrameRenderer.TeslaHud.NavMeta nm = TurzxFrameRenderer.TeslaHud.parseNavMeta(nmRaw != null ? new String(nmRaw, UTF8) : null);
+            assertTrue(nm.sets.length == 3 && nm.ego != null && nm.sets[0][0].pitch == 2.5f && nm.sets[2][0].pitch == 8f,
+                    "navdy: 3 pitch sets + ego in navdy_meta.txt");
+            assertTrue("navdy_p5_car_07".equals(nm.sets[1][7].asset) && nm.ego.ppm == 100f && nm.sets[0][12].ppm > 60f, "navdy: asset names / scale");
+            for (int si = 0; si < nm.sets.length; si++) {
+                for (int fi = 0; fi < 25; fi += 6) {
+                    String an = nm.sets[si][fi].asset;
+                    assertTrue(TurzxFrameRenderer.readJarAssetBytesPublic(an + ".png") != null
+                            && TurzxFrameRenderer.readJarAssetBytesPublic(an + "_lamp.png") != null, "navdy: sprite bundled " + an);
+                }
+            }
+            assertTrue(TurzxFrameRenderer.readJarAssetBytesPublic("navdy_ego.png") != null, "navdy: ego sprite bundled");
+            TurzxFrameRenderer.TeslaHud.NavMeta badNav = TurzxFrameRenderer.TeslaHud.parseNavMeta("navdy_p25 2.5 3 10 10 1 1 61.6\nbroken line\n");
+            assertTrue(badNav.sets.length == 0 && badNav.ego == null, "navdy: incomplete set ignored");
+            assertTrue(TurzxFrameRenderer.TeslaHud.navIndex(40f, 0f, 0f, 15f) == 12
+                    && TurzxFrameRenderer.TeslaHud.navIndex(20f, 3.6f, 0f, 15f) > 12
+                    && TurzxFrameRenderer.TeslaHud.navIndex(20f, -3.6f, 0f, 15f) < 12
+                    && TurzxFrameRenderer.TeslaHud.navIndex(8f, 9f, 0f, 15f) == 24, "navdy: yaw frame by bearing");
+            assertTrue(TurzxFrameRenderer.TeslaHud.navSetFor(nm.sets, 2f) == 0 && TurzxFrameRenderer.TeslaHud.navSetFor(nm.sets, 5.5f) == 1
+                    && TurzxFrameRenderer.TeslaHud.navSetFor(nm.sets, 12f) == 2, "navdy: pitch set by elevation");
+            assertTrue(Math.abs(TurzxFrameRenderer.TeslaHud.camX(15f, 20f) - 39.4f) < 0.01f
+                    && Math.abs(TurzxFrameRenderer.TeslaHud.camX(15f, 50f) - 63.4f) < 0.01f, "navdy: radar -> camera distance");
+            // radarState: leadOne d=30 y=-0.5 (0.5 m right) aLead=-2; leadsLeft 1 (d=20, y=+3.6 = left); leadsRight 1 (d=35, y=-3.5)
+            int rs = RADAR_LEAD_SIZE;
+            ByteBuffer rb = ByteBuffer.allocate(8 + 4 * rs + 6 + 2 * rs).order(ByteOrder.LITTLE_ENDIAN);
+            rb.put((byte) 'C').put((byte) 'V').put((byte) 'S').put((byte) '1').put((byte) 13).put((byte) 0).putShort((short) 1);
+            int lo = 8;
+            rb.putFloat(lo, 30f).putFloat(lo + 4, -0.5f).putFloat(lo + 8, -1f).putFloat(lo + 20, -2f).put(lo + 41, (byte) 1);
+            int lists = 8 + 4 * rs;
+            rb.put(lists, (byte) 1);
+            int e0 = lists + 1;
+            rb.putFloat(e0, 20f).putFloat(e0 + 4, 3.6f).putFloat(e0 + 20, 0.3f).put(e0 + 41, (byte) 1);
+            rb.put(e0 + rs, (byte) 0);        // leadsCenter
+            rb.put(e0 + rs + 1, (byte) 1);    // leadsRight
+            int e1 = e0 + rs + 2;
+            rb.putFloat(e1, 35f).putFloat(e1 + 4, -3.5f).putFloat(e1 + 20, -2.5f).put(e1 + 41, (byte) 1);
+            rb.put(e1 + rs, (byte) 0).put(e1 + rs + 1, (byte) 0).put(e1 + rs + 2, (byte) 0);
+            byte[] radar = rb.array();
+            assertTrue(radarLeadStructSize(radar, 0, radar.length) == rs, "radar: lead struct size from frame length");
+            TelemetrySnapshot rsn = new TelemetrySnapshot();
+            assertTrue(decodeCvs1BinaryPayload(radar, rsn) && rsn.hasLeadCar && Math.abs(rsn.leadYRightM - 0.5f) < 1e-4f
+                    && rsn.leadAccelMps2 == -2f, "radar: leadOne y/aLead");
+            assertTrue(rsn.trafficLeads != null && rsn.trafficLeads.length == 6 && rsn.trafficLeads[0] == 20f
+                    && rsn.trafficLeads[1] == -3.6f && rsn.trafficLeads[3] == 35f && rsn.trafficLeads[4] == 3.5f
+                    && rsn.trafficLeads[5] == -2.5f && rsn.trafficMs > 0, "radar: neighbour leads (right-positive y)");
+            byte[] shortRadar = new byte[60];
+            System.arraycopy(radar, 0, shortRadar, 0, 60);
+            assertTrue(radarLeadStructSize(shortRadar, 0, shortRadar.length) == 0, "radar: truncated frame -> no lists");
         } catch (Exception e) {
             throw new RuntimeException("v1.5.0 Tesla HUD self-test failed", e);
         }

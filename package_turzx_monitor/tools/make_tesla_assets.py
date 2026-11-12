@@ -38,8 +38,41 @@ COPIES = {
 }
 
 
+NAVDY = REPO / "navdy-vehicle-sprites-export"
+# (source folder, jar prefix, camera pitch) - car sprites rendered by the Navdy SDF tools (gen_assets.py /
+# make_pitch_set.py), picked per car by the closest pitch to the real viewing elevation
+NAVDY_SETS = (("sprites", "navdy_p25", 2.5), ("sprites_p5", "navdy_p5", 5.0), ("sprites_p8", "navdy_p8", 8.0))
+
+
+def copy_navdy() -> None:
+    """v1.5.4 traffic / ego car sprites + navdy_meta.txt (set pitch idx width height anchorX anchorY ppm)."""
+    for old in OUT.glob("navdy_*"):
+        old.unlink()
+    lines = ["# set pitchDeg index width height anchorX anchorY pxPerMetre  (anchor = rear-centre ground point)"]
+    for folder, prefix, pitch in NAVDY_SETS:
+        src = NAVDY / folder
+        for row in (src / "meta.txt").read_text(encoding="utf-8").splitlines():
+            f = row.split()
+            if not f or f[0] != "car":
+                continue
+            idx = int(f[1])
+            for suffix in ("", "_lamp"):
+                shutil.copy2(src / f"car_{idx:02d}{suffix}.png", OUT / f"{prefix}_car_{idx:02d}{suffix}.png")
+            lines.append(f"{prefix} {pitch} {idx} {f[3]} {f[4]} {f[5]} {f[6]} {f[8]}")
+    ego = NAVDY / "sprites_ego"
+    shutil.copy2(ego / "ego_persp.png", OUT / "navdy_ego.png")
+    shutil.copy2(ego / "ego_persp_lamp.png", OUT / "navdy_ego_lamp.png")
+    w, h, ax, ay, ppm, dist, cam_h, pitch = (ego / "ego_persp_meta.txt").read_text(encoding="utf-8").splitlines()[1].split()
+    lines.append(f"navdy_ego {pitch} 0 {w} {h} {ax} {ay} {ppm}")
+    (OUT / "navdy_meta.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"navdy: {len(lines) - 1} sprites (ego camera {dist} m behind, {cam_h} m high)")
+
+
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
+    if "--navdy-only" in sys.argv:
+        copy_navdy()
+        return 0
     port = bp._get_free_port()
     profile = PKG / "build" / "tesla_profile"
     proc = subprocess.Popen([bp.find_browser(), "--headless=new", "--disable-gpu", "--no-first-run",
@@ -88,6 +121,7 @@ def main() -> int:
         shutil.rmtree(profile, ignore_errors=True)
     for src, dst in COPIES.items():
         shutil.copy2(REPO / src, OUT / dst)
+    copy_navdy()
     for f in sorted(OUT.iterdir()):
         print(f"  {f.name:28} {f.stat().st_size:>8} B")
     return 0

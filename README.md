@@ -8,7 +8,7 @@
 | TURZX 8.8" | PID `0x0088` | `1920 × 462` | `480 × 1920` 세로 JPEG |
 | TURZX 12.3" (v1.5.0~) | PID `0x0123` | `1920 × 720` | `720 × 1920` 세로 JPEG |
 
-연결된 패널을 자동으로 감지해 해상도·레이아웃·이미지를 바꿉니다. 현재 버전: **v1.5.3**
+연결된 패널을 자동으로 감지해 해상도·레이아웃·이미지를 바꿉니다. 현재 버전: **v1.5.4**
 
 ---
 
@@ -18,7 +18,12 @@
   `python package_turzx_monitor/tools/make_tesla_assets.py`가 이 HTML을 Chromium으로 렌더링해 `package_turzx_monitor/design_tesla/`에
   정적 레이어(`tesla_base*.png`), 켜짐 상태 레이어(`tesla_active*.png`), 값·사각형 좌표(`tesla_layout_92/123.txt`), 앞차·내 차·주차 이미지를 만들고,
   빌드가 jar에 넣습니다. Java `TurzxFrameRenderer.TeslaHud`가 이 좌표대로 숫자·막대·칩을 그립니다.
-- **주행 화면**: 흰 차선 + 크루즈 시 파란 경로, 앞차(회색) · 내 차(기아 니로 EV 3D 렌더).
+- **주행 화면**: 3.6m 차로(내 차로 실선 · 옆 차로 점선 · 도로 가장자리) + 크루즈 시 파란 경로.
+  - 차량 (v1.5.4): 앞차(밝은 회색)와 옆 차로 차량(어두운 회색)을 콤마 `radarState`의 `leadOne` · `leadsLeft/Right(2)` 거리·좌우 위치로 배치합니다.
+    차마다 보이는 각도(-24°~+24°, 25장)와 내려다보는 각도(2.5° / 5° / 8° 세트)에 맞는 그림을 고릅니다. 앞차 감속 < -1.5 m/s²이면 제동등, 야간(전조등)에는 미등을 켭니다.
+  - 시점: 내 차 뒤 약 15m · 높이 약 3.8m의 추적 카메라(내 차를 14° 위에서 봄). 내 차는 같은 모델을 이 카메라와 똑같은 원근으로 렌더링한 그림입니다.
+  - 차량 그림 원본: `navdy-vehicle-sprites-export/`(자체 SDF 렌더러). `tools/make_pitch_set.py`(각도 세트), `tools/make_ego_persp.py`(내 차),
+    `python package_turzx_monitor/tools/make_tesla_assets.py --navdy-only`로 `design_tesla/navdy_*`(+ `navdy_meta.txt`)에 복사합니다.
   - 단속카메라 구간은 빨간 원, 이벤트가 없으면 현재 도로 제한속도를 파란 원으로 표시
   - 회전 안내(TBT) 카드는 목적지 안내 중에만 표시
   - 타이어 공기압은 오른쪽 아래 칩(주차 중에는 오른쪽 위), 조향각은 크루즈 옆 핸들 아이콘 회전으로만 표시
@@ -134,6 +139,7 @@ python package_turzx_monitor/build_package.py
 
 | 버전 | 내용 |
 |---|---|
+| v1.5.4 | 주행 화면 차량을 Navdy 스타일 3D 그림으로 교체(앞차 + 옆 차로 차량, 각도·시점별 그림 선택), 3.6m 차로와 추적 카메라 시점, 원근 렌더링한 내 차 |
 | v1.5.3 | 제동등: 콤마 `carState.brakeLights`(CAN `TCS13.BrakeLight` 또는 페달) 우선. 전조등: 헤드유닛 일루미네이션(`SYSTEM_STATE_ILLUMINATE_ON/OFF`, `IBCMService.getIlluminateStatus`) 기준, BCM 램프 콜백·getter 원값 기록 |
 | v1.5.2 | 램프·브레이크 신호 진단(대시보드 `전력 · 주행` 카드, 로그 `LAMP` 이벤트), 제동등을 브레이크 압력(`getCylPrsrVal`) 기준으로, 회생 출력 기준 제거 |
 | v1.5.1 | 실험 패널 `화면 회전`(기본 / 180°), 실험 패널 스크롤 |
