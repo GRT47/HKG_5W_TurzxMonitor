@@ -222,13 +222,16 @@
       <div class="seg" id="segModel"><button data-v="both" class="on">둘 다</button><button data-v="92">9.2"</button><button data-v="123">12.3"</button></div>
     </div>
     <div class="ctl">상황
-      <div class="seg" id="segScene"><button data-v="drive" class="on">주행</button><button data-v="regen">회생·근접</button><button data-v="park">정차·경고</button></div>
+      <div class="seg" id="segScene"><button data-v="drive" class="on">주행</button><button data-v="regen">회생·근접</button><button data-v="park">정차·경고</button><button data-v="reverse">후진</button></div>
     </div>
     <div class="ctl">램프
       <div class="seg" id="segLamp"><button data-v="scene" class="on">장면값</button><button data-v="off">끔</button><button data-v="head">전조등</button><button data-v="high">상향등</button><button data-v="brake">제동등</button><button data-v="both">둘 다</button></div>
     </div>
     <div class="ctl">문(주차)
       <div class="seg" id="segDoor"><button data-v="scene" class="on">장면값</button><button data-v="closed">모두 닫힘</button><button data-v="driver">운전석</button><button data-v="rear">뒷문·트렁크</button><button data-v="all">전부</button></div>
+    </div>
+    <div class="ctl">주차센서
+      <div class="seg" id="segPdw"><button data-v="scene" class="on">장면값</button><button data-v="off">끔</button><button data-v="rear">뒤 근접</button><button data-v="front">앞 근접</button><button data-v="all">전체 단계</button></div>
     </div>
     <div class="ctl">애니메이션
       <div class="seg" id="segAnim"><button data-v="on" class="on">켜기</button><button data-v="off">끄기</button></div>
@@ -308,10 +311,26 @@
       lane: 0, lead: 0, steer: 0, curve: 0,
       leadY: 0, leadBrake: false, traffic: [],
       doors: { fl: true, fr: false, rl: false, rr: false, trunk: true, hood: false }, pbrake: true,
+      // PGS onVehicleWarningStatus type 9..14 (front L/C/R, rear L/C/R): 0 none, 1..3 = far .. near
+      pdw: { fl: 0, fc: 0, fr: 1, rl: 0, rc: 2, rr: 3 },
       lights: { head: true, brake: false },
       media: { src: "USB", title: "일시정지됨", artist: "미디어를 선택하세요", pos: 0, dur: 0, playing: false },
       hvac: { on: false, dr: 0, inT: 29.5, outT: 31.0, fan: 0, auto: false, ac: false, heat: false, fdef: false, rdef: false, recirc: false, sync: false,
               air: { def: false, face: false, foot: false } }
+    },
+    reverse: {
+      soc: 63.0, bmsSoc: 60.1, soh: 98.1, dte: 281, eff: 6.0, remainKwh: 25.6, kw: 2.1, batT: 26.0, cellMax: 3.94, cellMin: 3.92, cellDiff: 20,
+      tpms: [38, 38, 39, 39], gear: "R", speed: 3, cruise: 0,
+      tbt: { dist: "", unit: "", road: "목적지를 설정하세요", next: "", turn: "none" },
+      sdi: { mode: "none", limit: 0, dist: "", avg: 0, road: 30 },
+      lane: 0, lead: 0, steer: -12, curve: 0,
+      leadY: 0, leadBrake: false, traffic: [],
+      doors: { fl: false, fr: false, rl: false, rr: false, trunk: false, hood: false }, pbrake: false,
+      pdw: { fl: 0, fc: 1, fr: 0, rl: 1, rc: 3, rr: 2 },
+      lights: { head: true, brake: true },
+      media: { src: "Bluetooth", title: "Supernova", artist: "aespa · Armageddon", pos: 104, dur: 178, playing: true },
+      hvac: { on: true, dr: 22.0, inT: 22.5, outT: 15.0, fan: 2, auto: true, ac: true, heat: false, fdef: false, rdef: false, recirc: false, sync: false,
+              air: { def: false, face: true, foot: false } }
     }
   };
 
@@ -499,7 +518,8 @@
     set("navRoad", s.tbt.road);
     set("navNext", s.tbt.next);
     set("lane", s.lane > 0 ? s.lane + "%" : "--");
-    const parked = s.gear === "P";
+    // top view (parked, reversing, creeping with a parking sensor warning) -> TPMS chip moves to the top
+    const parked = s.gear === "P" || s.gear === "R" || (Object.values(pdwOf(s)).some((v) => v > 0) && s.speed <= 10);
     lcd.querySelector(".vbot").style.display = parked ? "none" : "";
     lcd.querySelector(".vtpms").classList.toggle("top", parked && !s.tbt.dist);
 
@@ -844,6 +864,55 @@
     return (model.contactY - model.topY) * k;
   }
 
+  // Parking distance warning: 6 zones x 3 stages from PGS onVehicleWarningStatus (type 9..14)
+  let pdwMode = "scene";
+  const PDW_NONE = { fl: 0, fc: 0, fr: 0, rl: 0, rc: 0, rr: 0 };
+  function pdwOf(s) {
+    if (pdwMode === "off") return PDW_NONE;
+    if (pdwMode === "rear") return { ...PDW_NONE, rl: 1, rc: 3, rr: 2 };
+    if (pdwMode === "front") return { ...PDW_NONE, fl: 2, fc: 3, fr: 1 };
+    if (pdwMode === "all") return { fl: 1, fc: 2, fr: 3, rl: 3, rc: 2, rr: 1 };
+    return s.pdw || PDW_NONE;
+  }
+  const PDW_RGB = [null, "255,214,64", "255,150,30", "255,56,56"];
+  // zones in the car frame: arc centre on the long axis (z, + = front), sector angles measured from +z towards +x (right)
+  const PDW_ZONES = [
+    { k: "fl", z: 1.7, a0: -66, a1: -23 }, { k: "fc", z: 1.7, a0: -21, a1: 21 }, { k: "fr", z: 1.7, a0: 23, a1: 66 },
+    { k: "rl", z: -1.7, a0: -157, a1: -114 }, { k: "rc", z: -1.7, a0: 159, a1: 201 }, { k: "rr", z: -1.7, a0: 114, a1: 157 }];
+  const PDW_R = [0, 1.62, 1.36, 1.12];      // band radius per stage (m from the arc centre): stage 3 hugs the bumper
+  /** Ground band of one zone at one stage as a polygon of car-frame points [x(right), z(forward)]. */
+  function pdwBand(zone, stage, half) {
+    const pts = [], r0 = PDW_R[stage] - (half || 0.11), r1 = PDW_R[stage] + (half || 0.11), n = 10;
+    const pt = (r, a) => { const t = a * Math.PI / 180; return [Math.sin(t) * r * 0.88, zone.z + Math.cos(t) * r]; };
+    for (let i = 0; i <= n; i++) pts.push(pt(r1, zone.a0 + (zone.a1 - zone.a0) * i / n));
+    for (let i = n; i >= 0; i--) pts.push(pt(r0, zone.a0 + (zone.a1 - zone.a0) * i / n));
+    return pts;
+  }
+  /** Draws every zone of an active end (front / rear) through a car-frame -> screen mapping. */
+  function drawPdw(ctx, pdw, toScreen, ends) {
+    for (const end of ends) {
+      const zones = PDW_ZONES.filter((z) => (end === "front") === (z.z > 0));
+      if (!zones.some((z) => pdw[z.k] > 0)) continue;
+      for (const z of zones) {
+        const lv = pdw[z.k];
+        // faint guide at the outer stage so the sensor layout stays readable
+        const guide = pdwBand(z, 1, 0.05).map(([x, zz]) => toScreen(x, zz));
+        ctx.beginPath(); guide.forEach(([u, v], i) => (i ? ctx.lineTo(u, v) : ctx.moveTo(u, v))); ctx.closePath();
+        ctx.fillStyle = "rgba(200,205,215,0.16)";
+        ctx.fill();
+        if (!lv) continue;
+        const band = pdwBand(z, lv, 0.13).map(([x, zz]) => toScreen(x, zz));
+        ctx.save();
+        ctx.shadowColor = `rgba(${PDW_RGB[lv]},0.8)`;
+        ctx.shadowBlur = 10;
+        ctx.beginPath(); band.forEach(([u, v], i) => (i ? ctx.lineTo(u, v) : ctx.moveTo(u, v))); ctx.closePath();
+        ctx.fillStyle = `rgba(${PDW_RGB[lv]},0.95)`;
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+
   // Parked (gear P): top view of the same car model (tools/make_top.py) with lamps and open doors / trunk / hood
   const TOP = { src: "sprites_top/top_car.png", head: "sprites_top/top_head.png", tail: "sprites_top/top_tail.png",
                 cx: 162, cy: 318, ppm: 120 };
@@ -931,6 +1000,13 @@
       }
       ctx.restore();
     }
+    // reversing lamps (white) behind the car
+    if (s && s.gear === "R") {
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      for (const side of [-1, 1]) glowAt(ctx, X(-2.35), Y(side * 0.42), 0.9 * ppm, "230,238,255", 0.32);
+      ctx.restore();
+    }
     // tail / brake glow behind the car
     if (L.head || L.brake) {
       ctx.save();
@@ -971,6 +1047,7 @@
     };
     for (const d of DOORS) if (D[d.k]) doorPanel(d);
 
+    drawPdw(ctx, pdwOf(s || {}), (x, z) => [X(z), Y(x)], ["front", "rear"]);
     // car body (tinted like the driving view's ego car), rotated so the front points right
     const body = navTinted(TOP.src, TINT.ego);
     const k = ppm / TOP.ppm;
@@ -1181,7 +1258,10 @@
     const ctx = cv.getContext("2d");
     const W = cv.width, H = cv.height;
     ctx.clearRect(0, 0, W, H);
-    if (s.gear === "P") { drawParked(ctx, W, H, s); return; }
+    // top view when parked, reversing, or creeping with a parking sensor warning (the chase view hides the bumpers)
+    const pdwNow = pdwOf(s);
+    const pdwActive = Object.values(pdwNow).some((v) => v > 0);
+    if (s.gear === "P" || s.gear === "R" || (pdwActive && s.speed <= 10)) { drawParked(ctx, W, H, s); return; }
     if (!(W > 0 && H > 0)) return;          // hidden panel (not laid out yet)
     // Chase camera matched to the sprite pitches (pinhole, metres): the ego car's rear sits on the bottom edge and is
     // seen EGO_PITCH_DEG from above; traffic further ahead is seen 2-8 deg from above (sprite sets 2.5 / 5 / 8 deg).
@@ -1494,6 +1574,8 @@
   bindSeg("segLamp", (v) => { lampMode = v; draw(); });
   if (params.get("lamp")) lampMode = params.get("lamp");
   bindSeg("segDoor", (v) => { doorMode = v; draw(); });
+  bindSeg("segPdw", (v) => { pdwMode = v; draw(); });
+  if (params.get("pdw")) pdwMode = params.get("pdw");
   if (params.get("door")) doorMode = params.get("door");
   if (shot) {
     document.body.classList.add("shot");

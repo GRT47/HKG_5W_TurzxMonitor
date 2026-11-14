@@ -8,7 +8,7 @@
 | TURZX 8.8" | PID `0x0088` | `1920 × 462` | `480 × 1920` 세로 JPEG |
 | TURZX 12.3" (v1.5.0~) | PID `0x0123` | `1920 × 720` | `720 × 1920` 세로 JPEG |
 
-연결된 패널을 자동으로 감지해 해상도·레이아웃·이미지를 바꿉니다. 현재 버전: **v1.5.5**
+연결된 패널을 자동으로 감지해 해상도·레이아웃·이미지를 바꿉니다. 현재 버전: **v1.5.6**
 
 ---
 
@@ -143,6 +143,7 @@ python package_turzx_monitor/build_package.py
 
 | 버전 | 내용 |
 |---|---|
+| v1.5.6 | 옆 차로 정지물(가드레일·표지판) 숨김(내 차 20 km/h 이상에서 지면 속도 1.5 m/s 미만 표적 제외), 전조등·상향등 = BCM 램프 패킷 전조등 바이트(0 꺼짐/1 하향/2 상향), 없으면 미등(`ISystemService.getAvTailStatus` + 일루미네이션 방송), 주차 브레이크 = `ISystemService.getParkingBrakeStatus` 우선, BCM 요청 함수 반복 호출 제거 |
 | v1.5.5 | 속도 옆 경고등(전조등·상향등·주차 브레이크, 꺼지면 회색), 주차 화면을 같은 차량의 탑뷰로(전조등·미등, 열린 문·트렁크·후드), BCM 문·주차 브레이크 진단(`BODY` 로그, 대시보드) |
 | v1.5.4 | 주행 화면 차량을 Navdy 스타일 3D 그림으로 교체(앞차 + 옆 차로 차량, 각도·시점별 그림 선택), 3.6m 차로와 추적 카메라 시점, 원근 렌더링한 내 차 |
 | v1.5.3 | 제동등: 콤마 `carState.brakeLights`(CAN `TCS13.BrakeLight` 또는 페달) 우선. 전조등: 헤드유닛 일루미네이션(`SYSTEM_STATE_ILLUMINATE_ON/OFF`, `IBCMService.getIlluminateStatus`) 기준, BCM 램프 콜백·getter 원값 기록 |

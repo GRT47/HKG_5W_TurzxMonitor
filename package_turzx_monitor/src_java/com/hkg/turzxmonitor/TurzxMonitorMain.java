@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.5";
+    public static final String MONITOR_VERSION = "1.5.6";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -276,7 +276,7 @@ public class TurzxMonitorMain {
         public float leadRelVelKph = 0.0f;
         public float leadYRightM = 0.0f;      // v1.5.4 radarState leadOne yRel (openpilot: left +) as right-positive metres
         public float leadAccelMps2 = 0.0f;    // v1.5.4 radarState leadOne aLead
-        public float[] trafficLeads = null;   // v1.5.4 leadsLeft/Right/Left2/Right2: [dRel, yRight, aLead] * n
+        public float[] trafficLeads = null;   // v1.5.4 leadsLeft/Right/Left2/Right2: [dRel, yRight, aLead, vLeadK] * n (v1.5.6: + speed)
         public long trafficMs = 0L;           // when trafficLeads was decoded
         public boolean hasLeadCar = false;
         public float steeringAngleDeg = 0.0f;
@@ -3200,6 +3200,14 @@ public class TurzxMonitorMain {
                 return best;
             }
 
+            /**
+             * v1.5.6: a neighbour-lane radar target standing still (ground speed < 1.5 m/s) while we drive >= 20 km/h is
+             * a guard rail, sign or parked object, not traffic. Below 20 km/h stopped cars in a queue stay visible.
+             */
+            static boolean isStationaryTarget(int egoKph, float targetSpeedMps) {
+                return egoKph >= 20 && !Float.isNaN(targetSpeedMps) && Math.abs(targetSpeedMps) < 1.5f;
+            }
+
             /** Radar distance (from the ego front bumper) -> camera distance; mild compression beyond 30 m. */
             static float camX(float egoD, float d) {
                 return egoD + EGO_LEN_M + (d <= 30f ? d : 30f + (d - 30f) * 0.7f);
@@ -3411,15 +3419,20 @@ public class TurzxMonitorMain {
                 // vehicles far -> near: neighbour lanes (fresh radar lists) + lead; sprite per viewing angle / elevation
                 long now = System.currentTimeMillis();
                 float[] tr = (s.carrotConnected && s.trafficLeads != null && now - s.trafficMs < 1500L) ? s.trafficLeads : new float[0];
-                int n = tr.length / 3 + (hasLead ? 1 : 0);
+                final int st = TRAFFIC_STRIDE;
+                int n = (hasLead ? 1 : 0);
+                for (int i = 0; i + st - 1 < tr.length; i += st) if (!isStationaryTarget(spd, tr[i + 3])) n++;
                 float[] cx = new float[n], cy = new float[n];
                 int[] cl = new int[n];
                 boolean[] isLead = new boolean[n];
                 int m = 0;
-                for (int i = 0; i + 2 < tr.length; i += 3, m++) {
+                for (int i = 0; i + st - 1 < tr.length; i += st) {
+                    // v1.5.6: radar lists also hold guard rails / signs - skip targets standing still while we drive
+                    if (isStationaryTarget(spd, tr[i + 3])) continue;
                     cx[m] = camX(egoD, tr[i]);
                     cy[m] = tr[i + 1];
                     cl[m] = tr[i + 2] < -1.5f ? 2 : (head ? 1 : 0);
+                    m++;
                 }
                 if (hasLead) {
                     cx[m] = leadX;
@@ -5414,6 +5427,7 @@ public class TurzxMonitorMain {
         private static volatile String lastRawDatcIntakeInfo = "none";
 
         private static volatile Object bcmService = null;
+
         private static volatile Method bcmGetSpeedKmhMethod = null;
         private static volatile boolean bcmListenerRegistered = false;
         private static volatile String lastRawBcmHeatingCallback = "none";
@@ -7123,6 +7137,12 @@ public class TurzxMonitorMain {
                 if (bcmService != null) {
                     try {
                         LampProbe.pollBcm(bcmService, System.currentTimeMillis());
+                    } catch (Throwable ignored) {
+                    }
+                }
+                if (systemService != null) {
+                    try {
+                        LampProbe.pollSystem(systemService, System.currentTimeMillis());
                     } catch (Throwable ignored) {
                     }
                 }
@@ -8905,13 +8925,20 @@ public class TurzxMonitorMain {
         // ---- v1.5.3: head-unit illumination (tail / head lamps on -> screens dim) ----
         static final String ILLUM_ON = "com.hkmc.intent.action.SYSTEM_STATE_ILLUMINATE_ON";
         static final String ILLUM_OFF = "com.hkmc.intent.action.SYSTEM_STATE_ILLUMINATE_OFF";
-        /** -1 unknown, 0 off, 1 on (from the ILLUMINATE_ON/OFF broadcast: unambiguous). */
-        private static volatile int illumBroadcast = -1;
-        /** Raw IBCMService.getIlluminateStatus() (Integer.MIN_VALUE = unavailable). */
-        private static volatile int illumRaw = Integer.MIN_VALUE;
-        /** Raw value seen while the broadcast said ON / OFF (learned mapping), MIN_VALUE until seen. */
-        private static volatile int illumRawWhenOn = Integer.MIN_VALUE;
-        private static volatile int illumRawWhenOff = Integer.MIN_VALUE;
+        /**
+         * Illumination (tail lamps on -> screens dim): -1 unknown, 0 off, 1 on. Sources (system dump, v1.5.6):
+         * SystemService.onIlluminationStatus(status > 0) broadcasts ILLUMINATE_ON/OFF, and ISystemService
+         * (com.hkmc.micom.system).getAvTailStatus() returns the current state (polled: the broadcast only fires on change).
+         */
+        private static volatile int illum = -1;
+        private static volatile String illumSrc = "";
+        /**
+         * Head lamp state from the BCM lamp packet: IBCMListener.onLampStatusChanged(a, b, c, d) carries the micom lamp
+         * bytes (BCMService.callOnLampStatus); BCMManager splits them into external/internal tail, head, front/rear fog
+         * and hazard. Head uses BCMConstants.LampState LAMP_OFF 0 / LAMP_HEAD_LOW 1 / LAMP_HEAD_HIGH 2 -> b.
+         * -1 = no lamp packet received yet.
+         */
+        private static volatile int bcmHead = -1;
         private static volatile String bcmLampText = "";
         private static volatile String bcmText = "";
         private static Method[] bcmMethods = null;
@@ -8926,20 +8953,53 @@ public class TurzxMonitorMain {
             if (ILLUM_ON.equals(action)) v = 1;
             else if (ILLUM_OFF.equals(action)) v = 0;
             else return false;
-            illumBroadcast = v;
-            int raw = illumRaw;
-            if (raw != Integer.MIN_VALUE) {
-                if (v == 1) illumRawWhenOn = raw;
-                else illumRawWhenOff = raw;
-            }
-            DebugManager.logEvent("LAMP", "Illumination broadcast " + (v == 1 ? "ON" : "OFF") + " (getIlluminateStatus=" + fmtRaw(raw) + ")");
+            setIllum(v, "방송");
             return true;
         }
 
-        /** IBCMListener.onLampStatusChanged(a, b, c, d): meaning unknown, recorded raw. */
+        static void setIllum(int v, String src) {
+            if (v != illum) DebugManager.logEvent("LAMP", "Illumination " + (v == 1 ? "ON" : "OFF") + " (" + src + ")");
+            illum = v;
+            illumSrc = src;
+        }
+
+        /** IBCMListener.onLampStatusChanged(a, b, c, d): micom lamp bytes; b = head lamp 0 off / 1 low / 2 high. */
         static void onBcmLamp(int a, int b, int c, int d) {
             bcmLampText = a + "," + b + "," + c + "," + d;
-            DebugManager.logEvent("LAMP", "BCM onLampStatusChanged(" + bcmLampText + ")");
+            int h = b & 0xFF;
+            bcmHead = (h <= 2) ? h : -1;
+            DebugManager.logEvent("LAMP", "BCM onLampStatusChanged(" + bcmLampText + ") head=" + bcmHead);
+        }
+
+        private static Method mAvTail = null, mSysPbrake = null;
+        private static Class<?> sysResolvedFor = null;
+        private static long lastSysPollMs = 0L;
+
+        /** Telemetry thread: ISystemService getAvTailStatus() / getParkingBrakeStatus() (synchronous, cached by SystemService). */
+        static void pollSystem(Object sys, long nowMs) {
+            if (sys == null || nowMs - lastSysPollMs < 500L) return;
+            lastSysPollMs = nowMs;
+            Class<?> sc = sys.getClass();
+            if (sysResolvedFor != sc) {
+                try { mAvTail = sc.getMethod("getAvTailStatus"); } catch (Throwable t) { mAvTail = null; }
+                try { mSysPbrake = sc.getMethod("getParkingBrakeStatus"); } catch (Throwable t) { mSysPbrake = null; }
+                sysResolvedFor = sc;
+                DebugManager.logEvent("LAMP", "ISystemService getAvTailStatus=" + (mAvTail != null) + " getParkingBrakeStatus=" + (mSysPbrake != null));
+            }
+            try {
+                if (mAvTail != null) {
+                    Object r = mAvTail.invoke(sys);
+                    if (r instanceof Boolean) setIllum(((Boolean) r).booleanValue() ? 1 : 0, "미등");
+                }
+            } catch (Throwable ignored) {
+            }
+            try {
+                if (mSysPbrake != null) {
+                    Object r = mSysPbrake.invoke(sys);
+                    if (r instanceof Number) BodyProbe.onParkBrake(((Number) r).intValue(), "system");
+                }
+            } catch (Throwable ignored) {
+            }
         }
 
         /** Telemetry thread: every lamp / illumination getter of IBCMService (no-arg, or one int arg 0..3), ~1 Hz. */
@@ -8955,6 +9015,7 @@ public class TurzxMonitorMain {
                     if (!(n.contains("Illum") || n.contains("Lamp") || n.contains("Light") || n.contains("Brake")
                             || n.contains("Night"))) continue;
                     Class<?>[] pt = m.getParameterTypes();
+                    if (m.getReturnType() == void.class) continue;   // e.g. getParkBrakeStatus() = request, answered by a callback
                     if (pt.length == 0 || (pt.length == 1 && pt[0] == int.class)) found.add(m);
                 }
                 java.util.Collections.sort(found, new java.util.Comparator<Method>() {
@@ -8977,13 +9038,6 @@ public class TurzxMonitorMain {
                     try {
                         Object r = args == 0 ? m.invoke(bcm) : m.invoke(bcm, Integer.valueOf(a));
                         v = r instanceof Number || r instanceof Boolean ? fmt(toDouble(r)) : String.valueOf(r);
-                        if (args == 0 && r instanceof Number
-                                && ("getParkingBrakeStatus".equals(m.getName()) || "getParkBrakeStatus".equals(m.getName()))) {
-                            BodyProbe.onParkBrake(((Number) r).intValue(), m.getName());
-                        }
-                        if (args == 0 && "getIlluminateStatus".equals(m.getName()) && r instanceof Number) {
-                            illumRaw = ((Number) r).intValue();
-                        }
                     } catch (Throwable t) {
                         v = "x";
                     }
@@ -8999,29 +9053,25 @@ public class TurzxMonitorMain {
             }
         }
 
-        static String fmtRaw(int raw) {
-            return raw == Integer.MIN_VALUE ? "x" : String.valueOf(raw);
-        }
-
         /**
-         * Head/tail lamps on? The ILLUMINATE_ON/OFF broadcast decides when one has been received. Before that the raw
-         * getIlluminateStatus() is used: the value learned from a broadcast if any, otherwise 1 = on.
-         * (getAFLS11_HeadLampStatus is AFLS11 CF_Afls_LedHLStat in the DBC - a lamp fault/LED state that reads 3
-         * whether the lights are on or off - so it is no longer used.)
+         * Head lamps on? The BCM lamp packet's head byte when one has arrived (low or high beam), otherwise the
+         * illumination state (tail lamps / dimming). getAFLS11/CGW5/CGWCP6_HeadLampStatus are CAN lamp fault/diagnostic
+         * signals passed through tm_hscan (they read 3 regardless), so they are not used.
          */
         static boolean headLampsOn() {
-            int b = illumBroadcast;
-            if (b >= 0) return b == 1;
-            int raw = illumRaw;
-            if (raw == Integer.MIN_VALUE) return false;
-            if (illumRawWhenOn != Integer.MIN_VALUE) return raw == illumRawWhenOn;
-            if (illumRawWhenOff != Integer.MIN_VALUE) return raw != illumRawWhenOff;
-            return raw == 1;
+            int h = bcmHead;
+            if (h >= 0) return h > 0;
+            return illum == 1;
+        }
+
+        /** High beam: only the BCM lamp packet knows it (head byte 2 = LAMP_HEAD_HIGH). */
+        static boolean highBeamOn() {
+            return bcmHead == 2;
         }
 
         static String headSource() {
-            if (illumBroadcast >= 0) return "방송";
-            if (illumRaw != Integer.MIN_VALUE) return "BCM " + illumRaw;
+            if (bcmHead >= 0) return "BCM 램프 " + bcmHead;
+            if (illum >= 0) return illumSrc;
             return "신호 없음";
         }
 
@@ -9044,16 +9094,11 @@ public class TurzxMonitorMain {
             commaBrake = false;
             commaHold = false;
             lastLoggedCommaBrake = false;
-            illumBroadcast = -1;
-            illumRaw = Integer.MIN_VALUE;
-            illumRawWhenOn = Integer.MIN_VALUE;
-            illumRawWhenOff = Integer.MIN_VALUE;
+            illum = -1;
+            illumSrc = "";
+            bcmHead = -1;
             bcmLampText = "";
             bcmText = "";
-        }
-
-        static void setIllumRawForTest(int raw) {
-            illumRaw = raw;
         }
     }
 
@@ -9070,7 +9115,7 @@ public class TurzxMonitorMain {
         private static volatile int[] doorClosed = null;      // learned while driving
         private static volatile int pbrakeRaw = Integer.MIN_VALUE;
         private static volatile int pbrakeReleased = Integer.MIN_VALUE;
-        private static volatile boolean highBeam = false;
+        private static volatile boolean pbrakeFromSystem = false;
 
         static void onDoorAll(int[] v) {
             doorRaw = v.clone();
@@ -9079,7 +9124,14 @@ public class TurzxMonitorMain {
             DebugManager.logEvent("BODY", "onDoorAllStateChanged(" + sb + ")");
         }
 
+        /**
+         * Parking brake raw value. ISystemService.getParkingBrakeStatus() (SystemService regulation status, synchronous)
+         * wins once seen; the BCM onParkBrakeStatusChanged callback (BCMConstants.ParkBrakeState OFF 0 / ON 1) otherwise.
+         */
         static void onParkBrake(int v, String src) {
+            boolean system = "system".equals(src);
+            if (system) pbrakeFromSystem = true;
+            else if (pbrakeFromSystem) return;
             if (v != pbrakeRaw) DebugManager.logEvent("BODY", "Parking brake " + src + "=" + v);
             pbrakeRaw = v;
         }
@@ -9126,7 +9178,7 @@ public class TurzxMonitorMain {
         }
 
         static boolean highBeamOn() {
-            return highBeam;   // no confirmed signal yet (BCM lamp callback / getters are logged for mapping)
+            return LampProbe.highBeamOn();
         }
 
         static String doorText(int[] r) {
@@ -9149,7 +9201,7 @@ public class TurzxMonitorMain {
             return "doors raw=" + doorText(doorRaw) + " closed=" + doorText(doorClosed) + " open=[" + open + "]"
                     + " | parkBrake raw=" + (pbrakeRaw == Integer.MIN_VALUE ? "x" : String.valueOf(pbrakeRaw))
                     + " released=" + (pbrakeReleased == Integer.MIN_VALUE ? "x" : String.valueOf(pbrakeReleased))
-                    + " on=" + parkingBrakeOn() + " | highBeam=" + highBeam;
+                    + " on=" + parkingBrakeOn() + (pbrakeFromSystem ? " (system)" : " (bcm)") + " | highBeam=" + highBeamOn();
         }
 
         static void resetForTest() {
@@ -9157,7 +9209,7 @@ public class TurzxMonitorMain {
             doorClosed = null;
             pbrakeRaw = Integer.MIN_VALUE;
             pbrakeReleased = Integer.MIN_VALUE;
-            highBeam = false;
+            pbrakeFromSystem = false;
         }
     }
 
@@ -10124,7 +10176,7 @@ public class TurzxMonitorMain {
             sb.append("Body (BCM)      : ").append(BodyProbe.reportLine()).append("\n");
             TelemetrySnapshot trs = TelemetryCollector.getLatestSnapshot();
             sb.append("Traffic sprites : ready=").append(TurzxFrameRenderer.TeslaHud.navReady())
-                    .append(" | radar side leads=").append(trs.trafficLeads != null ? trs.trafficLeads.length / 3 : -1)
+                    .append(" | radar side leads=").append(trs.trafficLeads != null ? trs.trafficLeads.length / TRAFFIC_STRIDE : -1)
                     .append(" age=").append(trs.trafficMs > 0 ? (System.currentTimeMillis() - trs.trafficMs) + "ms" : "never")
                     .append(String.format(Locale.US, " | lead y=%.1fm a=%.1f", trs.leadYRightM, trs.leadAccelMps2)).append("\n");
             sb.append("Panel RST test  : ").append(PanelRstTest.reportLine()).append("\n");
@@ -11231,11 +11283,17 @@ public class TurzxMonitorMain {
         return (w > 0 && w <= end) ? RADAR_LEAD_SIZE : 0;
     }
 
-    /** Neighbour-lane leads (leadsLeft, leadsRight, leadsLeft2, leadsRight2) as [dRel, yRight, aLead] triples. */
+    /** Values per neighbour-lead entry in TelemetrySnapshot.trafficLeads: dRel, yRight, aLead, absolute speed (m/s). */
+    static final int TRAFFIC_STRIDE = 4;
+
+    /**
+     * Neighbour-lane leads (leadsLeft, leadsRight, leadsLeft2, leadsRight2) as [dRel, yRight, aLead, vLeadK] tuples.
+     * vLeadK (LeadData +32) is the target's ground speed; vLead (+16) when the struct is too short. NaN = unknown.
+     */
     static float[] parseRadarSideLeads(byte[] buf, ByteBuffer bb, int base, int len, int size) {
         int end = base + len;
         int off = base + 8 + 4 * size;
-        float[] out = new float[36];
+        float[] out = new float[12 * TRAFFIC_STRIDE];
         int n = 0;
         for (int li = 0; li < RADAR_LEAD_LISTS && off < end; li++) {
             int cnt = buf[off] & 0xFF;
@@ -11244,16 +11302,19 @@ public class TurzxMonitorMain {
             for (int k = 0; k < cnt && off + size <= end; k++, off += size) {
                 if (!side || n >= 12) continue;
                 float d = bb.getFloat(off), y = bb.getFloat(off + 4), a = bb.getFloat(off + 20);
+                float v = size >= 36 ? bb.getFloat(off + 32) : (size >= 20 ? bb.getFloat(off + 16) : Float.NaN);
                 boolean st = size <= 41 || buf[off + 41] != 0;
                 if (!st || Float.isNaN(d) || Float.isNaN(y) || d < 1f || d > 160f || Math.abs(y) > 15f) continue;
-                out[n * 3] = d;
-                out[n * 3 + 1] = -y;
-                out[n * 3 + 2] = Float.isNaN(a) ? 0f : a;
+                int o = n * TRAFFIC_STRIDE;
+                out[o] = d;
+                out[o + 1] = -y;
+                out[o + 2] = Float.isNaN(a) ? 0f : a;
+                out[o + 3] = (Float.isNaN(v) || Math.abs(v) > 80f) ? Float.NaN : v;
                 n++;
             }
         }
-        float[] r = new float[n * 3];
-        System.arraycopy(out, 0, r, 0, n * 3);
+        float[] r = new float[n * TRAFFIC_STRIDE];
+        System.arraycopy(out, 0, r, 0, n * TRAFFIC_STRIDE);
         return r;
     }
 
@@ -14733,17 +14794,34 @@ public class TurzxMonitorMain {
             assertTrue(LampProbe.commaFresh(5500L) && !LampProbe.commaFresh(7000L) && LampProbe.commaBrake(), "lamp: comma freshness");
             assertTrue(LampProbe.dashboardText(5500L).endsWith("제동등 ON (콤마)"), "lamp: comma dashboard " + LampProbe.dashboardText(5500L));
             assertTrue(!LampProbe.headLampsOn(), "head: unknown -> off");
-            LampProbe.setIllumRawForTest(1);
-            assertTrue(LampProbe.headLampsOn() && "BCM 1".equals(LampProbe.headSource()), "head: raw 1 guess");
-            LampProbe.setIllumRawForTest(2);
             assertTrue(LampProbe.onIlluminateAction(LampProbe.ILLUM_ON) && LampProbe.headLampsOn(), "head: broadcast on");
             assertTrue(LampProbe.onIlluminateAction(LampProbe.ILLUM_OFF) && !LampProbe.headLampsOn()
                     && "방송".equals(LampProbe.headSource()), "head: broadcast off");
             assertTrue(!LampProbe.onIlluminateAction("com.hkmc.audio.btaudio.widgetupdate"), "head: other actions pass through");
+            LampProbe.setIllum(1, "미등");
+            assertTrue(LampProbe.headLampsOn() && !LampProbe.highBeamOn() && "미등".equals(LampProbe.headSource()), "head: tail status");
+            // BCM lamp packet: b = head (0 off / 1 low / 2 high) wins over the illumination
+            LampProbe.onBcmLamp(0x11, 0, 0, 0);
+            assertTrue(!LampProbe.headLampsOn() && "BCM 램프 0".equals(LampProbe.headSource()), "head: BCM head off wins");
+            LampProbe.onBcmLamp(0x11, 1, 0, 0);
+            assertTrue(LampProbe.headLampsOn() && !LampProbe.highBeamOn() && !BodyProbe.highBeamOn(), "head: low beam");
+            LampProbe.onBcmLamp(0x11, 2, 0, 0);
+            assertTrue(LampProbe.headLampsOn() && LampProbe.highBeamOn() && BodyProbe.highBeamOn(), "head: high beam");
+            LampProbe.onBcmLamp(0, 0x7F, 0, 0);
+            assertTrue(LampProbe.headLampsOn() && "미등".equals(LampProbe.headSource()), "head: invalid BCM byte -> illumination");
             LampProbe.resetForTest();
-            LampProbe.setIllumRawForTest(2);
-            LampProbe.onIlluminateAction(LampProbe.ILLUM_ON);
-            LampProbe.resetForTest();
+            // parking brake: the system service value wins over the BCM callback
+            BodyProbe.resetForTest();
+            BodyProbe.onParkBrake(1, "callback");
+            assertTrue(BodyProbe.parkingBrakeOn(), "pbrake: BCM ON(1)");
+            BodyProbe.onParkBrake(0, "system");
+            BodyProbe.onParkBrake(1, "callback");
+            assertTrue(!BodyProbe.parkingBrakeOn() && BodyProbe.reportLine().contains("(system)"), "pbrake: system wins");
+            BodyProbe.resetForTest();
+            // stationary radar targets are hidden while driving
+            assertTrue(TurzxFrameRenderer.TeslaHud.isStationaryTarget(60, 0.4f) && !TurzxFrameRenderer.TeslaHud.isStationaryTarget(60, 14f)
+                    && !TurzxFrameRenderer.TeslaHud.isStationaryTarget(10, 0f) && !TurzxFrameRenderer.TeslaHud.isStationaryTarget(60, Float.NaN),
+                    "traffic: stationary filter");
             // CVS1 carState with brakeLights set (73-byte payload, byte 39)
             byte[] cs = new byte[73];
             cs[0] = 'C'; cs[1] = 'V'; cs[2] = 'S'; cs[3] = '1'; cs[4] = 1;
@@ -14817,20 +14895,21 @@ public class TurzxMonitorMain {
             int lists = 8 + 4 * rs;
             rb.put(lists, (byte) 1);
             int e0 = lists + 1;
-            rb.putFloat(e0, 20f).putFloat(e0 + 4, 3.6f).putFloat(e0 + 20, 0.3f).put(e0 + 41, (byte) 1);
+            rb.putFloat(e0, 20f).putFloat(e0 + 4, 3.6f).putFloat(e0 + 20, 0.3f).putFloat(e0 + 32, 22f).put(e0 + 41, (byte) 1);
             rb.put(e0 + rs, (byte) 0);        // leadsCenter
             rb.put(e0 + rs + 1, (byte) 1);    // leadsRight
             int e1 = e0 + rs + 2;
-            rb.putFloat(e1, 35f).putFloat(e1 + 4, -3.5f).putFloat(e1 + 20, -2.5f).put(e1 + 41, (byte) 1);
+            rb.putFloat(e1, 35f).putFloat(e1 + 4, -3.5f).putFloat(e1 + 20, -2.5f).putFloat(e1 + 32, 0.3f).put(e1 + 41, (byte) 1);
             rb.put(e1 + rs, (byte) 0).put(e1 + rs + 1, (byte) 0).put(e1 + rs + 2, (byte) 0);
             byte[] radar = rb.array();
             assertTrue(radarLeadStructSize(radar, 0, radar.length) == rs, "radar: lead struct size from frame length");
             TelemetrySnapshot rsn = new TelemetrySnapshot();
             assertTrue(decodeCvs1BinaryPayload(radar, rsn) && rsn.hasLeadCar && Math.abs(rsn.leadYRightM - 0.5f) < 1e-4f
                     && rsn.leadAccelMps2 == -2f, "radar: leadOne y/aLead");
-            assertTrue(rsn.trafficLeads != null && rsn.trafficLeads.length == 6 && rsn.trafficLeads[0] == 20f
-                    && rsn.trafficLeads[1] == -3.6f && rsn.trafficLeads[3] == 35f && rsn.trafficLeads[4] == 3.5f
-                    && rsn.trafficLeads[5] == -2.5f && rsn.trafficMs > 0, "radar: neighbour leads (right-positive y)");
+            assertTrue(rsn.trafficLeads != null && rsn.trafficLeads.length == 2 * TRAFFIC_STRIDE && rsn.trafficLeads[0] == 20f
+                    && rsn.trafficLeads[1] == -3.6f && rsn.trafficLeads[3] == 22f && rsn.trafficLeads[4] == 35f
+                    && rsn.trafficLeads[5] == 3.5f && rsn.trafficLeads[6] == -2.5f && rsn.trafficLeads[7] == 0.3f
+                    && rsn.trafficMs > 0, "radar: neighbour leads (right-positive y, ground speed)");
             // v1.5.5: telltales, top view, BCM body probe
             assertTrue(nm.top != null && nm.top.w > 100f && nm.top.ppm > 50f
                     && TurzxFrameRenderer.readJarAssetBytesPublic("navdy_top_car.png") != null
