@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.9";
+    public static final String MONITOR_VERSION = "1.5.10";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -5510,6 +5510,8 @@ public class TurzxMonitorMain {
         private static volatile int trackWidgetReqCount = 0;
         private static volatile byte[] latestAlbumArtBytes = null;
         private static volatile String lastRawMediaBroadcastDump = "none";
+        private static volatile String lastAvrcpPositionDump = "none";
+        private static volatile long lastAvrcpPositionMs = 0L;
         private static volatile Object clusterService = null;
         private static volatile Method clusterGetLastPlaytimeMethod = null;
         private static volatile int lastClusterMediaMode = -1;
@@ -5963,6 +5965,10 @@ public class TurzxMonitorMain {
                         }
                         bsb.append("}");
                         lastRawMediaBroadcastDump = bsb.toString();
+                        if (action != null && action.endsWith(".CURRENT_PLAY_POSITION")) {
+                            lastAvrcpPositionDump = lastRawMediaBroadcastDump;
+                            lastAvrcpPositionMs = System.currentTimeMillis();
+                        }
                     }
                 } catch (Throwable ignored) {
                 }
@@ -10580,6 +10586,9 @@ public class TurzxMonitorMain {
                         .append(" lastExtPos=").append(TelemetryCollector.lastExternalPosSec)
                         .append(" modeSource=").append(TelemetryCollector.modeSourceName).append("\n");
                 sb.append("  clusterPlaytime     : ").append(TelemetryCollector.clusterPlaytimeInfo).append("\n");
+                sb.append("  avrcpPosition       : ").append(TelemetryCollector.lastAvrcpPositionMs > 0
+                        ? (System.currentTimeMillis() - TelemetryCollector.lastAvrcpPositionMs) + "ms ago " : "")
+                        .append(TelemetryCollector.lastAvrcpPositionDump).append("\n");
                 synchronized (TelemetryCollector.broadcastUnitMsBySource) {
                     sb.append("  broadcastUnitMs     : ").append(TelemetryCollector.broadcastUnitMsBySource).append("\n");
                 }
@@ -12682,6 +12691,14 @@ public class TurzxMonitorMain {
                 }
             }
 
+            if (line.contains("BroadcastPlayPosition pos:")) {
+                int posMs = extractClusterKeyInt(line, "pos:", -1);
+                int lenMs = extractClusterKeyInt(line, "len:", -1);
+                if (lenMs > 0) target.mediaDurationSec = lenMs / 1000;
+                if (posMs >= 0 && (lenMs <= 0 || posMs <= lenMs)) TelemetryCollector.notePositionUpdate(target, posMs / 1000);
+                return posMs >= 0 || lenMs > 0;
+            }
+
             if (line.contains("MobisAvrcpControllerService") && line.contains("[BTAD]")) {
                 String title = "";
                 String artist = "";
@@ -12713,8 +12730,11 @@ public class TurzxMonitorMain {
                 if (updated) {
                     onMediaTrackUpdated(target, title, artist, album);
                 }
-                if (playMs >= 0L && playMs < 36000000L) {
-                    TelemetryCollector.notePositionUpdate(target, (int) (playMs / 1000L)); // mPlayingTime: ms
+                // mPlayingTime is the AVRCP media attribute PlayingTime (0x07) = total track length in ms; it comes with
+                // title / artist / album / genre in MobisAvrcpControllerService.NotifyMetaData (Bluetooth.odex), and
+                // BTAudio compares it as the song length. The position arrives separately (CURRENT_PLAY_POSITION).
+                if (playMs > 0L && playMs < 36000000L) {
+                    target.mediaDurationSec = (int) (playMs / 1000L);
                     updated = true;
                 }
                 if (updated && target == TelemetryCollector.liveSnapshot && target.albumArtBitmap == null) {
@@ -14478,8 +14498,13 @@ public class TurzxMonitorMain {
                     && "Drowning".equals(snap.mediaTitle)
                     && "WOODZ".equals(snap.mediaArtist)
                     && "OO-LI".equals(snap.mediaAlbum)
-                    && snap.mediaPositionSec == 94,
-                    "Expected MobisAvrcpControllerService [BTAD] mSongTitle log parsed");
+                    && snap.mediaDurationSec == 94 && snap.mediaPositionSec == 0,
+                    "Expected MobisAvrcpControllerService [BTAD] mSongTitle log parsed (mPlayingTime = track length)");
+            String bppLine = "D/AvrcpControllerService( 1310): [BTAD] BroadcastPlayPosition pos:61500 ,len:94000";
+            assertTrue(parseMediaLogLine(bppLine, snap) && snap.mediaPositionSec == 61 && snap.mediaDurationSec == 94,
+                    "Expected AvrcpControllerService BroadcastPlayPosition log parsed");
+            assertTrue(!parseMediaLogLine("D/AvrcpControllerService( 1310): [BTAD] BroadcastPlayPosition pos:-1 ,len:-1", snap)
+                    && snap.mediaPositionSec == 61, "BroadcastPlayPosition -1 ignored");
             String btaLine = "D/BTA_BT_PLAYER_MANAGER( 1310): title name: HAPPY artist name: DAY6";
             assertTrue(parseMediaLogLine(btaLine, snap)
                     && "HAPPY".equals(snap.mediaTitle) && "DAY6".equals(snap.mediaArtist),
