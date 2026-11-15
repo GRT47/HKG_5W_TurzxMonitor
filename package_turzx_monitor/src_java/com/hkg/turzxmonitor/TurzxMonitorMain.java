@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.6";
+    public static final String MONITOR_VERSION = "1.5.7";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -8939,6 +8939,8 @@ public class TurzxMonitorMain {
          * -1 = no lamp packet received yet.
          */
         private static volatile int bcmHead = -1;
+        /** The BCM lamp packet only decides once it has reported low/high beam at least once (it may only send 0 at start-up). */
+        private static volatile boolean bcmHeadLive = false;
         private static volatile String bcmLampText = "";
         private static volatile String bcmText = "";
         private static Method[] bcmMethods = null;
@@ -8968,10 +8970,12 @@ public class TurzxMonitorMain {
             bcmLampText = a + "," + b + "," + c + "," + d;
             int h = b & 0xFF;
             bcmHead = (h <= 2) ? h : -1;
+            if (h == 1 || h == 2) bcmHeadLive = true;
             DebugManager.logEvent("LAMP", "BCM onLampStatusChanged(" + bcmLampText + ") head=" + bcmHead);
         }
 
-        private static Method mAvTail = null, mSysPbrake = null;
+        private static Method mAvTail = null, mSysPbrake = null, mSysEpb = null, mBcmEpb = null;
+        private static Class<?> bcmEpbFor = null;
         private static Class<?> sysResolvedFor = null;
         private static long lastSysPollMs = 0L;
 
@@ -8983,8 +8987,10 @@ public class TurzxMonitorMain {
             if (sysResolvedFor != sc) {
                 try { mAvTail = sc.getMethod("getAvTailStatus"); } catch (Throwable t) { mAvTail = null; }
                 try { mSysPbrake = sc.getMethod("getParkingBrakeStatus"); } catch (Throwable t) { mSysPbrake = null; }
+                try { mSysEpb = sc.getMethod("getEPBStatus"); } catch (Throwable t) { mSysEpb = null; }
                 sysResolvedFor = sc;
-                DebugManager.logEvent("LAMP", "ISystemService getAvTailStatus=" + (mAvTail != null) + " getParkingBrakeStatus=" + (mSysPbrake != null));
+                DebugManager.logEvent("LAMP", "ISystemService getAvTailStatus=" + (mAvTail != null) + " getParkingBrakeStatus=" + (mSysPbrake != null)
+                        + " getEPBStatus=" + (mSysEpb != null));
             }
             try {
                 if (mAvTail != null) {
@@ -8996,7 +9002,14 @@ public class TurzxMonitorMain {
             try {
                 if (mSysPbrake != null) {
                     Object r = mSysPbrake.invoke(sys);
-                    if (r instanceof Number) BodyProbe.onParkBrake(((Number) r).intValue(), "system");
+                    if (r instanceof Number) BodyProbe.onPark(3, ((Number) r).intValue());
+                }
+            } catch (Throwable ignored) {
+            }
+            try {
+                if (mSysEpb != null) {
+                    Object r = mSysEpb.invoke(sys);
+                    if (r instanceof Number) BodyProbe.onPark(0, ((Number) r).intValue());
                 }
             } catch (Throwable ignored) {
             }
@@ -9007,6 +9020,17 @@ public class TurzxMonitorMain {
             if (bcm == null || nowMs - lastBcmPollMs < 1000L) return;
             lastBcmPollMs = nowMs;
             Class<?> sc = bcm.getClass();
+            if (bcmEpbFor != sc) {
+                try { mBcmEpb = sc.getMethod("getEpbStatus"); } catch (Throwable t) { mBcmEpb = null; }
+                bcmEpbFor = sc;
+            }
+            try {
+                if (mBcmEpb != null) {
+                    Object r = mBcmEpb.invoke(bcm);
+                    if (r instanceof Number) BodyProbe.onPark(1, ((Number) r).intValue());
+                }
+            } catch (Throwable ignored) {
+            }
             if (bcmResolvedFor != sc) {
                 List<Method> found = new ArrayList<Method>();
                 for (Method m : sc.getMethods()) {
@@ -9060,8 +9084,9 @@ public class TurzxMonitorMain {
          */
         static boolean headLampsOn() {
             int h = bcmHead;
-            if (h >= 0) return h > 0;
-            return illum == 1;
+            if (h > 0 || (bcmHeadLive && h == 0)) return h > 0;
+            if (illum >= 0) return illum == 1;
+            return false;
         }
 
         /** High beam: only the BCM lamp packet knows it (head byte 2 = LAMP_HEAD_HIGH). */
@@ -9070,9 +9095,10 @@ public class TurzxMonitorMain {
         }
 
         static String headSource() {
-            if (bcmHead >= 0) return "BCM 램프 " + bcmHead;
+            int h = bcmHead;
+            if (h > 0 || (bcmHeadLive && h == 0)) return "BCM 램프 " + h;
             if (illum >= 0) return illumSrc;
-            return "신호 없음";
+            return h >= 0 ? "BCM 램프 " + h : "신호 없음";
         }
 
         static String bcmText() {
@@ -9097,83 +9123,96 @@ public class TurzxMonitorMain {
             illum = -1;
             illumSrc = "";
             bcmHead = -1;
+            bcmHeadLive = false;
             bcmLampText = "";
             bcmText = "";
         }
     }
 
     /**
-     * v1.5.5: doors, parking brake and high beam from the head unit's BCM. The value meanings are not confirmed on the
-     * car yet, so the raw values go to the dashboard / report / BODY log events, and "closed" / "released" are learned
-     * while driving (speed > 8 km/h: every door is shut and the parking brake is off).
-     *   IBCMListener.onDoorAllStateChanged(a..j): slots 0..5 tentatively = FL, FR, RL, RR, trunk, hood
-     *   IBCMService.getParkingBrakeStatus() / getParkBrakeStatus(), IBCMListener.onParkBrakeStatusChanged(a)
+     * Doors and parking brake (v1.5.7, mapped from the car log of 2026-11-15).
+     *   IBCMListener.onDoorAllStateChanged(a..j): slots 0..3 = door locks (1 = locked), 4..7 = FL, FR, RL, RR open (1),
+     *   8 = trunk open (1), 9 = hood (assumed, not tested on the car).
+     *   Parking brake: the Niro has an EPB. ISystemService.getParkingBrakeStatus() (the classic parking-brake input)
+     *   stayed 0 while the EPB was released / applied, so the EPB getters come first:
+     *   ISystemService.getEPBStatus(), IBCMService.getEpbStatus(), the BCM onParkBrakeStatusChanged callback, then the
+     *   classic input. A source that has changed its value at least once beats one that never moved; the value seen
+     *   while driving (> 8 km/h) is learned as "released".
      */
     public static final class BodyProbe {
         static final String[] DOOR_LABELS = {"운전석", "조수석", "뒷문 좌", "뒷문 우", "트렁크", "후드"};
+        static final int DOOR_OPEN_BASE = 4;
+        static final String[] PB_SRC = {"sysEPB", "bcmEPB", "bcmCallback", "sysParkBrake"};
+        private static final int UNSEEN = Integer.MIN_VALUE;
         private static volatile int[] doorRaw = null;
-        private static volatile int[] doorClosed = null;      // learned while driving
-        private static volatile int pbrakeRaw = Integer.MIN_VALUE;
-        private static volatile int pbrakeReleased = Integer.MIN_VALUE;
-        private static volatile boolean pbrakeFromSystem = false;
+        private static final int[] pbRaw = {UNSEEN, UNSEEN, UNSEEN, UNSEEN};
+        private static final int[] pbReleased = {UNSEEN, UNSEEN, UNSEEN, UNSEEN};
+        private static final boolean[] pbChanged = new boolean[4];
 
         static void onDoorAll(int[] v) {
             doorRaw = v.clone();
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < v.length; i++) sb.append(i > 0 ? "," : "").append(v[i]);
-            DebugManager.logEvent("BODY", "onDoorAllStateChanged(" + sb + ")");
+            DebugManager.logEvent("BODY", "onDoorAllStateChanged(" + doorText(v) + ")");
         }
 
-        /**
-         * Parking brake raw value. ISystemService.getParkingBrakeStatus() (SystemService regulation status, synchronous)
-         * wins once seen; the BCM onParkBrakeStatusChanged callback (BCMConstants.ParkBrakeState OFF 0 / ON 1) otherwise.
-         */
+        /** Parking brake sample from source idx (PB_SRC). */
+        static synchronized void onPark(int idx, int v) {
+            if (idx < 0 || idx >= pbRaw.length) return;
+            if (pbRaw[idx] != v) {
+                if (pbRaw[idx] != UNSEEN) pbChanged[idx] = true;
+                DebugManager.logEvent("BODY", "Parking brake " + PB_SRC[idx] + "=" + v);
+            }
+            pbRaw[idx] = v;
+        }
+
+        /** Compatibility: "system" = classic input, "callback" = BCM callback, "sysEPB" / "bcmEPB". */
         static void onParkBrake(int v, String src) {
-            boolean system = "system".equals(src);
-            if (system) pbrakeFromSystem = true;
-            else if (pbrakeFromSystem) return;
-            if (v != pbrakeRaw) DebugManager.logEvent("BODY", "Parking brake " + src + "=" + v);
-            pbrakeRaw = v;
+            int idx = "sysEPB".equals(src) ? 0 : ("bcmEPB".equals(src) ? 1 : ("system".equals(src) ? 3 : 2));
+            onPark(idx, v);
         }
 
-        /** Render thread: moving fast means every door is shut and the parking brake is released. */
-        static void observeSpeed(int kph) {
+        /** Render thread: moving means the parking brake is released. */
+        static synchronized void observeSpeed(int kph) {
             if (kph < 8) return;
-            int[] r = doorRaw;
-            if (r != null) {
-                int[] c = doorClosed;
-                if (c == null || !java.util.Arrays.equals(c, r)) {
-                    doorClosed = r.clone();
-                    DebugManager.logEvent("BODY", "Learned closed-door values while driving: " + doorText(r));
+            for (int i = 0; i < pbRaw.length; i++) {
+                if (pbRaw[i] != UNSEEN && pbRaw[i] != pbReleased[i]) {
+                    pbReleased[i] = pbRaw[i];
+                    DebugManager.logEvent("BODY", "Learned parking brake released value while driving: " + PB_SRC[i] + "=" + pbRaw[i]);
                 }
             }
-            int pb = pbrakeRaw;
-            if (pb != Integer.MIN_VALUE && pb != pbrakeReleased) {
-                pbrakeReleased = pb;
-                DebugManager.logEvent("BODY", "Learned parking brake released value while driving: " + pb);
-            }
         }
 
-        /** Slot open? Differs from the value learned while driving (or from 0 before anything was learned). */
         static boolean slotOpen(int slot) {
             int[] r = doorRaw;
-            if (r == null || slot >= r.length) return false;
-            int[] c = doorClosed;
-            int closed = (c != null && slot < c.length) ? c[slot] : 0;
-            return r[slot] >= 0 && r[slot] != closed;
+            return r != null && slot < r.length && r[slot] > 0;
         }
 
         /** {fl, fr, rl, rr, trunk, hood} */
         static boolean[] doors() {
             boolean[] d = new boolean[6];
-            for (int i = 0; i < 6; i++) d[i] = slotOpen(i);
+            for (int i = 0; i < 6; i++) d[i] = slotOpen(DOOR_OPEN_BASE + i);
             return d;
         }
 
-        static boolean parkingBrakeOn() {
-            int raw = pbrakeRaw;
-            if (raw == Integer.MIN_VALUE || raw < 0) return false;
-            if (pbrakeReleased != Integer.MIN_VALUE) return raw != pbrakeReleased;
+        static boolean doorsLocked() {
+            int[] r = doorRaw;
+            if (r == null || r.length < 4) return false;
+            for (int i = 0; i < 4; i++) if (r[i] <= 0) return false;
+            return true;
+        }
+
+        /** Source deciding the parking brake: first one that has changed, else first one seen (PB_SRC order). */
+        static synchronized int activeParkSource() {
+            for (int i = 0; i < pbRaw.length; i++) if (pbRaw[i] != UNSEEN && pbChanged[i]) return i;
+            for (int i = 0; i < pbRaw.length; i++) if (pbRaw[i] != UNSEEN) return i;
+            return -1;
+        }
+
+        static synchronized boolean parkingBrakeOn() {
+            int i = activeParkSource();
+            if (i < 0) return false;
+            int raw = pbRaw[i];
+            if (raw < 0) return false;
+            if (pbReleased[i] != UNSEEN) return raw != pbReleased[i];
             return raw == 1;
         }
 
@@ -9188,28 +9227,44 @@ public class TurzxMonitorMain {
             return sb.toString();
         }
 
-        static String dashboardText() {
-            return "문 " + doorText(doorRaw) + (doorClosed != null ? "" : " (기준 미학습)") + "\n"
-                    + "P브레이크 " + (pbrakeRaw == Integer.MIN_VALUE ? "x" : String.valueOf(pbrakeRaw))
-                    + (parkingBrakeOn() ? " ON" : " OFF") + (pbrakeReleased != Integer.MIN_VALUE ? "" : " (기준 미학습)");
-        }
-
-        static String reportLine() {
+        static String openText() {
             StringBuilder open = new StringBuilder();
             boolean[] d = doors();
             for (int i = 0; i < 6; i++) if (d[i]) open.append(open.length() > 0 ? "," : "").append(DOOR_LABELS[i]);
-            return "doors raw=" + doorText(doorRaw) + " closed=" + doorText(doorClosed) + " open=[" + open + "]"
-                    + " | parkBrake raw=" + (pbrakeRaw == Integer.MIN_VALUE ? "x" : String.valueOf(pbrakeRaw))
-                    + " released=" + (pbrakeReleased == Integer.MIN_VALUE ? "x" : String.valueOf(pbrakeReleased))
-                    + " on=" + parkingBrakeOn() + (pbrakeFromSystem ? " (system)" : " (bcm)") + " | highBeam=" + highBeamOn();
+            return open.toString();
         }
 
-        static void resetForTest() {
+        static synchronized String parkText() {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < pbRaw.length; i++) {
+                if (i > 0) sb.append(' ');
+                sb.append(PB_SRC[i]).append('=').append(pbRaw[i] == UNSEEN ? "x" : String.valueOf(pbRaw[i]));
+                if (pbChanged[i]) sb.append('*');
+            }
+            return sb.toString();
+        }
+
+        static String dashboardText() {
+            String open = openText();
+            int src = activeParkSource();
+            return "문 " + (open.isEmpty() ? "닫힘" : open + " 열림") + (doorsLocked() ? " · 잠김" : "") + "\n"
+                    + "P브레이크 " + (parkingBrakeOn() ? "ON" : "OFF") + " (" + (src >= 0 ? PB_SRC[src] : "신호 없음") + ")";
+        }
+
+        static String reportLine() {
+            int src = activeParkSource();
+            return "doors raw=" + doorText(doorRaw) + " open=[" + openText() + "] locked=" + doorsLocked()
+                    + " | parkBrake " + parkText() + " active=" + (src >= 0 ? PB_SRC[src] : "none") + " on=" + parkingBrakeOn()
+                    + " | highBeam=" + highBeamOn();
+        }
+
+        static synchronized void resetForTest() {
             doorRaw = null;
-            doorClosed = null;
-            pbrakeRaw = Integer.MIN_VALUE;
-            pbrakeReleased = Integer.MIN_VALUE;
-            pbrakeFromSystem = false;
+            for (int i = 0; i < pbRaw.length; i++) {
+                pbRaw[i] = UNSEEN;
+                pbReleased[i] = UNSEEN;
+                pbChanged[i] = false;
+            }
         }
     }
 
@@ -14801,22 +14856,34 @@ public class TurzxMonitorMain {
             LampProbe.setIllum(1, "미등");
             assertTrue(LampProbe.headLampsOn() && !LampProbe.highBeamOn() && "미등".equals(LampProbe.headSource()), "head: tail status");
             // BCM lamp packet: b = head (0 off / 1 low / 2 high) wins over the illumination
-            LampProbe.onBcmLamp(0x11, 0, 0, 0);
-            assertTrue(!LampProbe.headLampsOn() && "BCM 램프 0".equals(LampProbe.headSource()), "head: BCM head off wins");
+            LampProbe.onBcmLamp(0, 0, 0, 0);
+            assertTrue(LampProbe.headLampsOn() && "미등".equals(LampProbe.headSource()), "head: start-up BCM 0 does not override the tail lamps");
             LampProbe.onBcmLamp(0x11, 1, 0, 0);
             assertTrue(LampProbe.headLampsOn() && !LampProbe.highBeamOn() && !BodyProbe.highBeamOn(), "head: low beam");
             LampProbe.onBcmLamp(0x11, 2, 0, 0);
             assertTrue(LampProbe.headLampsOn() && LampProbe.highBeamOn() && BodyProbe.highBeamOn(), "head: high beam");
+            LampProbe.onBcmLamp(0x11, 0, 0, 0);
+            assertTrue(!LampProbe.headLampsOn() && "BCM 램프 0".equals(LampProbe.headSource()), "head: live BCM head off wins");
             LampProbe.onBcmLamp(0, 0x7F, 0, 0);
             assertTrue(LampProbe.headLampsOn() && "미등".equals(LampProbe.headSource()), "head: invalid BCM byte -> illumination");
             LampProbe.resetForTest();
             // parking brake: the system service value wins over the BCM callback
+            // parking brake: a source that moves beats one that never changes (the classic input stayed 0 on the Niro)
             BodyProbe.resetForTest();
-            BodyProbe.onParkBrake(1, "callback");
-            assertTrue(BodyProbe.parkingBrakeOn(), "pbrake: BCM ON(1)");
-            BodyProbe.onParkBrake(0, "system");
-            BodyProbe.onParkBrake(1, "callback");
-            assertTrue(!BodyProbe.parkingBrakeOn() && BodyProbe.reportLine().contains("(system)"), "pbrake: system wins");
+            BodyProbe.onPark(3, 0);
+            BodyProbe.onPark(0, 1);
+            assertTrue(BodyProbe.parkingBrakeOn() && BodyProbe.activeParkSource() == 0, "pbrake: EPB first, 1 = applied");
+            BodyProbe.onPark(0, 0);
+            BodyProbe.onPark(1, 2);
+            assertTrue(!BodyProbe.parkingBrakeOn() && BodyProbe.activeParkSource() == 0, "pbrake: changed EPB source keeps deciding");
+            BodyProbe.resetForTest();
+            BodyProbe.onPark(0, 0);
+            BodyProbe.onPark(3, 0);
+            BodyProbe.onPark(1, 1);
+            BodyProbe.onPark(1, 0);
+            assertTrue(BodyProbe.activeParkSource() == 1 && !BodyProbe.parkingBrakeOn(), "pbrake: the source that moved wins");
+            BodyProbe.onPark(1, 1);
+            assertTrue(BodyProbe.parkingBrakeOn() && BodyProbe.reportLine().contains("bcmEPB=1*"), "pbrake: report " + BodyProbe.reportLine());
             BodyProbe.resetForTest();
             // stationary radar targets are hidden while driving
             assertTrue(TurzxFrameRenderer.TeslaHud.isStationaryTarget(60, 0.4f) && !TurzxFrameRenderer.TeslaHud.isStationaryTarget(60, 14f)
@@ -14924,28 +14991,25 @@ public class TurzxMonitorMain {
                 float xNarrow = TurzxFrameRenderer.TeslaHud.telltaleX(tl, 30f), xWide = TurzxFrameRenderer.TeslaHud.telltaleX(tl, 90f);
                 assertTrue(Math.abs((xWide - xNarrow) - 60f) < 0.01f, "telltales follow the speed width");
             }
+            // doors (car log 2026-11-15): slots 0..3 locks, 4..8 = driver, passenger, rear left, rear right, trunk
             BodyProbe.resetForTest();
             assertTrue(!BodyProbe.parkingBrakeOn() && !BodyProbe.doors()[0], "body: unknown -> closed / released");
-            BodyProbe.onDoorAll(new int[]{1, 0, 0, 0, 1, 0, 0, 0, 0, 0});
+            BodyProbe.onDoorAll(new int[]{1, 1, 1, 1, 0, 0, 0, 0, 0, 0});
             boolean[] bd = BodyProbe.doors();
-            assertTrue(bd[0] && !bd[1] && bd[4], "body: before learning, non-zero = open");
-            BodyProbe.onDoorAll(new int[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
-            BodyProbe.onParkBrake(2, "test");
-            assertTrue(!BodyProbe.parkingBrakeOn(), "body: parking brake 2 is not the default 'on' (1)");
-            BodyProbe.onParkBrake(1, "test");
-            assertTrue(BodyProbe.parkingBrakeOn(), "body: parking brake raw 1 = on before learning");
-            BodyProbe.resetForTest();
-            // a car reporting 1 = closed / 2 = open: learned while driving
-            BodyProbe.onDoorAll(new int[]{1, 1, 1, 1, 1, 1, 0, 0, 0, 0});
-            BodyProbe.onParkBrake(1, "test");
-            BodyProbe.observeSpeed(40);
-            assertTrue(!BodyProbe.doors()[0] && !BodyProbe.parkingBrakeOn(), "body: values seen while driving = closed / released");
-            BodyProbe.onDoorAll(new int[]{2, 1, 1, 1, 2, 1, 0, 0, 0, 0});
-            BodyProbe.onParkBrake(2, "test");
+            assertTrue(!bd[0] && !bd[1] && !bd[2] && !bd[3] && !bd[4] && BodyProbe.doorsLocked(), "body: all closed, locked");
+            BodyProbe.onDoorAll(new int[]{1, 1, 1, 1, 0, 0, 1, 0, 0, 0});
             bd = BodyProbe.doors();
-            assertTrue(bd[0] && !bd[1] && bd[4] && !bd[5] && BodyProbe.parkingBrakeOn(), "body: learned mapping");
-            assertTrue(BodyProbe.reportLine().contains("open=[운전석,트렁크]") && BodyProbe.dashboardText().startsWith("문 2,1,1,1,2,1"),
+            assertTrue(!bd[0] && bd[2] && !bd[3], "body: slot 6 = rear left (driver side)");
+            BodyProbe.onDoorAll(new int[]{0, 0, 0, 0, 1, 0, 0, 0, 1, 0});
+            bd = BodyProbe.doors();
+            assertTrue(bd[0] && bd[4] && !bd[5] && !BodyProbe.doorsLocked(), "body: driver + trunk, unlocked");
+            assertTrue(BodyProbe.reportLine().contains("open=[운전석,트렁크]") && BodyProbe.dashboardText().startsWith("문 운전석,트렁크 열림"),
                     "body: report " + BodyProbe.reportLine());
+            BodyProbe.onPark(0, 1);
+            BodyProbe.observeSpeed(40);
+            assertTrue(!BodyProbe.parkingBrakeOn(), "body: value seen while driving = released");
+            BodyProbe.onPark(0, 2);
+            assertTrue(BodyProbe.parkingBrakeOn(), "body: learned released value -> others = applied");
             BodyProbe.resetForTest();
             byte[] shortRadar = new byte[60];
             System.arraycopy(radar, 0, shortRadar, 0, 60);
