@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.8";
+    public static final String MONITOR_VERSION = "1.5.9";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -3088,7 +3088,7 @@ public class TurzxMonitorMain {
                     float rad = vz.length > 4 ? vz[4] : 28f;
                     mPAddRRect.invoke(path, rf, rad, rad, dirCW);
                     mClipPath.invoke(c, path);
-                    if (parked) drawParked(c, vz, head, brake);
+                    if (parked) drawParkedCached(c, vz, head, brake);
                     else drawRoad(c, s, vz, gear, spd, head, brake);
                     mRestore.invoke(c, sc);
                 }
@@ -3575,6 +3575,55 @@ public class TurzxMonitorMain {
                 mPMove.invoke(path, x0, y0);
                 mPLine.invoke(path, x1, y1);
                 mDrawPath.invoke(c, path, pIcon);
+            }
+
+            private static Object parkCache, parkCanvas;
+            private static int parkCacheW = 0, parkCacheH = 0;
+            private static String parkKey = null;
+
+            /**
+             * v1.5.9: the parked scene has no animation, but its full-area glow, radial lamp gradients and the
+             * colour-filtered rotated body cost tens of ms per frame on the software canvas (150 ms renders in P on
+             * 2026-11-15). Render it with the base image underneath into a viz-sized bitmap and blit that, until the
+             * lamps, the doors or the layout change.
+             */
+            private static void drawParkedCached(Object c, float[] vz, boolean head, boolean brake) throws Exception {
+                boolean[] d = BodyProbe.doors();
+                int bits = (head ? 1 : 0) | (brake ? 2 : 0);
+                for (int i = 0; i < d.length; i++) if (d[i]) bits |= 4 << i;
+                int x0 = (int) Math.floor(vz[0]), y0 = (int) Math.floor(vz[1]);
+                int w = (int) Math.ceil(vz[0] + vz[2]) - x0, h = (int) Math.ceil(vz[1] + vz[3]) - y0;
+                if (w <= 0 || h <= 0) return;
+                String key = loadedH + ":" + x0 + "," + y0 + "," + w + "x" + h + ":" + bits + ":"
+                        + (navTop != null && navTop.bmp != null) + (topHead != null) + (topTail != null);
+                try {
+                    if (parkCache == null || parkCacheW != w || parkCacheH != h) {
+                        Class<?> bmpCls = gfxClasses[0], canvasCls = gfxClasses[2];
+                        Class<?> cfgCls = Class.forName("android.graphics.Bitmap$Config");
+                        parkCache = bmpCls.getMethod("createBitmap", int.class, int.class, cfgCls)
+                                .invoke(null, Integer.valueOf(w), Integer.valueOf(h), cfgCls.getField("ARGB_8888").get(null));
+                        parkCanvas = canvasCls.getConstructor(bmpCls).newInstance(parkCache);
+                        parkCacheW = w;
+                        parkCacheH = h;
+                        parkKey = null;
+                    }
+                    if (!key.equals(parkKey)) {
+                        Object pc = parkCanvas;
+                        int sc = ((Integer) mSave.invoke(pc)).intValue();
+                        mTranslate.invoke(pc, (float) -x0, (float) -y0);
+                        mDrawBmpXY.invoke(pc, base, 0f, 0f, null);
+                        drawParked(pc, vz, head, brake);
+                        mRestore.invoke(pc, sc);
+                        // the first pass may have decoded the lamp layers: key on what the next frame will see
+                        parkKey = loadedH + ":" + x0 + "," + y0 + "," + w + "x" + h + ":" + bits + ":"
+                                + (navTop != null && navTop.bmp != null) + (topHead != null) + (topTail != null);
+                    }
+                    mDrawBmpXY.invoke(c, parkCache, (float) x0, (float) y0, null);
+                } catch (Exception e) {
+                    parkCache = parkCanvas = null;
+                    parkKey = null;
+                    drawParked(c, vz, head, brake);
+                }
             }
 
             private static void drawParked(Object c, float[] vz, boolean head, boolean brake) throws Exception {
@@ -6330,6 +6379,8 @@ public class TurzxMonitorMain {
                                 lastFatcUdsMs = now;
                             }
                         }
+                    } else if ((b3 & 0x7F) == (BcmUdsProbe.DEVICE & 0x7F)) {
+                        BcmUdsProbe.onResponse(data, now);
                     }
                 }
             } catch (Throwable ignored) {
@@ -6357,6 +6408,7 @@ public class TurzxMonitorMain {
                 } else {
                     requestBmsUdsIfNeededLocked();
                 }
+                BcmUdsProbe.tick(hscanMicomService, hscanSendPacketMethod, lastUdsReqSentMs);
 
                 pollHevServiceLocked();
                 pollPowerAndIgnLocked();
@@ -9141,6 +9193,201 @@ public class TurzxMonitorMain {
      *   classic input. A source that has changed its value at least once beats one that never moved; the value seen
      *   while driving (> 8 km/h) is learned as "released".
      */
+    /**
+     * v1.5.9: read-only UDS probe of the BCM through the micom HSCAN TP bridge (TP_DEVICE BCM = 48 -> b3 = 0xB0,
+     * the same path as the BMS / FATC reads), looking for a head lamp / high beam DID. On the Niro the head unit has
+     * no lamp on/off signal (system dump + car log 2026-11-15) and the DIDs live in the BCM firmware, so: try each
+     * candidate once, keep re-reading the ones that answer and log every payload change. Only ReadDataByIdentifier
+     * (0x22) is ever sent, one request per 1.5 s, never within 400 ms of a BMS / FATC request.
+     */
+    public static final class BcmUdsProbe {
+        static final int DEVICE = 0xB0;
+        static final long INTERVAL_MS = 1500L, TIMEOUT_MS = 1200L, IDLE_RETRY_MS = 30000L;
+        static final int[] CANDIDATES = buildCandidates();
+        private static final int ST_NEW = 0, ST_POS = 1, ST_NEG = 2, ST_DEAD = 3;
+        private static final int[] state = new int[CANDIDATES.length];
+        private static final int[] tries = new int[CANDIDATES.length];
+        private static final int[] changes = new int[CANDIDATES.length];
+        private static final int[] nrc = new int[CANDIDATES.length];
+        private static final byte[][] last = new byte[CANDIDATES.length][];
+        private static int cursor = 0, pending = -1, sent = 0, replies = 0;
+        private static long pendingMs = 0L, lastSendMs = 0L, lastReplyMs = 0L;
+
+        private static int[] buildCandidates() {
+            int[] fixed = {0xF190, 0xF187, 0xF18C, 0xF100};
+            int[] r = new int[fixed.length + 16 + 32 * 3];
+            int k = 0;
+            for (int v : fixed) r[k++] = v;
+            for (int i = 0; i < 16; i++) r[k++] = 0x0100 + i;
+            for (int i = 0; i < 32; i++) r[k++] = 0xB000 + i;
+            for (int i = 0; i < 32; i++) r[k++] = 0xBC00 + i;
+            for (int i = 0; i < 32; i++) r[k++] = 0xC000 + i;
+            return r;
+        }
+
+        static int indexOf(int did) {
+            for (int i = 0; i < CANDIDATES.length; i++) if (CANDIDATES[i] == did) return i;
+            return -1;
+        }
+
+        private static boolean hasActive() {
+            for (int st : state) if (st == ST_NEW || st == ST_POS) return true;
+            return false;
+        }
+
+        /** Next DID to read: untried candidates and the ones that answered, round robin. */
+        private static int nextIndex() {
+            int n = CANDIDATES.length;
+            for (int step = 0; step < n; step++) {
+                int i = (cursor + step) % n;
+                if (state[i] == ST_NEW || state[i] == ST_POS) {
+                    cursor = (i + 1) % n;
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        /** Telemetry poll thread (100 ms). */
+        static synchronized void tick(Object svc, Method send, long lastOtherUdsMs) {
+            if (svc == null || send == null) return;
+            long now = System.currentTimeMillis();
+            if (pending >= 0) {
+                if (now - pendingMs < TIMEOUT_MS) return;
+                int i = pending;
+                pending = -1;
+                if (state[i] == ST_NEW && ++tries[i] >= 3) state[i] = ST_DEAD;
+            }
+            boolean active = hasActive();
+            if (now - lastSendMs < (active ? INTERVAL_MS : IDLE_RETRY_MS)) return;
+            if (now - lastOtherUdsMs < 400L) return;
+            int i = active ? nextIndex() : 0;      // nothing answers: retry the VIN DID now and then
+            if (i < 0) return;
+            int did = CANDIDATES[i];
+            lastSendMs = now;
+            try {
+                send.invoke(svc, Byte.valueOf((byte) 0xC7), Byte.valueOf((byte) 0x40), Byte.valueOf((byte) 0x80),
+                        Byte.valueOf((byte) 0x40), Byte.valueOf((byte) DEVICE),
+                        new byte[]{(byte) 0x22, (byte) (did >> 8), (byte) did});
+            } catch (Throwable t) {
+                return;
+            }
+            markSent(i, now);
+        }
+
+        static synchronized void markSent(int i, long now) {
+            pending = i;
+            pendingMs = now;
+            lastSendMs = now;
+            sent++;
+        }
+
+        /** HSCAN listener: a frame from TP device 0x30 (BCM). */
+        static synchronized void onResponse(byte[] data, long now) {
+            if (data == null || data.length < 3) return;
+            int max = Math.min(8, data.length - 3);
+            for (int k = 0; k <= max; k++) {
+                int b = data[k] & 0xFF;
+                if (b == 0x62) {
+                    int did = ((data[k + 1] & 0xFF) << 8) | (data[k + 2] & 0xFF);
+                    int i = indexOf(did);
+                    if (i < 0) return;
+                    byte[] p = java.util.Arrays.copyOfRange(data, k + 3, data.length);
+                    replies++;
+                    lastReplyMs = now;
+                    if (pending == i) pending = -1;
+                    byte[] old = last[i];
+                    if (state[i] != ST_POS) {
+                        state[i] = ST_POS;
+                        DebugManager.logEvent("BCMUDS", "22 " + hex4(did) + " -> " + hex(p));
+                    } else if (old != null && !java.util.Arrays.equals(old, p)) {
+                        changes[i]++;
+                        if (changes[i] <= 40) DebugManager.logEvent("BCMUDS", hex4(did) + " changed: " + hex(old) + " -> " + hex(p));
+                    }
+                    last[i] = p;
+                    return;
+                }
+                if (b == 0x7F && (data[k + 1] & 0xFF) == 0x22) {
+                    int code = data[k + 2] & 0xFF;
+                    if (code == 0x78) return;      // response pending
+                    replies++;
+                    lastReplyMs = now;
+                    if (pending >= 0) {
+                        int i = pending;
+                        pending = -1;
+                        if (state[i] != ST_POS) {
+                            state[i] = ST_NEG;
+                            nrc[i] = code;
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
+        static String hex4(int did) {
+            return String.format(Locale.US, "%04X", did & 0xFFFF);
+        }
+
+        static String hex(byte[] p) {
+            StringBuilder sb = new StringBuilder();
+            int n = Math.min(p.length, 48);
+            for (int i = 0; i < n; i++) sb.append(i > 0 ? " " : "").append(String.format(Locale.US, "%02X", p[i] & 0xFF));
+            if (p.length > n) sb.append(" ..(").append(p.length).append(')');
+            return sb.toString();
+        }
+
+        static synchronized int changesOf(int did) {
+            int i = indexOf(did);
+            return i < 0 ? -1 : changes[i];
+        }
+
+        static synchronized String reportLine() {
+            int pos = 0, neg = 0, dead = 0, fresh = 0;
+            Map<Integer, Integer> codes = new LinkedHashMap<Integer, Integer>();
+            for (int i = 0; i < state.length; i++) {
+                if (state[i] == ST_POS) pos++;
+                else if (state[i] == ST_NEG) {
+                    neg++;
+                    Integer c = codes.get(nrc[i]);
+                    codes.put(nrc[i], c == null ? 1 : c + 1);
+                } else if (state[i] == ST_DEAD) dead++;
+                else fresh++;
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("sent=").append(sent).append(" replies=").append(replies)
+                    .append(" | tried ").append(state.length - fresh).append('/').append(state.length)
+                    .append(" pos=").append(pos).append(" neg=").append(neg).append(" none=").append(dead)
+                    .append(" | lastReply=").append(lastReplyMs > 0 ? (System.currentTimeMillis() - lastReplyMs) + "ms" : "never");
+            if (!codes.isEmpty()) {
+                sb.append(" | NRC");
+                for (Map.Entry<Integer, Integer> e : codes.entrySet())
+                    sb.append(' ').append(String.format(Locale.US, "%02X", e.getKey())).append('x').append(e.getValue());
+            }
+            return sb.toString();
+        }
+
+        static synchronized List<String> didLines(int max) {
+            List<String> out = new ArrayList<String>();
+            for (int i = 0; i < state.length && out.size() < max; i++) {
+                if (state[i] != ST_POS || last[i] == null) continue;
+                out.add("  22 " + hex4(CANDIDATES[i]) + " = " + hex(last[i]) + " (changes " + changes[i] + ")");
+            }
+            return out;
+        }
+
+        static synchronized void resetForTest() {
+            for (int i = 0; i < state.length; i++) {
+                state[i] = ST_NEW;
+                tries[i] = changes[i] = nrc[i] = 0;
+                last[i] = null;
+            }
+            cursor = sent = replies = 0;
+            pending = -1;
+            pendingMs = lastSendMs = lastReplyMs = 0L;
+        }
+    }
+
     public static final class BodyProbe {
         static final String[] DOOR_LABELS = {"운전석", "조수석", "뒷문 좌", "뒷문 우", "트렁크", "후드"};
         static final int DOOR_OPEN_BASE = 4;
@@ -9211,16 +9458,23 @@ public class TurzxMonitorMain {
         }
 
         /**
-         * EPB / parking brake byte of the micom regulation message (SystemService.onRegulationTypeBStatus: [gear P,
-         * parking brake, EPB]); SystemService treats a value > 0 as "parking brake on" (BCM ParkBrakeState OFF 0 / ON 1).
+         * EPB_STATUS as the micom relays it, unchanged, to ISystemService.getEPBStatus / IBCMService.getEpbStatus
+         * (car log 2026-11-15, EPB cycled 6 times): 1 = released, 2 = applied, 6 or 4 = releasing, 7 = applying,
+         * 0 = no data. Anything from 2 up counts as applied, so the lamp stays on until the EPB has fully released.
          */
+        static boolean epbApplied(int raw) {
+            return raw >= 2;
+        }
+
+        /** EPB sources use the value map above; the classic input / BCM callback are ParkBrakeState OFF 0 / ON 1. */
         static synchronized boolean parkingBrakeOn() {
             int i = activeParkSource();
             if (i < 0) return false;
             int raw = pbRaw[i];
             if (raw < 0) return false;
+            if (i <= 1) return epbApplied(raw);
             if (pbReleased[i] != UNSEEN) return raw != pbReleased[i];
-            return raw > 0;
+            return raw == 1;
         }
 
         static boolean highBeamOn() {
@@ -10236,6 +10490,8 @@ public class TurzxMonitorMain {
                     .append(" | BCM lamp cb=").append(LampProbe.bcmLampText()).append("\n");
             sb.append("BCM lamp getters: ").append(LampProbe.bcmText()).append("\n");
             sb.append("Body (BCM)      : ").append(BodyProbe.reportLine()).append("\n");
+            sb.append("BCM UDS probe   : ").append(BcmUdsProbe.reportLine()).append("\n");
+            for (String bl : BcmUdsProbe.didLines(32)) sb.append(bl).append("\n");
             TelemetrySnapshot trs = TelemetryCollector.getLatestSnapshot();
             sb.append("Traffic sprites : ready=").append(TurzxFrameRenderer.TeslaHud.navReady())
                     .append(" | radar side leads=").append(trs.trafficLeads != null ? trs.trafficLeads.length / TRAFFIC_STRIDE : -1)
@@ -14878,20 +15134,48 @@ public class TurzxMonitorMain {
             // parking brake: a source that moves beats one that never changes (the classic input stayed 0 on the Niro)
             BodyProbe.resetForTest();
             BodyProbe.onPark(3, 0);
+            BodyProbe.onPark(0, 2);
+            assertTrue(BodyProbe.parkingBrakeOn() && BodyProbe.activeParkSource() == 0, "pbrake: EPB first, 2 = applied");
             BodyProbe.onPark(0, 1);
-            assertTrue(BodyProbe.parkingBrakeOn() && BodyProbe.activeParkSource() == 0, "pbrake: EPB first, > 0 = applied");
-            BodyProbe.onPark(0, 0);
             BodyProbe.onPark(1, 2);
-            assertTrue(!BodyProbe.parkingBrakeOn() && BodyProbe.activeParkSource() == 0, "pbrake: changed EPB source keeps deciding");
+            assertTrue(!BodyProbe.parkingBrakeOn() && BodyProbe.activeParkSource() == 0, "pbrake: changed EPB source keeps deciding, 1 = released");
+            // the car log sequence: applied 2 -> releasing 6 -> released 1 -> applying 7 -> applied 2
+            BodyProbe.resetForTest();
+            int[] epbSeq = {2, 6, 1, 7, 2, 4, 1, 0};
+            boolean[] epbOn = {true, true, false, true, true, true, false, false};
+            for (int q = 0; q < epbSeq.length; q++) {
+                BodyProbe.onPark(0, epbSeq[q]);
+                assertTrue(BodyProbe.parkingBrakeOn() == epbOn[q], "pbrake: EPB " + epbSeq[q] + " -> " + epbOn[q]);
+            }
             BodyProbe.resetForTest();
             BodyProbe.onPark(0, 0);
             BodyProbe.onPark(3, 0);
             BodyProbe.onPark(1, 1);
             BodyProbe.onPark(1, 0);
             assertTrue(BodyProbe.activeParkSource() == 1 && !BodyProbe.parkingBrakeOn(), "pbrake: the source that moved wins");
-            BodyProbe.onPark(1, 1);
-            assertTrue(BodyProbe.parkingBrakeOn() && BodyProbe.reportLine().contains("bcmEPB=1*"), "pbrake: report " + BodyProbe.reportLine());
+            BodyProbe.onPark(1, 2);
+            assertTrue(BodyProbe.parkingBrakeOn() && BodyProbe.reportLine().contains("bcmEPB=2*"), "pbrake: report " + BodyProbe.reportLine());
             BodyProbe.resetForTest();
+            BodyProbe.onPark(3, 0);
+            BodyProbe.onPark(3, 1);
+            assertTrue(BodyProbe.parkingBrakeOn() && BodyProbe.activeParkSource() == 3, "pbrake: classic input 1 = on");
+            BodyProbe.resetForTest();
+            // v1.5.9 BCM UDS probe bookkeeping
+            BcmUdsProbe.resetForTest();
+            int iB = BcmUdsProbe.indexOf(0xB003), iN = BcmUdsProbe.indexOf(0xB004);
+            assertTrue(iB > 0 && iN > 0 && BcmUdsProbe.indexOf(0xF190) == 0, "bcm uds: candidates");
+            BcmUdsProbe.markSent(iB, 1000L);
+            BcmUdsProbe.onResponse(new byte[]{0x62, (byte) 0xB0, 0x03, 0x01, 0x00}, 1100L);
+            BcmUdsProbe.markSent(iB, 3000L);
+            BcmUdsProbe.onResponse(new byte[]{0x62, (byte) 0xB0, 0x03, 0x01, 0x04}, 3100L);
+            BcmUdsProbe.markSent(iN, 5000L);
+            BcmUdsProbe.onResponse(new byte[]{0x7F, 0x22, 0x78}, 5050L);
+            BcmUdsProbe.onResponse(new byte[]{0x7F, 0x22, 0x31}, 5100L);
+            String bl = BcmUdsProbe.reportLine();
+            List<String> bdl = BcmUdsProbe.didLines(8);
+            assertTrue(bl.contains("pos=1") && bl.contains("neg=1") && bl.contains("replies=3") && BcmUdsProbe.changesOf(0xB003) == 1
+                    && bdl.size() == 1 && bdl.get(0).contains("B003") && bdl.get(0).contains("01 04"), "bcm uds: " + bl + " " + bdl);
+            BcmUdsProbe.resetForTest();
             // stationary radar targets are hidden while driving
             assertTrue(TurzxFrameRenderer.TeslaHud.isStationaryTarget(60, 0.4f) && !TurzxFrameRenderer.TeslaHud.isStationaryTarget(60, 14f)
                     && !TurzxFrameRenderer.TeslaHud.isStationaryTarget(10, 0f) && !TurzxFrameRenderer.TeslaHud.isStationaryTarget(60, Float.NaN),
@@ -15013,10 +15297,10 @@ public class TurzxMonitorMain {
             BodyProbe.onDoorAll(new int[]{1, 1, 1, 1, 1, 0, 0, 0, 1, 0});
             assertTrue(BodyProbe.reportLine().contains("open=[운전석,트렁크]") && BodyProbe.dashboardText().startsWith("문 운전석,트렁크 열림"),
                     "body: report " + BodyProbe.reportLine());
-            BodyProbe.onPark(0, 1);
+            BodyProbe.onPark(3, 0);
             BodyProbe.observeSpeed(40);
             assertTrue(!BodyProbe.parkingBrakeOn(), "body: value seen while driving = released");
-            BodyProbe.onPark(0, 2);
+            BodyProbe.onPark(3, 1);
             assertTrue(BodyProbe.parkingBrakeOn(), "body: learned released value -> others = applied");
             BodyProbe.resetForTest();
             byte[] shortRadar = new byte[60];
