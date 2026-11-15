@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.7";
+    public static final String MONITOR_VERSION = "1.5.8";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -9130,9 +9130,11 @@ public class TurzxMonitorMain {
     }
 
     /**
-     * Doors and parking brake (v1.5.7, mapped from the car log of 2026-11-15).
-     *   IBCMListener.onDoorAllStateChanged(a..j): slots 0..3 = door locks (1 = locked), 4..7 = FL, FR, RL, RR open (1),
-     *   8 = trunk open (1), 9 = hood (assumed, not tested on the car).
+     * Doors and parking brake (v1.5.8: layout confirmed in the system dump + the car log of 2026-11-15).
+     *   IBCMListener.onDoorAllStateChanged(a..j) = BCMService.callOnDoorStatus() from BcmStatus / BCMManager.BCMDoorStatus:
+     *   slots 0..3 = Drv / Pas / RL / RR unlock state (BCMConstants.DoorUnlockState LOCK 0, UNLOCK 1, OFF 2, INVALID 3),
+     *   4..7 = Drv / Pas / RL / RR opened (DoorOpenedState CLOSED 0 / OPENED 1), 8 = trunk opened, 9 = hood switch
+     *   (HoodOnOffState OFF 0 / ON 1). The car log confirmed 4..8 one by one.
      *   Parking brake: the Niro has an EPB. ISystemService.getParkingBrakeStatus() (the classic parking-brake input)
      *   stayed 0 while the EPB was released / applied, so the EPB getters come first:
      *   ISystemService.getEPBStatus(), IBCMService.getEpbStatus(), the BCM onParkBrakeStatusChanged callback, then the
@@ -9193,10 +9195,11 @@ public class TurzxMonitorMain {
             return d;
         }
 
+        /** All four doors locked: every unlock-state slot reads DoorUnlockState.LOCK (0). */
         static boolean doorsLocked() {
             int[] r = doorRaw;
             if (r == null || r.length < 4) return false;
-            for (int i = 0; i < 4; i++) if (r[i] <= 0) return false;
+            for (int i = 0; i < 4; i++) if (r[i] != 0) return false;
             return true;
         }
 
@@ -9207,13 +9210,17 @@ public class TurzxMonitorMain {
             return -1;
         }
 
+        /**
+         * EPB / parking brake byte of the micom regulation message (SystemService.onRegulationTypeBStatus: [gear P,
+         * parking brake, EPB]); SystemService treats a value > 0 as "parking brake on" (BCM ParkBrakeState OFF 0 / ON 1).
+         */
         static synchronized boolean parkingBrakeOn() {
             int i = activeParkSource();
             if (i < 0) return false;
             int raw = pbRaw[i];
             if (raw < 0) return false;
             if (pbReleased[i] != UNSEEN) return raw != pbReleased[i];
-            return raw == 1;
+            return raw > 0;
         }
 
         static boolean highBeamOn() {
@@ -14872,7 +14879,7 @@ public class TurzxMonitorMain {
             BodyProbe.resetForTest();
             BodyProbe.onPark(3, 0);
             BodyProbe.onPark(0, 1);
-            assertTrue(BodyProbe.parkingBrakeOn() && BodyProbe.activeParkSource() == 0, "pbrake: EPB first, 1 = applied");
+            assertTrue(BodyProbe.parkingBrakeOn() && BodyProbe.activeParkSource() == 0, "pbrake: EPB first, > 0 = applied");
             BodyProbe.onPark(0, 0);
             BodyProbe.onPark(1, 2);
             assertTrue(!BodyProbe.parkingBrakeOn() && BodyProbe.activeParkSource() == 0, "pbrake: changed EPB source keeps deciding");
@@ -14994,15 +15001,16 @@ public class TurzxMonitorMain {
             // doors (car log 2026-11-15): slots 0..3 locks, 4..8 = driver, passenger, rear left, rear right, trunk
             BodyProbe.resetForTest();
             assertTrue(!BodyProbe.parkingBrakeOn() && !BodyProbe.doors()[0], "body: unknown -> closed / released");
-            BodyProbe.onDoorAll(new int[]{1, 1, 1, 1, 0, 0, 0, 0, 0, 0});
+            BodyProbe.onDoorAll(new int[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
             boolean[] bd = BodyProbe.doors();
-            assertTrue(!bd[0] && !bd[1] && !bd[2] && !bd[3] && !bd[4] && BodyProbe.doorsLocked(), "body: all closed, locked");
+            assertTrue(!bd[0] && !bd[1] && !bd[2] && !bd[3] && !bd[4] && BodyProbe.doorsLocked(), "body: all closed, locked (0 = LOCK)");
             BodyProbe.onDoorAll(new int[]{1, 1, 1, 1, 0, 0, 1, 0, 0, 0});
             bd = BodyProbe.doors();
-            assertTrue(!bd[0] && bd[2] && !bd[3], "body: slot 6 = rear left (driver side)");
-            BodyProbe.onDoorAll(new int[]{0, 0, 0, 0, 1, 0, 0, 0, 1, 0});
+            assertTrue(!bd[0] && bd[2] && !bd[3] && !BodyProbe.doorsLocked(), "body: slot 6 = rear left (driver side), unlocked");
+            BodyProbe.onDoorAll(new int[]{1, 1, 1, 1, 1, 0, 0, 0, 1, 1});
             bd = BodyProbe.doors();
-            assertTrue(bd[0] && bd[4] && !bd[5] && !BodyProbe.doorsLocked(), "body: driver + trunk, unlocked");
+            assertTrue(bd[0] && bd[4] && bd[5] && !bd[1], "body: driver + trunk + hood");
+            BodyProbe.onDoorAll(new int[]{1, 1, 1, 1, 1, 0, 0, 0, 1, 0});
             assertTrue(BodyProbe.reportLine().contains("open=[운전석,트렁크]") && BodyProbe.dashboardText().startsWith("문 운전석,트렁크 열림"),
                     "body: report " + BodyProbe.reportLine());
             BodyProbe.onPark(0, 1);
