@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.10";
+    public static final String MONITOR_VERSION = "1.5.11";
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
     private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
@@ -5548,6 +5548,15 @@ public class TurzxMonitorMain {
         private static volatile boolean hscanListenerRegistered = false;
         private static volatile Object hscanMicomService = null;
         private static volatile Method hscanSendPacketMethod = null;
+        private static volatile Object micomTapCallback = null;   // keep the binder alive
+        private static long lastMicomTapTryMs = 0L;
+
+        private static boolean nowMicomTapRetryOk() {
+            long now = System.currentTimeMillis();
+            if (now - lastMicomTapTryMs < 30000L) return false;
+            lastMicomTapTryMs = now;
+            return true;
+        }
         private static volatile long lastNativeBinderHscanRxMs = 0L;
         private static volatile long lastUds0101Ms = 0L;
         private static volatile long lastUds0105Ms = 0L;
@@ -6385,8 +6394,6 @@ public class TurzxMonitorMain {
                                 lastFatcUdsMs = now;
                             }
                         }
-                    } else if ((b3 & 0x7F) == (BcmUdsProbe.DEVICE & 0x7F)) {
-                        BcmUdsProbe.onResponse(data, now);
                     }
                 }
             } catch (Throwable ignored) {
@@ -6414,7 +6421,6 @@ public class TurzxMonitorMain {
                 } else {
                     requestBmsUdsIfNeededLocked();
                 }
-                BcmUdsProbe.tick(hscanMicomService, hscanSendPacketMethod, lastUdsReqSentMs);
 
                 pollHevServiceLocked();
                 pollPowerAndIgnLocked();
@@ -6565,6 +6571,33 @@ public class TurzxMonitorMain {
                         requestMediaWidgetUpdate();
                     } catch (Throwable t) {
                         DebugManager.logError("MEDIA", "registerReceiver", t);
+                    }
+                }
+
+                if (MicomTap.registered == 0 && nowMicomTapRetryOk()) {
+                    try {
+                        Object b = getSvc.invoke(null, "com.hkmc.micom.micomdata");
+                        if (b != null) {
+                            Object svc = Class.forName("com.hkmc.micom.IMicomDataService$Stub")
+                                    .getMethod("asInterface", iBinderCls).invoke(null, b);
+                            Class<?> cbIfc = Class.forName("com.hkmc.micom.IMicomDataCallback");
+                            Method reg = svc.getClass().getMethod("registerCallback", String.class, byte.class, cbIfc);
+                            Object cb = new MicomDataTapBridge();
+                            micomTapCallback = cb;
+                            int ok = 0;
+                            for (int id = -128; id <= 127; id++) {
+                                Object r = reg.invoke(svc, "hkg.turzxmonitor.tap", Byte.valueOf((byte) id), cb);
+                                if (Boolean.TRUE.equals(r)) ok++;
+                            }
+                            MicomTap.registered = ok;
+                            MicomTap.registerInfo = "registered " + ok + "/256 rcvIds on com.hkmc.micom.micomdata";
+                            DebugManager.logEvent("MICOM", "Tap " + MicomTap.registerInfo);
+                        } else {
+                            MicomTap.registerInfo = "com.hkmc.micom.micomdata not found";
+                        }
+                    } catch (Throwable t) {
+                        MicomTap.registerInfo = "register failed: " + t;
+                        DebugManager.logError("MICOM", "IMicomDataService.registerCallback", t);
                     }
                 }
 
@@ -9200,201 +9233,135 @@ public class TurzxMonitorMain {
      *   while driving (> 8 km/h) is learned as "released".
      */
     /**
-     * v1.5.9: read-only UDS probe of the BCM through the micom HSCAN TP bridge (TP_DEVICE BCM = 48 -> b3 = 0xB0,
-     * the same path as the BMS / FATC reads), looking for a head lamp / high beam DID. On the Niro the head unit has
-     * no lamp on/off signal (system dump + car log 2026-11-15) and the DIDs live in the BCM firmware, so: try each
-     * candidate once, keep re-reading the ones that answer and log every payload change. Only ReadDataByIdentifier
-     * (0x22) is ever sent, one request per 1.5 s, never within 400 ms of a BMS / FATC request.
+     * v1.5.11: passive tap on every micom -> AP packet. MicomService.handlePacket(rcvId, funcH, funcL, data) hands each
+     * packet to the RemoteCallbackList registered for its rcvId through IMicomDataService.registerCallback
+     * ("com.hkmc.micom.micomdata", the engineering-mode path). Adding a callback does not displace the system services'
+     * own ones, onEvent is oneway, and nothing is ever sent. Looking for a head lamp / high beam packet the system
+     * services ignore: every (rcvId, funcH, funcL) is logged when first seen and on each payload change (capped).
      */
-    public static final class BcmUdsProbe {
-        static final int DEVICE = 0xB0;
-        static final long INTERVAL_MS = 1500L, TIMEOUT_MS = 1200L, IDLE_RETRY_MS = 30000L;
-        static final int[] CANDIDATES = buildCandidates();
-        private static final int ST_NEW = 0, ST_POS = 1, ST_NEG = 2, ST_DEAD = 3;
-        private static final int[] state = new int[CANDIDATES.length];
-        private static final int[] tries = new int[CANDIDATES.length];
-        private static final int[] changes = new int[CANDIDATES.length];
-        private static final int[] nrc = new int[CANDIDATES.length];
-        private static final byte[][] last = new byte[CANDIDATES.length][];
-        private static int cursor = 0, pending = -1, sent = 0, replies = 0;
-        private static long pendingMs = 0L, lastSendMs = 0L, lastReplyMs = 0L;
+    public static final class MicomTap {
+        static final int MAX_KEYS = 4000, MAX_LOG_PER_KEY = 25, MAX_LOG_TOTAL = 4000;
 
-        private static int[] buildCandidates() {
-            int[] fixed = {0xF190, 0xF187, 0xF18C, 0xF100};
-            int[] r = new int[fixed.length + 16 + 32 * 3];
-            int k = 0;
-            for (int v : fixed) r[k++] = v;
-            for (int i = 0; i < 16; i++) r[k++] = 0x0100 + i;
-            for (int i = 0; i < 32; i++) r[k++] = 0xB000 + i;
-            for (int i = 0; i < 32; i++) r[k++] = 0xBC00 + i;
-            for (int i = 0; i < 32; i++) r[k++] = 0xC000 + i;
-            return r;
+        static final class Entry {
+            int key, changes;
+            long count, firstMs, lastChangeMs;
+            byte[] last;
         }
 
-        static int indexOf(int did) {
-            for (int i = 0; i < CANDIDATES.length; i++) if (CANDIDATES[i] == did) return i;
-            return -1;
+        private static final HashMap<Integer, Entry> map = new HashMap<Integer, Entry>();
+        private static long packets = 0L;
+        private static int logged = 0;
+        static volatile int registered = 0;
+        static volatile String registerInfo = "not registered";
+
+        static int keyOf(int rcv, int fh, int fl) {
+            return ((rcv & 0xFF) << 16) | ((fh & 0xFF) << 8) | (fl & 0xFF);
         }
 
-        private static boolean hasActive() {
-            for (int st : state) if (st == ST_NEW || st == ST_POS) return true;
-            return false;
+        static String keyText(int key) {
+            return String.format(Locale.US, "%02X.%02X.%02X", (key >> 16) & 0xFF, (key >> 8) & 0xFF, key & 0xFF);
         }
 
-        /** Next DID to read: untried candidates and the ones that answered, round robin. */
-        private static int nextIndex() {
-            int n = CANDIDATES.length;
-            for (int step = 0; step < n; step++) {
-                int i = (cursor + step) % n;
-                if (state[i] == ST_NEW || state[i] == ST_POS) {
-                    cursor = (i + 1) % n;
-                    return i;
-                }
-            }
-            return -1;
-        }
-
-        /** Telemetry poll thread (100 ms). */
-        static synchronized void tick(Object svc, Method send, long lastOtherUdsMs) {
-            if (svc == null || send == null) return;
-            long now = System.currentTimeMillis();
-            if (pending >= 0) {
-                if (now - pendingMs < TIMEOUT_MS) return;
-                int i = pending;
-                pending = -1;
-                if (state[i] == ST_NEW && ++tries[i] >= 3) state[i] = ST_DEAD;
-            }
-            boolean active = hasActive();
-            if (now - lastSendMs < (active ? INTERVAL_MS : IDLE_RETRY_MS)) return;
-            if (now - lastOtherUdsMs < 400L) return;
-            int i = active ? nextIndex() : 0;      // nothing answers: retry the VIN DID now and then
-            if (i < 0) return;
-            int did = CANDIDATES[i];
-            lastSendMs = now;
-            try {
-                send.invoke(svc, Byte.valueOf((byte) 0xC7), Byte.valueOf((byte) 0x40), Byte.valueOf((byte) 0x80),
-                        Byte.valueOf((byte) 0x40), Byte.valueOf((byte) DEVICE),
-                        new byte[]{(byte) 0x22, (byte) (did >> 8), (byte) did});
-            } catch (Throwable t) {
-                return;
-            }
-            markSent(i, now);
-        }
-
-        static synchronized void markSent(int i, long now) {
-            pending = i;
-            pendingMs = now;
-            lastSendMs = now;
-            sent++;
-        }
-
-        /** HSCAN listener: a frame from TP device 0x30 (BCM). */
-        static synchronized void onResponse(byte[] data, long now) {
-            if (data == null || data.length < 3) return;
-            int max = Math.min(8, data.length - 3);
-            for (int k = 0; k <= max; k++) {
-                int b = data[k] & 0xFF;
-                if (b == 0x62) {
-                    int did = ((data[k + 1] & 0xFF) << 8) | (data[k + 2] & 0xFF);
-                    int i = indexOf(did);
-                    if (i < 0) return;
-                    byte[] p = java.util.Arrays.copyOfRange(data, k + 3, data.length);
-                    replies++;
-                    lastReplyMs = now;
-                    if (pending == i) pending = -1;
-                    byte[] old = last[i];
-                    if (state[i] != ST_POS) {
-                        state[i] = ST_POS;
-                        DebugManager.logEvent("BCMUDS", "22 " + hex4(did) + " -> " + hex(p));
-                    } else if (old != null && !java.util.Arrays.equals(old, p)) {
-                        changes[i]++;
-                        if (changes[i] <= 40) DebugManager.logEvent("BCMUDS", hex4(did) + " changed: " + hex(old) + " -> " + hex(p));
+        static void onPacket(byte rcv, byte fh, byte fl, byte[] data) {
+            byte[] d = data == null ? new byte[0] : data.clone();
+            String line = null;
+            synchronized (MicomTap.class) {
+                packets++;
+                int key = keyOf(rcv, fh, fl);
+                Entry e = map.get(key);
+                long now = System.currentTimeMillis();
+                if (e == null) {
+                    if (map.size() >= MAX_KEYS) return;
+                    e = new Entry();
+                    e.key = key;
+                    e.firstMs = now;
+                    e.count = 1;
+                    e.last = d;
+                    map.put(key, e);
+                    line = "new " + keyText(key) + " len=" + d.length + " [" + BodyProbe.hexBytes(d, 40) + "]";
+                } else {
+                    e.count++;
+                    if (!java.util.Arrays.equals(e.last, d)) {
+                        e.changes++;
+                        e.lastChangeMs = now;
+                        if (e.changes <= MAX_LOG_PER_KEY) line = keyText(key) + " #" + e.changes + " " + diffText(e.last, d);
+                        e.last = d;
                     }
-                    last[i] = p;
-                    return;
                 }
-                if (b == 0x7F && (data[k + 1] & 0xFF) == 0x22) {
-                    int code = data[k + 2] & 0xFF;
-                    if (code == 0x78) return;      // response pending
-                    replies++;
-                    lastReplyMs = now;
-                    if (pending >= 0) {
-                        int i = pending;
-                        pending = -1;
-                        if (state[i] != ST_POS) {
-                            state[i] = ST_NEG;
-                            nrc[i] = code;
-                        }
-                    }
-                    return;
+                if (line != null) {
+                    if (logged >= MAX_LOG_TOTAL) return;
+                    if (++logged == MAX_LOG_TOTAL) line = line + " (log cap reached)";
                 }
             }
+            if (line != null) DebugManager.logEvent("MICOM", line);
         }
 
-        static String hex4(int did) {
-            return String.format(Locale.US, "%04X", did & 0xFFFF);
-        }
-
-        static String hex(byte[] p) {
+        /** Same length: "b<idx>:<old>><new>" for each changed byte (max 12); otherwise the new payload. */
+        static String diffText(byte[] a, byte[] b) {
+            if (a.length != b.length || a.length > 96) return "len " + a.length + ">" + b.length + " [" + BodyProbe.hexBytes(b, 40) + "]";
             StringBuilder sb = new StringBuilder();
-            int n = Math.min(p.length, 48);
-            for (int i = 0; i < n; i++) sb.append(i > 0 ? " " : "").append(String.format(Locale.US, "%02X", p[i] & 0xFF));
-            if (p.length > n) sb.append(" ..(").append(p.length).append(')');
+            int n = 0;
+            for (int i = 0; i < a.length; i++) {
+                if (a[i] == b[i]) continue;
+                if (n++ >= 12) {
+                    sb.append(" ..");
+                    break;
+                }
+                if (sb.length() > 0) sb.append(' ');
+                sb.append('b').append(i).append(':').append(String.format(Locale.US, "%02X>%02X", a[i] & 0xFF, b[i] & 0xFF));
+            }
             return sb.toString();
         }
 
-        static synchronized int changesOf(int did) {
-            int i = indexOf(did);
-            return i < 0 ? -1 : changes[i];
+        static synchronized int changesOf(int rcv, int fh, int fl) {
+            Entry e = map.get(keyOf(rcv, fh, fl));
+            return e == null ? -1 : e.changes;
         }
 
         static synchronized String reportLine() {
-            int pos = 0, neg = 0, dead = 0, fresh = 0;
-            Map<Integer, Integer> codes = new LinkedHashMap<Integer, Integer>();
-            for (int i = 0; i < state.length; i++) {
-                if (state[i] == ST_POS) pos++;
-                else if (state[i] == ST_NEG) {
-                    neg++;
-                    Integer c = codes.get(nrc[i]);
-                    codes.put(nrc[i], c == null ? 1 : c + 1);
-                } else if (state[i] == ST_DEAD) dead++;
-                else fresh++;
-            }
-            StringBuilder sb = new StringBuilder();
-            sb.append("sent=").append(sent).append(" replies=").append(replies)
-                    .append(" | tried ").append(state.length - fresh).append('/').append(state.length)
-                    .append(" pos=").append(pos).append(" neg=").append(neg).append(" none=").append(dead)
-                    .append(" | lastReply=").append(lastReplyMs > 0 ? (System.currentTimeMillis() - lastReplyMs) + "ms" : "never");
-            if (!codes.isEmpty()) {
-                sb.append(" | NRC");
-                for (Map.Entry<Integer, Integer> e : codes.entrySet())
-                    sb.append(' ').append(String.format(Locale.US, "%02X", e.getKey())).append('x').append(e.getValue());
-            }
-            return sb.toString();
+            return registerInfo + " | packets=" + packets + " keys=" + map.size() + " logged=" + logged;
         }
 
-        static synchronized List<String> didLines(int max) {
+        /** One line per packet kind, sorted by key: count, payload changes, last payload. */
+        static synchronized List<String> keyLines(int max) {
+            List<Integer> keys = new ArrayList<Integer>(map.keySet());
+            java.util.Collections.sort(keys);
             List<String> out = new ArrayList<String>();
-            for (int i = 0; i < state.length && out.size() < max; i++) {
-                if (state[i] != ST_POS || last[i] == null) continue;
-                out.add("  22 " + hex4(CANDIDATES[i]) + " = " + hex(last[i]) + " (changes " + changes[i] + ")");
+            for (Integer k : keys) {
+                if (out.size() >= max) {
+                    out.add("  .. " + (keys.size() - max) + " more");
+                    break;
+                }
+                Entry e = map.get(k);
+                out.add("  " + keyText(k) + " n=" + e.count + " chg=" + e.changes + " len=" + e.last.length
+                        + " [" + BodyProbe.hexBytes(e.last, 24) + "]");
             }
             return out;
         }
 
         static synchronized void resetForTest() {
-            for (int i = 0; i < state.length; i++) {
-                state[i] = ST_NEW;
-                tries[i] = changes[i] = nrc[i] = 0;
-                last[i] = null;
-            }
-            cursor = sent = replies = 0;
-            pending = -1;
-            pendingMs = lastSendMs = lastReplyMs = 0L;
+            map.clear();
+            packets = 0L;
+            logged = 0;
+        }
+    }
+
+    public static final class MicomDataTapBridge extends com.hkmc.micom.IMicomDataCallback.Stub {
+        @Override
+        public void onEvent(byte rcvId, byte funcH, byte funcL, byte[] data) {
+            MicomTap.onPacket(rcvId, funcH, funcL, data);
         }
     }
 
     public static final class BodyProbe {
+        static String hexBytes(byte[] p, int max) {
+            StringBuilder sb = new StringBuilder();
+            int n = Math.min(p.length, max);
+            for (int i = 0; i < n; i++) sb.append(i > 0 ? " " : "").append(String.format(Locale.US, "%02X", p[i] & 0xFF));
+            if (p.length > n) sb.append(" ..");
+            return sb.toString();
+        }
+
         static final String[] DOOR_LABELS = {"운전석", "조수석", "뒷문 좌", "뒷문 우", "트렁크", "후드"};
         static final int DOOR_OPEN_BASE = 4;
         static final String[] PB_SRC = {"sysEPB", "bcmEPB", "bcmCallback", "sysParkBrake"};
@@ -10496,8 +10463,8 @@ public class TurzxMonitorMain {
                     .append(" | BCM lamp cb=").append(LampProbe.bcmLampText()).append("\n");
             sb.append("BCM lamp getters: ").append(LampProbe.bcmText()).append("\n");
             sb.append("Body (BCM)      : ").append(BodyProbe.reportLine()).append("\n");
-            sb.append("BCM UDS probe   : ").append(BcmUdsProbe.reportLine()).append("\n");
-            for (String bl : BcmUdsProbe.didLines(32)) sb.append(bl).append("\n");
+            sb.append("Micom tap       : ").append(MicomTap.reportLine()).append("\n");
+            for (String ml : MicomTap.keyLines(160)) sb.append(ml).append("\n");
             TelemetrySnapshot trs = TelemetryCollector.getLatestSnapshot();
             sb.append("Traffic sprites : ready=").append(TurzxFrameRenderer.TeslaHud.navReady())
                     .append(" | radar side leads=").append(trs.trafficLeads != null ? trs.trafficLeads.length / TRAFFIC_STRIDE : -1)
@@ -15185,22 +15152,18 @@ public class TurzxMonitorMain {
             BodyProbe.onPark(3, 1);
             assertTrue(BodyProbe.parkingBrakeOn() && BodyProbe.activeParkSource() == 3, "pbrake: classic input 1 = on");
             BodyProbe.resetForTest();
-            // v1.5.9 BCM UDS probe bookkeeping
-            BcmUdsProbe.resetForTest();
-            int iB = BcmUdsProbe.indexOf(0xB003), iN = BcmUdsProbe.indexOf(0xB004);
-            assertTrue(iB > 0 && iN > 0 && BcmUdsProbe.indexOf(0xF190) == 0, "bcm uds: candidates");
-            BcmUdsProbe.markSent(iB, 1000L);
-            BcmUdsProbe.onResponse(new byte[]{0x62, (byte) 0xB0, 0x03, 0x01, 0x00}, 1100L);
-            BcmUdsProbe.markSent(iB, 3000L);
-            BcmUdsProbe.onResponse(new byte[]{0x62, (byte) 0xB0, 0x03, 0x01, 0x04}, 3100L);
-            BcmUdsProbe.markSent(iN, 5000L);
-            BcmUdsProbe.onResponse(new byte[]{0x7F, 0x22, 0x78}, 5050L);
-            BcmUdsProbe.onResponse(new byte[]{0x7F, 0x22, 0x31}, 5100L);
-            String bl = BcmUdsProbe.reportLine();
-            List<String> bdl = BcmUdsProbe.didLines(8);
-            assertTrue(bl.contains("pos=1") && bl.contains("neg=1") && bl.contains("replies=3") && BcmUdsProbe.changesOf(0xB003) == 1
-                    && bdl.size() == 1 && bdl.get(0).contains("B003") && bdl.get(0).contains("01 04"), "bcm uds: " + bl + " " + bdl);
-            BcmUdsProbe.resetForTest();
+            // v1.5.11 micom tap bookkeeping
+            MicomTap.resetForTest();
+            MicomTap.onPacket((byte) 0x81, (byte) 0x10, (byte) 0x02, new byte[]{0x00, 0x05, 0x00});
+            MicomTap.onPacket((byte) 0x81, (byte) 0x10, (byte) 0x02, new byte[]{0x00, 0x05, 0x00});
+            MicomTap.onPacket((byte) 0x81, (byte) 0x10, (byte) 0x02, new byte[]{0x01, 0x05, 0x00});
+            MicomTap.onPacket((byte) 0x81, (byte) 0x10, (byte) 0x03, null);
+            String mtr = MicomTap.reportLine();
+            List<String> mtl = MicomTap.keyLines(10);
+            assertTrue(mtr.contains("packets=4") && mtr.contains("keys=2") && MicomTap.changesOf(0x81, 0x10, 0x02) == 1
+                    && "b0:00>01".equals(MicomTap.diffText(new byte[]{0, 5}, new byte[]{1, 5}))
+                    && mtl.size() == 2 && mtl.get(0).contains("81.10.02") && mtl.get(0).contains("chg=1"), "micom tap: " + mtr + " " + mtl);
+            MicomTap.resetForTest();
             // stationary radar targets are hidden while driving
             assertTrue(TurzxFrameRenderer.TeslaHud.isStationaryTarget(60, 0.4f) && !TurzxFrameRenderer.TeslaHud.isStationaryTarget(60, 14f)
                     && !TurzxFrameRenderer.TeslaHud.isStationaryTarget(10, 0f) && !TurzxFrameRenderer.TeslaHud.isStationaryTarget(60, Float.NaN),
