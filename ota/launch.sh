@@ -11,11 +11,13 @@ else
     INSTALL_DIR="/data/nemesis/packages/hkg.turzxmonitor"
 fi
 mkdir -p /data/dalvik-cache 2>/dev/null
+mkdir -p /dev/hkg_tmp 2>/dev/null
+chmod 777 /dev/hkg_tmp 2>/dev/null
 
-SVC_PID_FILE="/data/local/tmp/hkg_turzxmonitor_svc.pid"
-JAVA_PID_FILE="/data/local/tmp/hkg_turzxmonitor_java.pid"
-BOOT_ID_FILE="/data/local/tmp/hkg_turzxmonitor_boot.id"
-CMD_FILE="/data/local/tmp/hkg_turzxmonitor_cmd"
+SVC_PID_FILE="/dev/hkg_tmp/hkg_turzxmonitor_svc.pid"
+JAVA_PID_FILE="/dev/hkg_tmp/hkg_turzxmonitor_java.pid"
+BOOT_ID_FILE="/dev/hkg_tmp/hkg_turzxmonitor_boot.id"
+CMD_FILE="/dev/hkg_tmp/hkg_turzxmonitor_cmd"
 
 # Clear stale persistent PID files across cold boots using kernel boot_id
 if [ -r "/proc/sys/kernel/random/boot_id" ]; then
@@ -71,7 +73,7 @@ if [ "$svc_alive" = "0" ]; then
     if [ -x /system/xbin/nemesis ]; then
         /system/xbin/nemesis service start hkg.turzxmonitor/hkg-turzxmonitor >/dev/null 2>&1
     else
-        /system/bin/sh "$INSTALL_DIR/svc/turzx-daemon.sh" </dev/null >>/data/local/tmp/hkg_turzxmonitor.log 2>&1 &
+        /system/bin/sh "$INSTALL_DIR/svc/turzx-daemon.sh" </dev/null >>/dev/hkg_tmp/hkg_turzxmonitor.log 2>&1 &
     fi
 fi
 

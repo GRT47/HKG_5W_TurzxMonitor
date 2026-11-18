@@ -11,8 +11,10 @@ else
     INSTALL_DIR="/data/nemesis/packages/hkg.turzxmonitor"
 fi
 mkdir -p /data/dalvik-cache 2>/dev/null
+mkdir -p /dev/hkg_tmp 2>/dev/null
+chmod 777 /dev/hkg_tmp 2>/dev/null
 
-SVC_PID_FILE="/data/local/tmp/hkg_turzxmonitor_svc.pid"
+SVC_PID_FILE="/dev/hkg_tmp/hkg_turzxmonitor_svc.pid"
 # NEMESIS svcmgr owns this service as "<package-id>/<service name>" (NEMESIS.data [service.0] name=).
 # Its pidfile is /data/nemesis/pids/<qname with / -> +>, written by svcmgr only (pid starttime boot-token).
 # Never write it from here, and never run a second copy outside svcmgr: an instance that exits because
@@ -21,13 +23,15 @@ SVC_PID_FILE="/data/local/tmp/hkg_turzxmonitor_svc.pid"
 NEMESIS_QNAME="hkg.turzxmonitor/hkg-turzxmonitor"
 SVCMGR_PID_FILE="/data/nemesis/pids/hkg.turzxmonitor+hkg-turzxmonitor"
 NEMESIS_CLI="/system/xbin/nemesis"
-JAVA_PID_FILE="/data/local/tmp/hkg_turzxmonitor_java.pid"
-BOOT_ID_FILE="/data/local/tmp/hkg_turzxmonitor_boot.id"
-OTA_RELOAD_FILE="/data/local/tmp/hkg_turzxmonitor_ota_reload"
-LOG_FILE="/data/local/tmp/hkg_turzxmonitor.log"
-DEBUG_FILE="/data/local/tmp/hkg_turzxmonitor_debug.txt"
-USB_SYNC_REQ_FILE="/data/local/tmp/hkg_turzxmonitor_usbsync_req"
+JAVA_PID_FILE="/dev/hkg_tmp/hkg_turzxmonitor_java.pid"
+BOOT_ID_FILE="/dev/hkg_tmp/hkg_turzxmonitor_boot.id"
+OTA_RELOAD_FILE="/dev/hkg_tmp/hkg_turzxmonitor_ota_reload"
+LEGACY_OTA_RELOAD_FILE="/data/local/tmp/hkg_turzxmonitor_ota_reload"
+LOG_FILE="/dev/hkg_tmp/hkg_turzxmonitor.log"
+DEBUG_FILE="/dev/hkg_tmp/hkg_turzxmonitor_debug.txt"
+USB_SYNC_REQ_FILE="/dev/hkg_tmp/hkg_turzxmonitor_usbsync_req"
 MONITOR_PID=""
+LOG_ROTATE_TICK=0
 
 # Crash backoff: restart delay grows 0 -> 10 -> 30 -> 60 -> 120 -> 300s while the Java process keeps
 # dying within STABLE_RUN_SECS of its start; a run longer than that resets the streak.
@@ -60,6 +64,7 @@ is_java_pid_alive() {
 mkdir -p /data/nemesis/pids 2>/dev/null
 rm -f /data/nemesis/pids/hkg.turzxmonitor+turzx-daemon /data/nemesis/pids/hkg.turzxmonitor+turzx-daemon.fails 2>/dev/null
 rm -f "$INSTALL_DIR/bin/"*.tmp "$INSTALL_DIR/svc/"*.tmp "$INSTALL_DIR/config/"*.tmp 2>/dev/null
+rm -f /data/local/tmp/hkg_turzxmonitor_svc.pid /data/local/tmp/hkg_turzxmonitor_java.pid /data/local/tmp/hkg_turzxmonitor_boot.id /data/local/tmp/hkg_turzxmonitor_usbsync_req /data/local/tmp/hkg_turzx_state.json /data/local/tmp/hkg_turzx_state.json.tmp 2>/dev/null
 
 # Ensure .bak always mirrors a valid non-empty turzxmonitor.jar on startup / OTA reload
 if [ -s "$INSTALL_DIR/bin/turzxmonitor.jar" ]; then
@@ -243,8 +248,14 @@ kill_monitor_java() {
         kill "$MONITOR_PID" >/dev/null 2>&1
         MONITOR_PID=""
     fi
-    /system/bin/busybox pkill -f "com.hkg.turzxmonitor.TurzxMonitorMain daemon" >/dev/null 2>&1
-    pkill -f "com.hkg.turzxmonitor.TurzxMonitorMain daemon" >/dev/null 2>&1
+    if [ -f "$JAVA_PID_FILE" ]; then
+        _kpid="$(cat "$JAVA_PID_FILE" 2>/dev/null)"
+        if [ -n "$_kpid" ]; then
+            kill "$_kpid" >/dev/null 2>&1
+        fi
+    fi
+    /system/bin/busybox pkill -f "com\.hkg\.turzxmonitor(\.TurzxMonitorMain|$)" >/dev/null 2>&1
+    pkill -f "com\.hkg\.turzxmonitor(\.TurzxMonitorMain|$)" >/dev/null 2>&1
 }
 
 start_monitor_java() {
@@ -275,7 +286,7 @@ start_monitor_java() {
         cp -f "$JAR_FILE" "$JAR_BAK" 2>/dev/null
         chmod 644 "$JAR_BAK" 2>/dev/null
     fi
-    LOG_FILE="/data/local/tmp/hkg_turzxmonitor.log"
+    LOG_FILE="/dev/hkg_tmp/hkg_turzxmonitor.log"
     if [ -f "$LOG_FILE" ] && [ -x "/system/bin/busybox" ]; then
         log_sz="$(/system/bin/busybox wc -c < "$LOG_FILE" 2>/dev/null)"
         if [ -n "$log_sz" ] && [ "$log_sz" -gt 262144 ] 2>/dev/null; then
@@ -427,8 +438,8 @@ USB_SETTLE_UNTIL=$((LAST_UP + USB_SETTLE_SECS))
 while true; do
     echo "$$" > "$SVC_PID_FILE" 2>/dev/null
     chmod 666 /dev/bus/usb/*/* 2>/dev/null
-    if [ -f "$OTA_RELOAD_FILE" ]; then
-        rm -f "$OTA_RELOAD_FILE" 2>/dev/null
+    if [ -f "$OTA_RELOAD_FILE" ] || [ -f "$LEGACY_OTA_RELOAD_FILE" ]; then
+        rm -f "$OTA_RELOAD_FILE" "$LEGACY_OTA_RELOAD_FILE" 2>/dev/null
         log_info "OTA reload requested; restarting daemon script and Java process"
         if [ -s "$INSTALL_DIR/bin/turzxmonitor.jar" ]; then
             cp -f "$INSTALL_DIR/bin/turzxmonitor.jar" "$INSTALL_DIR/bin/turzxmonitor.jar.bak" 2>/dev/null
@@ -441,6 +452,17 @@ while true; do
     fi
     if [ -z "$MONITOR_PID" ] || ! is_java_pid_alive "$MONITOR_PID"; then
         handle_java_exit
+    fi
+    LOG_ROTATE_TICK=$((LOG_ROTATE_TICK + 1))
+    if [ "$LOG_ROTATE_TICK" -ge 12 ]; then
+        LOG_ROTATE_TICK=0
+        if [ -f "$LOG_FILE" ] && [ -x "/system/bin/busybox" ]; then
+            log_sz="$(/system/bin/busybox wc -c < "$LOG_FILE" 2>/dev/null)"
+            if [ -n "$log_sz" ] && [ "$log_sz" -gt 524288 ] 2>/dev/null; then
+                cp -f "$LOG_FILE" "${LOG_FILE}.old" 2>/dev/null
+                : > "$LOG_FILE" 2>/dev/null
+            fi
+        fi
     fi
     check_usb_log_sync
     sleep 5 &

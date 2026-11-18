@@ -18,7 +18,8 @@ fi
 
 chmod 755 "$INSTALL_DIR/bin/launch.sh" "$INSTALL_DIR/svc/turzx-daemon.sh" 2>/dev/null
 chmod 644 "$INSTALL_DIR/bin/turzxmonitor.jar" "$INSTALL_DIR/NEMESIS.data" "$INSTALL_DIR/config/monitor.conf" "$INSTALL_DIR/config/version.json" "$INSTALL_DIR/web/turzx_92_mockup.html" 2>/dev/null
-mkdir -p "$INSTALL_DIR/logs" /data/dalvik-cache /data/local/tmp/dalvik-cache 2>/dev/null
+mkdir -p "$INSTALL_DIR/logs" /data/dalvik-cache /data/local/tmp/dalvik-cache /dev/hkg_tmp 2>/dev/null
+chmod 777 /dev/hkg_tmp 2>/dev/null
 
 # Sync .bak with the newly installed JAR and clear stale Dalvik DEX caches
 if [ -s "$INSTALL_DIR/bin/turzxmonitor.jar" ]; then
@@ -56,7 +57,7 @@ if [ -f "/data/nemesis/services.db" ] && grep "hkg.turzxmonitor.*|background" /d
 fi
 
 # Stop any running previous version so the newly installed version takes effect immediately
-for pid_file in /data/local/tmp/hkg_turzxmonitor_java.pid /data/local/tmp/hkg_turzxmonitor_svc.pid; do
+for pid_file in /dev/hkg_tmp/hkg_turzxmonitor_java.pid /dev/hkg_tmp/hkg_turzxmonitor_svc.pid /data/local/tmp/hkg_turzxmonitor_java.pid /data/local/tmp/hkg_turzxmonitor_svc.pid; do
     if [ -f "$pid_file" ]; then
         old_pid="$(cat "$pid_file" 2>/dev/null)"
         if [ -n "$old_pid" ]; then
@@ -64,15 +65,17 @@ for pid_file in /data/local/tmp/hkg_turzxmonitor_java.pid /data/local/tmp/hkg_tu
         fi
     fi
 done
-/system/bin/busybox pkill -f "com.hkg.turzxmonitor.TurzxMonitorMain" >/dev/null 2>&1
+/system/bin/busybox pkill -f "com\.hkg\.turzxmonitor(\.TurzxMonitorMain|$)" >/dev/null 2>&1
+pkill -f "com\.hkg\.turzxmonitor(\.TurzxMonitorMain|$)" >/dev/null 2>&1
 /system/bin/busybox pkill -f "turzx-daemon.sh" >/dev/null 2>&1
-rm -f /data/local/tmp/hkg_turzxmonitor_svc.pid /data/local/tmp/hkg_turzxmonitor_java.pid /data/local/tmp/hkg_turzxmonitor_ota_reload 2>/dev/null
+rm -f /dev/hkg_tmp/hkg_turzxmonitor_svc.pid /dev/hkg_tmp/hkg_turzxmonitor_java.pid /dev/hkg_tmp/hkg_turzxmonitor_ota_reload 2>/dev/null
+rm -f /data/local/tmp/hkg_turzxmonitor_svc.pid /data/local/tmp/hkg_turzxmonitor_java.pid /data/local/tmp/hkg_turzxmonitor_ota_reload /data/local/tmp/hkg_turzx_state.json /data/local/tmp/hkg_turzx_state.json.tmp 2>/dev/null
 sync
 
 # Show control/preview overlay immediately after installation.
 # The daemon itself is started by NEMESIS (svcmgr) right after this hook returns; starting a copy here
 # made the svcmgr copy exit as a duplicate 5 times -> service marked failed -> no cold-boot autostart.
-echo "show" > /data/local/tmp/hkg_turzxmonitor_cmd 2>/dev/null
+echo "show" > /dev/hkg_tmp/hkg_turzxmonitor_cmd 2>/dev/null
 
 exit 0
 

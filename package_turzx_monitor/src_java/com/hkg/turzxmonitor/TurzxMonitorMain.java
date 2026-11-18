@@ -73,16 +73,26 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.11";
+    public static final String MONITOR_VERSION = "1.5.12";
     private static final Charset UTF8 = Charset.forName("UTF-8");
-    private static final String CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
-    private static final String SHARED_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
-    private static final String SHARED_CARROTBRIDGE_JSON_PATH = "/data/local/tmp/carrotbridge_status.json";
-    private static final String SHARED_CARROTBRIDGE_PID_PATH = "/data/local/tmp/carrotbridge_java.pid";
-    private static final String TURZX_JSON_STATE_PATH = "/data/local/tmp/hkg_turzx_state.json";
-    private static final String USB_LOG_SYNC_REQUEST_PATH = "/data/local/tmp/hkg_turzxmonitor_usbsync_req";
-    private static final String DEBUG_DUMP_LOCAL_PATH = "/data/local/tmp/hkg_turzxmonitor_debug.txt";
-    private static final String OTA_RELOAD_TRIGGER_PATH = "/data/local/tmp/hkg_turzxmonitor_ota_reload";
+    public static final String RAMDISK_TMP_DIR = "/dev/hkg_tmp";
+    static final String CMD_FILE_PATH = "/dev/hkg_tmp/hkg_turzxmonitor_cmd";
+    private static final String LEGACY_CMD_FILE_PATH = "/data/local/tmp/hkg_turzxmonitor_cmd";
+    static final String SHARED_SYSMONITOR_JSON_PATH = "/dev/hkg_tmp/hkg_monitor_state.json";
+    private static final String LEGACY_SYSMONITOR_JSON_PATH = "/data/local/tmp/hkg_monitor_state.json";
+    static final String SHARED_CARROTBRIDGE_JSON_PATH = "/dev/hkg_tmp/carrotbridge_status.json";
+    static final String LEGACY_CARROTBRIDGE_JSON_PATH = "/data/local/tmp/carrotbridge_status.json";
+    static final String SHARED_CARROTBRIDGE_PID_PATH = "/dev/hkg_tmp/carrotbridge_java.pid";
+    static final String LEGACY_CARROTBRIDGE_PID_PATH = "/data/local/tmp/carrotbridge_java.pid";
+    static final String TURZX_JSON_STATE_PATH = "/dev/hkg_tmp/hkg_turzx_state.json";
+    static final String USB_LOG_SYNC_REQUEST_PATH = "/dev/hkg_tmp/hkg_turzxmonitor_usbsync_req";
+    static final String DEBUG_DUMP_LOCAL_PATH = "/dev/hkg_tmp/hkg_turzxmonitor_debug.txt";
+    static final String OTA_RELOAD_TRIGGER_PATH = "/dev/hkg_tmp/hkg_turzxmonitor_ota_reload";
+    private static final String LEGACY_OTA_RELOAD_TRIGGER_PATH = "/data/local/tmp/hkg_turzxmonitor_ota_reload";
+    static final String DAEMON_LOG_PATH = "/dev/hkg_tmp/hkg_turzxmonitor.log";
+    private static final String LEGACY_DAEMON_LOG_PATH = "/data/local/tmp/hkg_turzxmonitor.log";
+    static final String MEDIA_STATE_PATH = "/dev/hkg_tmp/hkg_media_state.txt";
+    private static final String LEGACY_MEDIA_STATE_PATH = "/data/local/tmp/hkg_media_state.txt";
     public static final String GITHUB_RAW_HOST = "raw.githubusercontent.com";
     public static final String GITHUB_OTA_BASE_PATH = "/GRT47/HKG_5W_TurzxMonitor/main/ota";
     public static final int HTTP_PORT = 8766;
@@ -363,12 +373,53 @@ public class TurzxMonitorMain {
         }
     }
 
+    private static void setProcessArgV0(String procName) {
+        try {
+            Class<?> procCls = Class.forName("android.os.Process");
+            Method setArgV0 = procCls.getMethod("setArgV0", String.class);
+            setArgV0.invoke(null, procName);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void ensureRamdiskTmpDir() {
+        try {
+            if (new File("/dev").isDirectory()) {
+                File ramDir = new File(RAMDISK_TMP_DIR);
+                if (!ramDir.exists()) ramDir.mkdirs();
+                ramDir.setReadable(true, false);
+                ramDir.setWritable(true, false);
+                ramDir.setExecutable(true, false);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    static File resolveFreshSharedFile(String primaryPath, String fallbackPath, long maxAgeMs, long nowMs) {
+        if (primaryPath != null && !primaryPath.isEmpty()) {
+            File p = new File(primaryPath);
+            if (p.isFile()) {
+                long age = nowMs - p.lastModified();
+                if (age < maxAgeMs) return p;
+            }
+        }
+        if (fallbackPath != null && !fallbackPath.isEmpty()) {
+            File f = new File(fallbackPath);
+            if (f.isFile()) {
+                long age = nowMs - f.lastModified();
+                if (age < maxAgeMs) return f;
+            }
+        }
+        return null;
+    }
+
     public static void main(String[] args) {
         if (args.length > 0 && "test-self".equals(args[0])) {
             runSelfTests();
             return;
         }
 
+        setProcessArgV0("com.hkg.turzxmonitor");
         String mode = args.length > 0 ? args[0] : "daemon";
         String installDir = args.length > 1 ? args[1] : "/data/nemesis/apps/hkg.turzxmonitor";
 
@@ -380,6 +431,8 @@ public class TurzxMonitorMain {
     }
 
     private static void runDaemon(final String installDir) {
+        setProcessArgV0("com.hkg.turzxmonitor");
+        ensureRamdiskTmpDir();
         System.out.println("[TurzxMonitor] Starting TURZX 9.2 Cluster HUD daemon v" + MONITOR_VERSION + " (dir=" + installDir + ")");
         DebugManager.logEvent("DAEMON", "Started daemon v" + MONITOR_VERSION + " at " + installDir);
         try {
@@ -397,11 +450,13 @@ public class TurzxMonitorMain {
         OtaUpdateManager.startAutoUpdateWorker(installDir);
 
         final File cmdFile = new File(CMD_FILE_PATH);
+        final File legacyCmdFile = new File(LEGACY_CMD_FILE_PATH);
         while (true) {
             try {
-                if (TurzxOverlayController.isUiLooperReady() && cmdFile.exists()) {
-                    String cmd = readFirstLineQuick(cmdFile).toLowerCase(Locale.US);
-                    cmdFile.delete();
+                File activeCmd = cmdFile.exists() ? cmdFile : (legacyCmdFile.exists() ? legacyCmdFile : null);
+                if (TurzxOverlayController.isUiLooperReady() && activeCmd != null) {
+                    String cmd = readFirstLineQuick(activeCmd).toLowerCase(Locale.US);
+                    activeCmd.delete();
                     DebugManager.logEvent("CMD", "Received command: " + cmd);
                     if ("toggle".equals(cmd)) {
                         TurzxUsbDriver.requestImmediateReconnectIfDisconnected();
@@ -1657,13 +1712,16 @@ public class TurzxMonitorMain {
         // the first WARMUP_ENCODES frames an "in-flight" marker (hash:attempt) exists; if the process dies in that
         // window the marker survives. After MAX_GUARD_ATTEMPTS consecutive unfinished attempts with the same .so,
         // native encoding is disabled for that .so hash (Skia fallback) so the HUD and OTA keep working.
-        // A new .so (different hash) is tried again. Re-enable manually: rm /data/local/tmp/hkg_turzxjpeg_disabled_*
-        private static final String GUARD_DIR = "/data/local/tmp";
+        // A new .so (different hash) is tried again. Re-enable manually: rm /dev/hkg_tmp/hkg_turzxjpeg_disabled_*
         private static final String INFLIGHT_NAME = "hkg_turzxjpeg_inflight";
         private static final String DISABLED_PREFIX = "hkg_turzxjpeg_disabled_";
         private static final int WARMUP_ENCODES = 50;
         static final int MAX_GUARD_ATTEMPTS = 2;
         private static int warmupRemaining = 0;
+
+        private static String guardDir() {
+            return new File(RAMDISK_TMP_DIR).isDirectory() ? RAMDISK_TMP_DIR : "/data/local/tmp";
+        }
 
         /** Number of previous unfinished attempts for this .so hash, given the in-flight marker content (or null). */
         static int previousGuardAttempts(String inflightContent, String soHash) {
@@ -1675,7 +1733,7 @@ public class TurzxMonitorMain {
         }
 
         private static void clearInflight() {
-            new File(GUARD_DIR, INFLIGHT_NAME).delete();
+            new File(guardDir(), INFLIGHT_NAME).delete();
         }
 
         static native byte[] nEncode(Object bitmap, int rotation, int padWidth, int quality);
@@ -1751,13 +1809,14 @@ public class TurzxMonitorMain {
                 StringBuilder hex = new StringBuilder(12);
                 for (int i = 0; i < 6; i++) hex.append(String.format(Locale.US, "%02x", dig[i] & 0xFF));
 
-                File disabledMarker = new File(GUARD_DIR, DISABLED_PREFIX + hex);
+                String gDir = guardDir();
+                File disabledMarker = new File(gDir, DISABLED_PREFIX + hex);
                 if (disabledMarker.isFile()) {
                     info = "disabled by crash guard (" + hex + ")";
                     DebugManager.logEvent("RENDER", "Native JPEG encoder " + info + " -> Skia fallback");
                     return false;
                 }
-                File inflight = new File(GUARD_DIR, INFLIGHT_NAME);
+                File inflight = new File(gDir, INFLIGHT_NAME);
                 int attempts = previousGuardAttempts(inflight.isFile() ? readAllTextQuick(inflight) : null, hex.toString());
                 if (attempts >= MAX_GUARD_ATTEMPTS) {
                     writeBytesNoSync(disabledMarker, ("process died " + attempts + "x during native load/warmup\n").getBytes(UTF8));
@@ -5521,7 +5580,7 @@ public class TurzxMonitorMain {
         private static volatile String modeSourceName = "";          // ModeManager-derived current source
         private static volatile long modeSourceMs = 0L;
         private static String lastExternalPropSig = null;             // persist.sys.hkg.media.* (null = no baseline yet)
-        private static long lastMediaStateFileMtime = -1L;           // /data/local/tmp/hkg_media_state.txt
+        private static long lastMediaStateFileMtime = -1L;           // /dev/hkg_tmp/hkg_media_state.txt (fallback /data/local/tmp)
         private static final Map<String, Boolean> broadcastUnitMsBySource = new HashMap<String, Boolean>();
         private static volatile long lastPosAdvanceMs = 0L;          // last time an external position moved forward
         private static volatile long lastExternalPosMs = 0L;         // last external position sample time
@@ -6411,11 +6470,10 @@ public class TurzxMonitorMain {
             startBackgroundThreadsIfNeeded();
 
             synchronized (liveSnapshot) {
-                // 0. If hkg.sysmonitor is also running, ingest its /data/local/tmp/hkg_monitor_state.json first
-                File sharedJsonFile = new File(SHARED_SYSMONITOR_JSON_PATH);
-                boolean sharedFresh = sharedJsonFile.isFile()
-                        && (System.currentTimeMillis() - sharedJsonFile.lastModified() < 5000L);
-                if (sharedFresh) {
+                // 0. If hkg.sysmonitor is also running, ingest its hkg_monitor_state.json (/dev/hkg_tmp first, fallback /data/local/tmp)
+                File sharedJsonFile = resolveFreshSharedFile(
+                        SHARED_SYSMONITOR_JSON_PATH, LEGACY_SYSMONITOR_JSON_PATH, 5000L, System.currentTimeMillis());
+                if (sharedJsonFile != null) {
                     String sharedJson = readAllTextQuick(sharedJsonFile);
                     parseSharedSysMonitorJson(sharedJson, liveSnapshot);
                 } else {
@@ -7365,9 +7423,9 @@ public class TurzxMonitorMain {
                     }
                 }
 
-                File mediaFile = new File("/data/local/tmp/hkg_media_state.txt");
-                long mtime = mediaFile.isFile() ? mediaFile.lastModified() : -1L;
-                if (mtime > 0L && mtime != lastMediaStateFileMtime && (now - mtime) < 60000L) {
+                File mediaFile = resolveFreshSharedFile(MEDIA_STATE_PATH, LEGACY_MEDIA_STATE_PATH, 60000L, now);
+                long mtime = mediaFile != null ? mediaFile.lastModified() : -1L;
+                if (mtime > 0L && mtime != lastMediaStateFileMtime) {
                     lastMediaStateFileMtime = mtime;
                     String line = readFirstLineQuick(mediaFile);
                     if (!line.isEmpty() && line.contains("|")) {
@@ -7378,8 +7436,6 @@ public class TurzxMonitorMain {
                         String fAlbum = parts.length >= 4 ? parts[3].trim() : "";
                         onMediaTrackUpdated(liveSnapshot, fTitle, fArtist, fAlbum);
                     }
-                } else if (mtime > 0L) {
-                    lastMediaStateFileMtime = mtime;
                 }
             }
 
@@ -7440,9 +7496,10 @@ public class TurzxMonitorMain {
         }
 
         private static void pollCarrotBridgeAndArpLocked() {
-            // 1. Co-existence with HKG_5W_CarrotNavi (carrotnavi.bridge -> /data/local/tmp/carrotbridge_status.json)
-            File cbFile = new File(SHARED_CARROTBRIDGE_JSON_PATH);
-            if (cbFile.isFile() && (System.currentTimeMillis() - cbFile.lastModified() < 12000L)) {
+            // 1. Co-existence with HKG_5W_CarrotNavi (carrotnavi.bridge -> /dev/hkg_tmp/carrotbridge_status.json, fallback /data/local/tmp)
+            File cbFile = resolveFreshSharedFile(
+                    SHARED_CARROTBRIDGE_JSON_PATH, LEGACY_CARROTBRIDGE_JSON_PATH, 12000L, System.currentTimeMillis());
+            if (cbFile != null) {
                 String cbJson = readAllTextQuick(cbFile);
                 if (!cbJson.isEmpty()) {
                     parseCarrotBridgeStatusJson(cbJson, liveSnapshot);
@@ -7458,12 +7515,11 @@ public class TurzxMonitorMain {
         }
 
         private static boolean isCarrotBridgeDaemonActive() {
-            File cbFile = new File(SHARED_CARROTBRIDGE_JSON_PATH);
-            if (cbFile.isFile() && (System.currentTimeMillis() - cbFile.lastModified() < 12000L)) {
+            long now = System.currentTimeMillis();
+            if (resolveFreshSharedFile(SHARED_CARROTBRIDGE_JSON_PATH, LEGACY_CARROTBRIDGE_JSON_PATH, 12000L, now) != null) {
                 return true;
             }
-            File pidFile = new File(SHARED_CARROTBRIDGE_PID_PATH);
-            return pidFile.isFile() && (System.currentTimeMillis() - pidFile.lastModified() < 120000L);
+            return resolveFreshSharedFile(SHARED_CARROTBRIDGE_PID_PATH, LEGACY_CARROTBRIDGE_PID_PATH, 120000L, now) != null;
         }
 
         private static void startBackgroundThreadsIfNeeded() {
@@ -10516,9 +10572,12 @@ public class TurzxMonitorMain {
                 }
             }
 
-            File daemonLog = new File("/data/local/tmp/hkg_turzxmonitor.log");
+            File daemonLog = new File(DAEMON_LOG_PATH);
+            if (!daemonLog.isFile()) {
+                daemonLog = new File(LEGACY_DAEMON_LOG_PATH);
+            }
             if (daemonLog.isFile()) {
-                sb.append("\n--- [6] Tail of /data/local/tmp/hkg_turzxmonitor.log ---\n");
+                sb.append("\n--- [6] Tail of ").append(daemonLog.getAbsolutePath()).append(" ---\n");
                 String logTxt = readAllTextQuick(daemonLog);
                 String[] lines = logTxt.split("\n");
                 int start = Math.max(0, lines.length - 80);
@@ -10781,7 +10840,10 @@ public class TurzxMonitorMain {
                         if (!logDir.exists()) logDir.mkdirs();
                         File usbDump = new File(logDir, "HKG_TurzxMonitor_Debug.txt");
                         writeBytesAtomic(usbDump, bytes);
-                        File daemonLog = new File("/data/local/tmp/hkg_turzxmonitor.log");
+                        File daemonLog = new File(DAEMON_LOG_PATH);
+                        if (!daemonLog.isFile()) {
+                            daemonLog = new File(LEGACY_DAEMON_LOG_PATH);
+                        }
                         if (daemonLog.isFile()) {
                             writeBytesAtomic(new File(logDir, "hkg_turzxmonitor.log"), readFileBytesQuick(daemonLog));
                         }
@@ -10794,7 +10856,7 @@ public class TurzxMonitorMain {
 
             try {
                 File tmpDump = new File(DEBUG_DUMP_LOCAL_PATH);
-                writeBytesAtomic(tmpDump, bytes);
+                writeBytesNoSync(tmpDump, bytes);
                 if (primarySaved.isEmpty()) {
                     primarySaved = tmpDump.getAbsolutePath();
                 }
@@ -11022,8 +11084,13 @@ public class TurzxMonitorMain {
                 }
 
                 writeBytesAtomic(localVerFile, verBytes);
+                byte[] reloadPayload = ("v" + rVer + "\n").getBytes(UTF8);
                 try {
-                    writeBytesAtomic(new File(OTA_RELOAD_TRIGGER_PATH), ("v" + rVer + "\n").getBytes(UTF8));
+                    writeBytesNoSync(new File(OTA_RELOAD_TRIGGER_PATH), reloadPayload);
+                } catch (Throwable ignored) {
+                }
+                try {
+                    writeBytesNoSync(new File(LEGACY_OTA_RELOAD_TRIGGER_PATH), reloadPayload);
                 } catch (Throwable ignored) {
                 }
                 clearDalvikCacheAndSync();
@@ -14060,6 +14127,8 @@ public class TurzxMonitorMain {
 
     /** tmp + rename without fsync: for frequently rewritten, non-critical state files (no eMMC flush stalls). */
     private static void writeBytesNoSync(File target, byte[] data) throws Exception {
+        File parent = target.getParentFile();
+        if (parent != null && !parent.exists()) parent.mkdirs();
         File tmp = new File(target.getAbsolutePath() + ".tmp");
         FileOutputStream fos = new FileOutputStream(tmp);
         try {
@@ -14068,8 +14137,16 @@ public class TurzxMonitorMain {
             fos.close();
         }
         if (!tmp.renameTo(target)) {
-            tmp.delete();
-            throw new IllegalStateException("rename failed: " + tmp + " -> " + target);
+            target.delete();
+            if (!tmp.renameTo(target)) {
+                FileOutputStream direct = new FileOutputStream(target);
+                try {
+                    direct.write(data);
+                } finally {
+                    direct.close();
+                }
+                tmp.delete();
+            }
         }
     }
 
@@ -15294,6 +15371,33 @@ public class TurzxMonitorMain {
             byte[] shortRadar = new byte[60];
             System.arraycopy(radar, 0, shortRadar, 0, 60);
             assertTrue(radarLeadStructSize(shortRadar, 0, shortRadar.length) == 0, "radar: truncated frame -> no lists");
+            // v1.5.12: /dev/hkg_tmp RAM disk volatile paths + CarrotBridge fallback lookup
+            for (String p : new String[]{
+                    CMD_FILE_PATH, SHARED_SYSMONITOR_JSON_PATH, SHARED_CARROTBRIDGE_JSON_PATH,
+                    SHARED_CARROTBRIDGE_PID_PATH, TURZX_JSON_STATE_PATH, USB_LOG_SYNC_REQUEST_PATH,
+                    DEBUG_DUMP_LOCAL_PATH, OTA_RELOAD_TRIGGER_PATH, DAEMON_LOG_PATH, MEDIA_STATE_PATH
+            }) {
+                assertTrue(p.startsWith("/dev/hkg_tmp/"), "ramdisk: volatile path in /dev/hkg_tmp -> " + p);
+            }
+            File priTmp = File.createTempFile("turzx_pri_", ".json");
+            File legTmp = File.createTempFile("turzx_leg_", ".json");
+            priTmp.deleteOnExit();
+            legTmp.deleteOnExit();
+            writeBytesNoSync(priTmp, "{\"src\":\"pri\"}".getBytes(UTF8));
+            writeBytesNoSync(legTmp, "{\"src\":\"leg\"}".getBytes(UTF8));
+            long tNow = System.currentTimeMillis();
+            assertTrue(priTmp.equals(resolveFreshSharedFile(priTmp.getAbsolutePath(), legTmp.getAbsolutePath(), 10000L, tNow)),
+                    "ramdisk: primary preferred when fresh");
+            priTmp.setLastModified(tNow - 60000L);
+            assertTrue(legTmp.equals(resolveFreshSharedFile(priTmp.getAbsolutePath(), legTmp.getAbsolutePath(), 10000L, tNow)),
+                    "ramdisk: fallback to legacy when primary stale");
+            priTmp.delete();
+            assertTrue(legTmp.equals(resolveFreshSharedFile(priTmp.getAbsolutePath(), legTmp.getAbsolutePath(), 10000L, tNow)),
+                    "ramdisk: fallback to legacy when primary missing");
+            legTmp.setLastModified(tNow - 60000L);
+            assertTrue(resolveFreshSharedFile(priTmp.getAbsolutePath(), legTmp.getAbsolutePath(), 10000L, tNow) == null,
+                    "ramdisk: null when both stale");
+            legTmp.delete();
         } catch (Exception e) {
             throw new RuntimeException("v1.5.0 Tesla HUD self-test failed", e);
         }
