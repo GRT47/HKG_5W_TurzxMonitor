@@ -31,7 +31,7 @@ PKG_STAGE_DIR = BUILD_DIR / "pkg_stage"
 USB_ROOT_DIR = BUILD_DIR / "usb_root"
 
 OUTER_ZIP_PATH = REPO_ROOT / "HKG_5W_TurzxMonitor_USB.zip"
-MONITOR_VERSION = "1.5.13"
+MONITOR_VERSION = "1.5.14"
 
 PUBLIC_SANS_FONTS = {
     "PublicSans-Bold.ttf": "https://fonts.gstatic.com/s/publicsans/v21/ijwGs572Xtc6ZYQws9YVwllKVG8qX1oyOymu8Z65ww.ttf",
@@ -774,6 +774,40 @@ def stage_native_encoder(assets_dir: Path) -> None:
     (assets_dir / NATIVE_SO_ASSET).write_bytes(data)
 
 
+# Clients up to v1.5.13 download ota/turzxmonitor.b64 with a hard 4MB cap (headers included) and hand a
+# truncated file to the SHA-256 check -> "무결성 검증 실패". Every OTA build must stay below that cap so
+# those clients can still update; keep a margin for HTTP headers and growth.
+LEGACY_OTA_B64_LIMIT = 4 * 1024 * 1024
+OTA_B64_MARGIN = 128 * 1024
+
+
+def optimize_png_assets(assets_dir: Path) -> None:
+    """Lossless PNG recompression (oxipng; pixels unchanged). Install with: pip install pyoxipng"""
+    try:
+        import oxipng  # type: ignore
+    except ImportError:
+        print("WARNING: pyoxipng not installed -> PNG assets not optimized (pip install pyoxipng)")
+        return
+    before = after = 0
+    for png in sorted(assets_dir.glob("*.png")):
+        before += png.stat().st_size
+        # Keep bit depth / color type (RGBA stays RGBA): only the IDAT deflate stream is re-encoded, so Android
+        # 4.4 Skia decodes exactly the same pixel format as before.
+        oxipng.optimize(
+            png,
+            level=3,
+            strip=oxipng.StripChunks.safe(),
+            bit_depth_reduction=False,
+            color_type_reduction=False,
+            palette_reduction=False,
+            grayscale_reduction=False,
+            optimize_alpha=False,
+            scale_16=False,
+        )
+        after += png.stat().st_size
+    print(f"PNG assets optimized (lossless): {before} -> {after} bytes")
+
+
 def reuse_assets_from_ota(assets_dir: Path) -> None:
     """TURZX_REUSE_OTA_ASSETS=1: take PNG layers + fonts from the current ota/turzxmonitor.b64 jar
     instead of re-rendering them with Chromium (for build hosts without Edge/Chrome)."""
@@ -832,6 +866,8 @@ def build() -> None:
         raise RuntimeError(f"Tesla HUD assets missing in {tesla_dir} ({len(tesla_files)} files)")
     for f in tesla_files:
         shutil.copy2(f, ASSETS_DIR / f.name)
+    # 1f. Lossless PNG recompression (keeps the OTA jar under the legacy 4MB download cap)
+    optimize_png_assets(ASSETS_DIR)
     classes_assets_dir = CLASSES_DIR / "assets"
     classes_assets_dir.mkdir(parents=True, exist_ok=True)
     for asset_file in sorted(ASSETS_DIR.iterdir()):
@@ -904,13 +940,20 @@ def build() -> None:
         "sha256_launch": launch_sha,
         "repo": "GRT47/HKG_5W_TurzxMonitor",
     }
+    b64_raw = base64.b64encode(jar_bytes).decode("ascii")
+    b64_lines = "\n".join(b64_raw[i : i + 76] for i in range(0, len(b64_raw), 76)) + "\n"
+    if len(b64_lines) > LEGACY_OTA_B64_LIMIT - OTA_B64_MARGIN:
+        raise RuntimeError(
+            f"ota/turzxmonitor.b64 would be {len(b64_lines)} bytes; clients <= v1.5.13 cut downloads at "
+            f"{LEGACY_OTA_B64_LIMIT} bytes (OTA fails with SHA-256 mismatch). Shrink the jar assets "
+            f"(limit incl. margin: {LEGACY_OTA_B64_LIMIT - OTA_B64_MARGIN})."
+        )
+    print(f"OTA b64 size: {len(b64_lines)} bytes (legacy client limit {LEGACY_OTA_B64_LIMIT}, margin {OTA_B64_MARGIN})")
     version_json_bytes = (json.dumps(version_meta, indent=2) + "\n").encode("utf-8")
     (ota_dir / "version.json").write_bytes(version_json_bytes)
     (ota_dir / "turzx-daemon.sh").write_bytes(daemon_bytes)
     (ota_dir / "launch.sh").write_bytes(launch_bytes)
 
-    b64_raw = base64.b64encode(jar_bytes).decode("ascii")
-    b64_lines = "\n".join(b64_raw[i : i + 76] for i in range(0, len(b64_raw), 76)) + "\n"
     (ota_dir / "turzxmonitor.b64").write_bytes(b64_lines.encode("ascii"))
 
     # 5. Stage NEMESIS package files + config/version.json + web/turzx_92_mockup.html

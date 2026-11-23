@@ -120,6 +120,7 @@ python package_turzx_monitor/build_package.py
 - d8은 **build-tools 35 이상(R8 8.5+)** 을 사용하세요. build-tools 34의 d8(R8 8.2.2)은 이 소스의 `TurzxOverlayController$3$1`에서 내부 NPE로 실패합니다.
 - Android NDK **r25c**(API 19를 지원하는 마지막 계열)와 CMake가 있으면 `libturzxjpeg.so`를 다시 빌드하고, 없으면 커밋된 prebuilt를 사용합니다. `ANDROID_NDK_HOME`으로 경로를 지정하거나 `TURZX_SKIP_NATIVE_BUILD=1`로 prebuilt 사용을 강제할 수 있습니다.
 - `TURZX_REUSE_OTA_ASSETS=1`: Chromium 없이 현재 `ota/turzxmonitor.b64`의 기존 디자인 PNG 레이어·폰트를 재사용합니다.
+- **OTA jar 크기 제한**: v1.5.13 이하 클라이언트는 `ota/turzxmonitor.b64`를 4MB에서 잘라 받기 때문에(→ "무결성 검증 실패") 빌드는 b64가 4MB−128KB를 넘으면 실패합니다. PNG 에셋은 `pip install pyoxipng`가 있으면 무손실 재압축(색 형식 유지)되니 설치해 두세요. v1.5.14부터 클라이언트 한도는 12MB이며, 잘린 다운로드는 `Content-Length` 검증으로 "다운로드 실패"로 처리됩니다.
 - 신규 디자인 시안(`turzx_redesign_tesla.html`)을 고쳤다면 먼저 `python package_turzx_monitor/tools/make_tesla_assets.py`로 `design_tesla/`를 다시 만드세요(Edge/Chrome 필요).
 
 ---

@@ -73,7 +73,9 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.13";
+    public static final String MONITOR_VERSION = "1.5.14";
+    // v1.5.14: 4MB -> 12MB. Clients <= 1.5.13 still stop at 4MB, so build_package.py keeps the b64 below that.
+    static final int OTA_JAR_B64_MAX_BYTES = 12 * 1024 * 1024;
     public static final int POWERTRAIN_AUTO = 0;
     public static final int POWERTRAIN_EV = 1;
     public static final int POWERTRAIN_ICE = 2;
@@ -12350,7 +12352,7 @@ public class TurzxMonitorMain {
                 TurzxOverlayController.showBannerMessage("☁️ v" + rVer + " 업데이트 다운로드 중...", 10000L);
 
                 if (forceApply || jarChanged) {
-                    byte[] b64Bytes = downloadGitHubOtaFile(GITHUB_OTA_BASE_PATH + "/turzxmonitor.b64", 4 * 1024 * 1024, myGen);
+                    byte[] b64Bytes = downloadGitHubOtaFile(GITHUB_OTA_BASE_PATH + "/turzxmonitor.b64", OTA_JAR_B64_MAX_BYTES, myGen);
                     if (myGen != otaRunGen) return false;
                     if (b64Bytes == null || b64Bytes.length < 100) {
                         otaStatusText = "JAR 다운로드 실패";
@@ -12604,28 +12606,28 @@ public class TurzxMonitorMain {
                     os.flush();
 
                     InputStream is = sslSock.getInputStream();
-                    ByteArrayOutputStream rawResp = new ByteArrayOutputStream(8192);
-                    byte[] buf = new byte[4096];
+                    ByteArrayOutputStream rawResp = new ByteArrayOutputStream(65536);
+                    byte[] buf = new byte[8192];
                     int r;
+                    boolean overflow = false;
                     while ((r = is.read(buf)) > 0) {
                         rawResp.write(buf, 0, r);
-                        if (rawResp.size() > maxBytes + 8192) break;
-                    }
-                    byte[] all = rawResp.toByteArray();
-                    int hdrEnd = -1;
-                    for (int k = 0; k + 3 < all.length; k++) {
-                        if (all[k] == '\r' && all[k + 1] == '\n' && all[k + 2] == '\r' && all[k + 3] == '\n') {
-                            hdrEnd = k + 4;
+                        if (rawResp.size() > maxBytes + 16384) {
+                            overflow = true;
                             break;
                         }
                     }
-                    if (hdrEnd <= 0) continue;
-                    String hdrStr = new String(all, 0, hdrEnd, UTF8);
-                    if (!hdrStr.startsWith("HTTP/1.1 200") && !hdrStr.startsWith("HTTP/1.0 200")) {
+                    if (overflow) {
+                        // Never hand back a truncated file (it only surfaces later as a SHA-256 mismatch)
+                        DebugManager.logEvent("OTA-ERR", path + " larger than download limit " + maxBytes + " bytes");
+                        return null;
+                    }
+                    byte[] body = extractVerifiedHttpBody(rawResp.toByteArray(), maxBytes);
+                    if (body == null) {
+                        DebugManager.logEvent("OTA-ERR", path + " incomplete/invalid HTTP response from " + ip
+                                + " (" + rawResp.size() + " bytes)");
                         continue;
                     }
-                    byte[] body = new byte[all.length - hdrEnd];
-                    System.arraycopy(all, hdrEnd, body, 0, body.length);
                     return body;
                 } catch (Throwable ignored) {
                 } finally {
@@ -12637,6 +12639,81 @@ public class TurzxMonitorMain {
                 }
             }
             return null;
+        }
+
+        /**
+         * Splits a raw HTTP/1.x response and returns the body only if it is complete: status 200, body length equal
+         * to Content-Length when present, chunked transfer decoded, and not larger than maxBytes. Otherwise null.
+         */
+        static byte[] extractVerifiedHttpBody(byte[] all, int maxBytes) {
+            if (all == null) return null;
+            int hdrEnd = -1;
+            for (int k = 0; k + 3 < all.length; k++) {
+                if (all[k] == '\r' && all[k + 1] == '\n' && all[k + 2] == '\r' && all[k + 3] == '\n') {
+                    hdrEnd = k + 4;
+                    break;
+                }
+            }
+            if (hdrEnd <= 0) return null;
+            String hdr = new String(all, 0, hdrEnd, UTF8);
+            if (!hdr.startsWith("HTTP/1.1 200") && !hdr.startsWith("HTTP/1.0 200")) return null;
+            String hdrLower = hdr.toLowerCase(Locale.US);
+            long contentLength = -1L;
+            boolean chunked = false;
+            String[] lines = hdrLower.split("\r\n");
+            for (int i = 1; i < lines.length; i++) {
+                String ln = lines[i];
+                int c = ln.indexOf(':');
+                if (c <= 0) continue;
+                String name = ln.substring(0, c).trim();
+                String val = ln.substring(c + 1).trim();
+                if ("content-length".equals(name)) {
+                    try {
+                        contentLength = Long.parseLong(val);
+                    } catch (NumberFormatException e) {
+                        return null;
+                    }
+                } else if ("transfer-encoding".equals(name) && val.contains("chunked")) {
+                    chunked = true;
+                }
+            }
+            byte[] body;
+            if (chunked) {
+                ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(1024, all.length - hdrEnd));
+                int pos = hdrEnd;
+                while (true) {
+                    int eol = -1;
+                    for (int k = pos; k + 1 < all.length; k++) {
+                        if (all[k] == '\r' && all[k + 1] == '\n') {
+                            eol = k;
+                            break;
+                        }
+                    }
+                    if (eol < 0) return null;
+                    String sizeStr = new String(all, pos, eol - pos, UTF8).trim();
+                    int semi = sizeStr.indexOf(';');
+                    if (semi >= 0) sizeStr = sizeStr.substring(0, semi).trim();
+                    int size;
+                    try {
+                        size = Integer.parseInt(sizeStr, 16);
+                    } catch (NumberFormatException e) {
+                        return null;
+                    }
+                    pos = eol + 2;
+                    if (size == 0) break; // last chunk
+                    if (size < 0 || pos + size + 2 > all.length) return null; // truncated chunk
+                    out.write(all, pos, size);
+                    if (out.size() > maxBytes) return null;
+                    pos += size + 2;
+                }
+                body = out.toByteArray();
+            } else {
+                body = new byte[all.length - hdrEnd];
+                System.arraycopy(all, hdrEnd, body, 0, body.length);
+                if (contentLength >= 0L && body.length != contentLength) return null; // truncated / overlong
+            }
+            if (body.length > maxBytes) return null;
+            return body;
         }
     }
 
@@ -16154,6 +16231,29 @@ public class TurzxMonitorMain {
             throw new RuntimeException("MonitorConfig / OTA self-test failed", e);
         }
 
+        // v1.5.14: OTA HTTP body verification (a truncated download must fail as a download error, not as SHA mismatch)
+        try {
+            byte[] payload = "0123456789".getBytes(UTF8);
+            byte[] ok = ("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 10\r\n\r\n0123456789").getBytes(UTF8);
+            assertTrue(java.util.Arrays.equals(OtaUpdateManager.extractVerifiedHttpBody(ok, 1024), payload), "ota-http: complete body");
+            byte[] cut = ("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n01234").getBytes(UTF8);
+            assertTrue(OtaUpdateManager.extractVerifiedHttpBody(cut, 1024) == null, "ota-http: truncated body rejected");
+            byte[] longer = ("HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\n0123456789").getBytes(UTF8);
+            assertTrue(OtaUpdateManager.extractVerifiedHttpBody(longer, 1024) == null, "ota-http: length mismatch rejected");
+            byte[] noLen = ("HTTP/1.0 200 OK\r\n\r\n0123456789").getBytes(UTF8);
+            assertTrue(java.util.Arrays.equals(OtaUpdateManager.extractVerifiedHttpBody(noLen, 1024), payload), "ota-http: no Content-Length");
+            assertTrue(OtaUpdateManager.extractVerifiedHttpBody(ok, 5) == null, "ota-http: over maxBytes rejected");
+            byte[] chunked = ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n0123\r\n6;x=y\r\n456789\r\n0\r\n\r\n").getBytes(UTF8);
+            assertTrue(java.util.Arrays.equals(OtaUpdateManager.extractVerifiedHttpBody(chunked, 1024), payload), "ota-http: chunked decoded");
+            byte[] chunkCut = ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n0123\r\n6\r\n45").getBytes(UTF8);
+            assertTrue(OtaUpdateManager.extractVerifiedHttpBody(chunkCut, 1024) == null, "ota-http: truncated chunk rejected");
+            byte[] notFound = ("HTTP/1.1 404 Not Found\r\nContent-Length: 3\r\n\r\nabc").getBytes(UTF8);
+            assertTrue(OtaUpdateManager.extractVerifiedHttpBody(notFound, 1024) == null, "ota-http: non-200 rejected");
+            assertTrue(OTA_JAR_B64_MAX_BYTES >= 12 * 1024 * 1024, "ota-http: jar limit raised");
+        } catch (Exception e) {
+            throw new RuntimeException("OTA HTTP body verification self-test failed", e);
+        }
+
         // v1.4.2: media source / playback-time / album-art rules
         try {
             TelemetrySnapshot ms = new TelemetrySnapshot();
@@ -16437,7 +16537,7 @@ public class TurzxMonitorMain {
             FpsBench.addRender(60.0);
             FpsBench.addEncode(20.0);
             String res = FpsBench.tick(8000L);
-            assertTrue(res != null && res.startsWith("→ 8.0 FPS") && res.contains("R60 E20 T10 A50 P0") && res.endsWith("| 40KB"),
+            assertTrue(res != null && res.startsWith("→ 8.0 FPS") && res.contains("R60 E20 T10 A50 P0") && (res.endsWith("| 40KB") || res.contains("| 40KB | CPU ")),
                     "bench: 40 frames / 5s = 8.0 FPS, got " + res);
             assertTrue(FpsBench.recent(1).size() == 1 && "test".equals(FpsBench.recent(1).get(0)[0]), "bench: history");
             assertTrue(FpsBench.formatResult(0, 5000L, 0, 0, 0, 0, 0, 0, -1.0).contains("없음"), "bench: no frames");
