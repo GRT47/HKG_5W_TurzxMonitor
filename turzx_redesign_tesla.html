@@ -52,10 +52,11 @@
   figcaption b { color: #CDD0D6; }
   .frame { position: relative; width: 100%; border-radius: 12px; overflow: hidden; background: #000; box-shadow: 0 0 0 7px #000, 0 0 0 8px #26272b, 0 18px 50px #0008; }
   .notes { width: 100%; max-width: 1440px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
-  .note { background: #111214; border: 1px solid #1E1F23; border-radius: 12px; padding: 16px 18px; }
+  .note { background: #111214; border: 1px solid #1E1F23; border-radius: 12px; padding: 16px 18px; min-width: 0; overflow-wrap: anywhere; }
   .note h3 { font-size: 14px; margin-bottom: 8px; }
   .note ul { padding-left: 18px; color: #A6A9B1; font-size: 13px; line-height: 1.65; }
   .note li b { color: #E4E6EA; }
+  .note code { font-family: var(--num); font-size: 12px; color: #D7DCE5; background: #1A1C21; padding: 1px 5px; border-radius: 4px; }
 
   /* ===== Panel ===== */
   .lcd { position: absolute; left: 0; top: 0; width: 960px; background: var(--bg); transform-origin: 0 0; overflow: hidden; }
@@ -97,8 +98,9 @@
   .tbt-txt .road b { font-family: var(--num); color: var(--txt); font-weight: 600; margin-left: 4px; }
   .tbt.idle .tbt-txt .road { margin-top: 0; font-size: 11px; }
   /* telltales right next to the speed: always shown, dim grey when off, coloured when on */
-  .tt { display: flex; gap: 6px; margin-top: var(--tt-top, 6px); margin-left: 2px; }
+  .tt { display: flex; gap: var(--tt-gap, 6px); margin-top: var(--tt-top, 6px); margin-left: 2px; }
   .tt i { display: inline-flex; width: var(--tt-sz, 20px); height: var(--tt-sz, 20px); filter: grayscale(1) brightness(0.55); opacity: 0.55; }
+  .tt i[hidden] { display: none; }
   .tt i.on { filter: none; opacity: 1; }
   .tt svg { width: 100%; height: 100%; }
   .ap .wheel { display: inline-flex; width: 20px; height: 20px; transform-origin: 50% 50%; will-change: transform; }
@@ -116,32 +118,44 @@
   .vbot { position: absolute; left: 14px; right: 14px; bottom: 9px; display: flex; justify-content: space-between; font-size: 9.5px; color: var(--txt3); }
   .vbot b { font-family: var(--num); color: var(--txt2); font-weight: 600; }
 
-  /* --- Battery card --- */
+  /* --- Battery / ICE Powertrain card --- */
   .bat { padding: 12px 14px; display: flex; flex-direction: column; }
-  .bat-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .pt-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .pt-body[hidden] { display: none; }
+  .bat-head { display: flex; justify-content: space-between; align-items: baseline; white-space: nowrap; }
   .bat-main { display: flex; justify-content: space-between; align-items: flex-end; margin-top: 2px; }
+  .soc { white-space: nowrap; }
   .soc .num { font-size: var(--soc-fs); font-weight: 600; line-height: 1; }
   .soc .u { font: 500 15px var(--num); color: var(--txt2); margin-left: 1px; }
-  .range { text-align: right; line-height: 1; }
+  .range { text-align: right; line-height: 1; white-space: nowrap; }
   .range .num { font-size: var(--rng-fs); font-weight: 600; }
   .range .u { font: 500 12px var(--num); color: var(--txt2); margin-left: 2px; }
   .range .eff { display: block; font: 500 10px var(--num); color: var(--txt2); margin-top: 4px; }
   .pillbar { position: relative; height: var(--pill-h); border-radius: 99px; background: var(--track); margin-top: 8px; overflow: hidden; flex: none; }
   .pillbar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 99px; background: var(--txt); }
   .pillbar.low i { background: var(--amber); }
+  .pillbar.crit i { background: var(--red); }
   .pillbar .tick { position: absolute; top: 2px; bottom: 2px; width: 1.5px; background: #00000066; }
   .kv { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: var(--kv-gap); }
-  .kv div { background: var(--card-hi); border-radius: 9px; padding: 5px 8px 6px; }
-  .kv .lbl { display: block; font-size: 9.5px; }
+  .kv.ice-r1 { grid-template-columns: 1.24fr 0.92fr 0.84fr; }
+  .kv.ice-r2 { grid-template-columns: 0.92fr 0.84fr 1.24fr; }
+  .kv div { background: var(--card-hi); border-radius: 9px; padding: 5px 7px 6px; min-width: 0; white-space: nowrap; overflow: hidden; }
+  .kv .lbl { display: block; font-size: 9.5px; margin-bottom: 1px; }
   .kv .num { font-size: var(--kv-fs); font-weight: 600; line-height: 1.15; }
-  .kv .u { font: 500 10px var(--num); color: var(--txt2); margin-left: 1px; }
+  .kv .num.sm { font-size: var(--kv-sm-fs); }
+  .kv .num.dim { color: var(--txt3); }
+  .kv .u { font: 500 var(--kv-u-fs, 10px) var(--num); color: var(--txt2); margin-left: 1.5px; }
   .kv.cells { margin-top: 8px; }
   .pwr { margin-top: auto; }
-  .pwr-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .pwr[hidden] { display: none; }
+  .pwr-head { display: flex; justify-content: space-between; align-items: baseline; white-space: nowrap; }
   .pwr-head .num { font-size: 13px; font-weight: 600; }
   .pwr-bar { position: relative; height: 5px; border-radius: 3px; background: var(--track); margin-top: 5px; }
   .pwr-bar i { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
   .pwr-bar .zero { position: absolute; top: -3px; bottom: -3px; width: 2px; border-radius: 1px; background: #C9CBD1; }
+  .rpm-bar { position: relative; height: 6px; border-radius: 3px; background: var(--track); margin-top: 5px; overflow: hidden; }
+  .rpm-bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--txt); }
+  .rpm-bar .rtick { position: absolute; top: 1px; bottom: 1px; width: 1.5px; background: #00000073; }
 
   /* --- Tyres card --- */
   .tyre { display: grid; align-items: center; justify-items: center; }
@@ -154,12 +168,13 @@
   .tyre-grid .u { display: block; font: 500 8.5px var(--num); color: var(--txt3); margin-top: 2px; }
 
   /* --- Media card --- */
-  .media { padding: var(--md-pad); display: flex; flex-direction: column; }
-  .md-top { display: flex; gap: 12px; min-width: 0; }
-  .media[data-layout="stack"] .md-top { flex-direction: column; gap: 12px; }
+  .media { padding: var(--md-pad); display: flex; flex-direction: row; gap: 12px; }
+  .media[data-layout="stack"] { flex-direction: column; gap: 12px; }
   .art { flex: none; width: var(--art); height: var(--art); border-radius: 8px; background: linear-gradient(135deg, #5A3E8C 0%, #2B5DA8 55%, #1C8C80 100%); position: relative; overflow: hidden; }
   .art::after { content: "♪"; position: absolute; inset: 0; display: grid; place-items: center; color: #ffffffd0; font-size: calc(var(--art) * 0.38); }
+  .md-body { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
   .md-txt { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 3px; }
+  .media[data-layout="row"] .md-txt { flex: 1; }
   .md-src { font-size: 9.5px; color: var(--txt3); font-weight: 500; }
   .md-title { font-family: var(--num); font-weight: 600; font-size: var(--mt-fs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .md-artist { font-size: var(--ma-fs); color: var(--txt2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -217,7 +232,13 @@
 </head>
 <body>
   <div class="toolbar" role="toolbar" aria-label="시안 보기 설정">
-    <h1>TURZX HUD · 테슬라 스타일<small>v4 · 9.2" 1920×462 / 12.3" 1920×720</small></h1>
+    <h1>TURZX HUD · 테슬라 스타일<small>v4.1 · 9.2" 1920×462 / 12.3" 1920×720</small></h1>
+    <div class="ctl">차종
+      <div class="seg" id="segPt"><button data-v="ev" class="on">전기차 (EV)</button><button data-v="ice">내연차 (ICE)</button></div>
+    </div>
+    <div class="ctl" id="ctlRpmSig">RPM 신호
+      <div class="seg" id="segRpmSig"><button data-v="ok" class="on">정상</button><button data-v="off">미수신 (--)</button></div>
+    </div>
     <div class="ctl">패널
       <div class="seg" id="segModel"><button data-v="both" class="on">둘 다</button><button data-v="92">9.2"</button><button data-v="123">12.3"</button></div>
     </div>
@@ -226,6 +247,9 @@
     </div>
     <div class="ctl">램프
       <div class="seg" id="segLamp"><button data-v="scene" class="on">장면값</button><button data-v="off">끔</button><button data-v="head">전조등</button><button data-v="high">상향등</button><button data-v="brake">제동등</button><button data-v="both">둘 다</button></div>
+    </div>
+    <div class="ctl" id="ctlMil">엔진경고
+      <div class="seg" id="segMil"><button data-v="scene" class="on">장면값</button><button data-v="off">정상</button><button data-v="on">MIL 점등</button></div>
     </div>
     <div class="ctl">문(주차)
       <div class="seg" id="segDoor"><button data-v="scene" class="on">장면값</button><button data-v="closed">모두 닫힘</button><button data-v="driver">운전석</button><button data-v="rear">뒷문·트렁크</button><button data-v="all">전부</button></div>
@@ -245,10 +269,10 @@
       <figcaption><b>TURZX 12.3"</b> 1920×720 px · 960×360 dp</figcaption></figure>
 
     <section class="notes" aria-label="디자인 노트">
-      <div class="note"><h3>이번 수정</h3><ul>
-        <li><b>TBT를 주행 화면 안으로</b> — 회전 안내를 시각화 오른쪽 위 카드로. 제한속도 · 크루즈는 테슬라처럼 속도 바로 아래.</li>
-        <li><b>공조 하단 바</b> — 온도 숫자 색으로 난방(주황)/냉방(파랑), 옆에 상태 태그. 앉은 사람 아이콘의 화살표로 바람 방향(상체 · 발), 풍량은 숫자 + 막대.</li>
-        <li>설정온도 옆 <b>AUTO</b>는 항상 표시: 자동 = 파랑, 수동/꺼짐 = 흐리게(냉방/난방은 온도 숫자 색으로). 기능 칩: <b>A/C</b>는 글자, <b>HEAT(온도계) · 앞유리 · 뒷유리 · 내기</b>는 심벌. 켜짐 = 색 채움, 꺼짐 = 흐리게. 조절처럼 보이는 ‹ › 는 제거.</li>
+      <div class="note"><h3>이번 수정 (v1.5.13)</h3><ul>
+        <li><b>9.2" 미디어 카드 확장</b> — 앨범아트가 카드 내부 최대 높이(<code>157×157 dp</code>)에 맞도록 미디어 카드(<code>332 dp</code>)를 넓히고 주행 카드를 <code>360 dp</code>로 조정.</li>
+        <li><b>내연차(ICE) 자동 대응</b> — 유종 구분 없이 <b>연료 · 주행가능 · 순간연비 · 냉각수 · 12V · 엔진 회전(0~7,000 rpm)</b> 표시(12.3"는 주행시간 · 공회전 · 누적거리 추가) 및 속도 옆 <code>MIL</code> 경고등 지원.</li>
+        <li><b>TBT · 공조 하단 바</b> — 회전 안내를 시각화 오른쪽 위 카드로, 설정온도 색 + 상태 칩(<code>A/C · HEAT · 앞유리 · 뒷유리 · 내기</code>)과 <code>AUTO</code> 배지를 유지.</li>
       </ul></div>
       <div class="note"><h3>유지한 것</h3><ul>
         <li>배터리 카드: 표시 SOC · 주행가능 · <b>BMS · SOH</b> · 온도 · 전력(회생 초록).</li>
@@ -274,10 +298,12 @@
 (() => {
   "use strict";
 
-  // Sample telemetry (fields that exist in /status.json: soc, bmsSoc, soh, dteKm, climate.blowerMode, ...)
+  // Sample telemetry (fields that exist in /status.json: soc, bmsSoc, soh, dteKm, ice.*, climate.blowerMode, ...)
   const SCENES = {
     drive: {
       soc: 74.5, bmsSoc: 71.8, soh: 98.1, dte: 342, eff: 5.6, remainKwh: 30.3, kw: 18.4, batT: 24.0, cellMax: 4.02, cellMin: 4.00, cellDiff: 20,
+      fuelPct: 68, iceDte: 485, avgKmL: 14.2, instKmL: 16.8, tripKm: 18.4,
+      coolantC: 90, volt12: 14.1, rpm: 1950, runMin: 34, idleMin: 6, odoKm: 80690, mil: false,
       tpms: [38, 38, 39, 39], gear: "D", speed: 78, cruise: 80,
       tbt: { dist: "280", unit: "m", road: "판교JC", next: "+450m", turn: "right" },
       sdi: { mode: "section", limit: 80, dist: "2.3 km", avg: 80, road: 100 },
@@ -292,6 +318,8 @@
     },
     regen: {
       soc: 61.2, bmsSoc: 58.4, soh: 98.1, dte: 268, eff: 6.4, remainKwh: 24.9, kw: -32.5, batT: 27.0, cellMax: 3.92, cellMin: 3.89, cellDiff: 30,
+      fuelPct: 54, iceDte: 380, avgKmL: 13.6, instKmL: 24.5, tripKm: 42.1,
+      coolantC: 92, volt12: 14.3, rpm: 2450, runMin: 58, idleMin: 9, odoKm: 80714, mil: false,
       tpms: [38, 38, 39, 39], gear: "D", speed: 64, cruise: 0,
       tbt: { dist: "1.2", unit: "km", road: "분당수서로", next: "+3.4km", turn: "left" },
       sdi: { mode: "traffic", limit: 60, dist: "340 m", avg: 0, road: 70 },
@@ -305,6 +333,8 @@
     },
     park: {
       soc: 14.2, bmsSoc: 12.0, soh: 97.9, dte: 52, eff: 5.1, remainKwh: 5.8, kw: 0.8, batT: 31.0, cellMax: 3.55, cellMin: 3.51, cellDiff: 40,
+      fuelPct: 11, iceDte: 62, avgKmL: 12.8, instKmL: -1, tripKm: 112.6,
+      coolantC: 88, volt12: 11.9, rpm: 760, runMin: 95, idleMin: 18, odoKm: 80784, mil: true,
       tpms: [38, 37, 38, 28], gear: "P", speed: 0, cruise: 0,
       tbt: { dist: "", unit: "", road: "목적지를 설정하세요", next: "", turn: "none" },
       sdi: { mode: "none", limit: 0, dist: "", avg: 0, road: 50 },
@@ -320,6 +350,8 @@
     },
     reverse: {
       soc: 63.0, bmsSoc: 60.1, soh: 98.1, dte: 281, eff: 6.0, remainKwh: 25.6, kw: 2.1, batT: 26.0, cellMax: 3.94, cellMin: 3.92, cellDiff: 20,
+      fuelPct: 42, iceDte: 227, avgKmL: 0, instKmL: -1, tripKm: 0.2,
+      coolantC: 39, volt12: 14.1, rpm: 1220, runMin: 2, idleMin: 1, odoKm: 80690, mil: false,
       tpms: [38, 38, 39, 39], gear: "R", speed: 3, cruise: 0,
       tbt: { dist: "", unit: "", road: "목적지를 설정하세요", next: "", turn: "none" },
       sdi: { mode: "none", limit: 0, dist: "", avg: 0, road: 30 },
@@ -338,13 +370,13 @@
   const GEO = {
     "92": {
       h: 231,
-      viz: [8, 8, 436, 181], bat: [452, 8, 236, 181], media: [696, 8, 256, 181], cells: false,
+      viz: [8, 8, 360, 181], bat: [376, 8, 236, 181], media: [620, 8, 332, 181], cells: false,
       mediaLayout: "row", bar: { y: 193, h: 34 },
-      vars: { "--tt-sz": "19px", "--tt-top": "5px", "--spd-fs": "50px", "--vleft-gap": "7px", "--lim-d": "30px", "--lim-fs": "12.5px",
-              "--tbt-pad": "6px 10px 6px 8px", "--tbt-max": "170px", "--turn-sz": "26px", "--nav-fs": "20px",
-              "--soc-fs": "36px", "--rng-fs": "21px", "--pill-h": "9px", "--kv-fs": "15px", "--kv-gap": "8px",
+      vars: { "--tt-sz": "16px", "--tt-top": "5px", "--tt-gap": "3.5px", "--spd-fs": "46px", "--vleft-gap": "7px", "--lim-d": "30px", "--lim-fs": "12.5px",
+              "--tbt-pad": "6px 10px 6px 8px", "--tbt-max": "148px", "--turn-sz": "24px", "--nav-fs": "19px",
+              "--soc-fs": "36px", "--rng-fs": "21px", "--pill-h": "9px", "--kv-fs": "14.5px", "--kv-sm-fs": "13px", "--kv-u-fs": "9px", "--kv-gap": "8px",
               "--tp-fs": "12.5px", "--tp-car-w": "13px", "--tp-car-h": "29px",
-              "--md-pad": "12px", "--art": "100px", "--mt-fs": "15px", "--ma-fs": "11px",
+              "--md-pad": "12px", "--art": "157px", "--mt-fs": "16px", "--ma-fs": "11.5px",
               "--bar-gap": "12px", "--temp-fs": "21px", "--st-fs": "9.5px", "--seat-sz": "28px", "--bars-h": "13px",
               "--chip-h": "26px", "--chip-gap": "6px", "--chip-fs": "11.5px", "--chip-ic": "19px" }
     },
@@ -352,9 +384,9 @@
       h: 360,
       viz: [8, 8, 432, 288], bat: [448, 8, 240, 288], media: [696, 8, 256, 288], cells: true,
       mediaLayout: "stack", bar: { y: 302, h: 52 },
-      vars: { "--tt-sz": "23px", "--tt-top": "7px", "--spd-fs": "62px", "--vleft-gap": "10px", "--lim-d": "38px", "--lim-fs": "15px",
+      vars: { "--tt-sz": "22px", "--tt-top": "7px", "--tt-gap": "5px", "--spd-fs": "62px", "--vleft-gap": "10px", "--lim-d": "38px", "--lim-fs": "15px",
               "--tbt-pad": "9px 14px 9px 11px", "--tbt-max": "200px", "--turn-sz": "36px", "--nav-fs": "26px",
-              "--soc-fs": "42px", "--rng-fs": "24px", "--pill-h": "11px", "--kv-fs": "17px", "--kv-gap": "10px",
+              "--soc-fs": "42px", "--rng-fs": "24px", "--pill-h": "11px", "--kv-fs": "16px", "--kv-sm-fs": "13.5px", "--kv-u-fs": "9.5px", "--kv-gap": "10px",
               "--tp-fs": "15px", "--tp-car-w": "17px", "--tp-car-h": "38px",
               "--md-pad": "16px", "--art": "150px", "--mt-fs": "20px", "--ma-fs": "13px",
               "--bar-gap": "16px", "--temp-fs": "28px", "--st-fs": "11px", "--seat-sz": "38px", "--bars-h": "17px",
@@ -366,6 +398,7 @@
     lowBeam: '<svg viewBox="0 0 32 32" fill="none" stroke="#3DDC84" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M17 7c6 0 11 4 11 9s-5 9-11 9c-1.6 0-2.4-4-2.4-9S15.4 7 17 7z"/><path d="M11 10.5l-7 2.2M11 15l-7 2.2M11 19.5l-7 2.2"/></svg>',
     highBeam: '<svg viewBox="0 0 32 32" fill="none" stroke="#4C8DFF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M17 7c6 0 11 4 11 9s-5 9-11 9c-1.6 0-2.4-4-2.4-9S15.4 7 17 7z"/><path d="M11 10.5H4M11 14.5H4M11 18.5H4M11 22.5H4"/></svg>',
     pbrake: '<svg viewBox="0 0 32 32" fill="none" stroke="#FF4D4D" stroke-width="2.3" stroke-linecap="round"><circle cx="16" cy="16" r="8.6"/><path d="M6.2 9.2a12 12 0 0 0 0 13.6M25.8 9.2a12 12 0 0 1 0 13.6"/><path d="M13.6 20.5v-9h3.4a2.6 2.6 0 0 1 0 5.2h-3.4" stroke-linejoin="round"/></svg>',
+    mil: '<svg viewBox="0 0 32 32" fill="none" stroke="#F5A623" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 8.5h8M15 8.5V12"/><path d="M4.5 14v8M4.5 18H8"/><path d="M8 13.5l2.5-1.5h7.5l2 2.5h4.2l1.8 2v4.5l-1.8 2H20l-2 2H10.5l-2.5-2z"/><path d="M27.5 15.5v6"/></svg>',
     wheel: (on) => `<svg viewBox="0 0 24 24" fill="none" stroke="${on ? "#6E95FF" : "#5A5D64"}" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.2"/><path d="M3.5 10.5h6.3M14.2 10.5h6.3M12 14.2V21"/></svg>`,
     right: '<svg viewBox="0 0 32 32" fill="none" stroke="#F5F5F7" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 28V17a5 5 0 0 1 5-5h11"/><path d="M21 6l6 6-6 6"/></svg>',
     left: '<svg viewBox="0 0 32 32" fill="none" stroke="#F5F5F7" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 28V17a5 5 0 0 0-5-5H6"/><path d="M11 6l-6 6 6 6"/></svg>',
@@ -411,7 +444,7 @@
           <div class="vspeed">
             <div class="prnd" data-k="prnd"><span>P</span><span>R</span><span>N</span><span>D</span></div>
             <div class="speed"><span class="num" data-k="speed"></span><span class="u">km/h</span></div>
-            <div class="tt" aria-label="경고등"><i data-k="ttHead" title="전조등">${ICON.lowBeam}</i><i data-k="ttHigh" title="상향등">${ICON.highBeam}</i><i data-k="ttPbrake" title="주차 브레이크">${ICON.pbrake}</i></div>
+            <div class="tt" aria-label="경고등"><i data-k="ttHead" title="전조등">${ICON.lowBeam}</i><i data-k="ttHigh" title="상향등">${ICON.highBeam}</i><i data-k="ttPbrake" title="주차 브레이크">${ICON.pbrake}</i><i data-k="ttMil" title="엔진 경고등(MIL)">${ICON.mil}</i></div>
           </div>
           <div class="limits">
             <div class="limit" data-k="limBox"><span class="num" data-k="limit"></span></div>
@@ -433,40 +466,70 @@
       </div>
 
       <div class="card bat" style="${box(g.bat)}">
-        <div class="bat-head"><span class="lbl">배터리 <span style="color:var(--txt3)" data-k="remain"></span></span><span class="lbl">주행가능</span></div>
-        <div class="bat-main">
-          <div class="soc"><span class="num" data-k="soc"></span><span class="u">%</span></div>
-          <div class="range"><span class="num" data-k="dte"></span><span class="u">km</span><span class="eff" data-k="eff"></span></div>
+        <div class="pt-body" data-pt="ev">
+          <div class="bat-head"><span class="lbl">배터리 <span style="color:var(--txt3)" data-k="remain"></span></span><span class="lbl">주행가능</span></div>
+          <div class="bat-main">
+            <div class="soc"><span class="num" data-k="soc"></span><span class="u">%</span></div>
+            <div class="range"><span class="num" data-k="dte"></span><span class="u">km</span><span class="eff" data-k="eff"></span></div>
+          </div>
+          <div class="pillbar" data-k="pill"><i data-k="pillFill"></i><span class="tick" style="left:20%"></span><span class="tick" style="left:80%"></span></div>
+          <div class="kv">
+            <div><span class="lbl">BMS</span><span class="num" data-k="bms"></span><span class="u">%</span></div>
+            <div><span class="lbl">SOH</span><span class="num" data-k="soh"></span><span class="u">%</span></div>
+            <div><span class="lbl">온도</span><span class="num" data-k="batT"></span><span class="u">°C</span></div>
+          </div>
+          ${g.cells ? `<div class="kv cells">
+            <div><span class="lbl">셀 최고</span><span class="num" data-k="cellMax"></span><span class="u">V</span></div>
+            <div><span class="lbl">셀 최저</span><span class="num" data-k="cellMin"></span><span class="u">V</span></div>
+            <div><span class="lbl">셀 편차</span><span class="num" data-k="cellDiff"></span><span class="u">mV</span></div>
+          </div>` : ""}
+          <div class="pwr">
+            <div class="pwr-head"><span class="lbl" data-k="pwrLbl"></span><span><span class="num" data-k="kw"></span><span class="lbl"> kW</span></span></div>
+            <div class="pwr-bar"><i data-k="pwrFill"></i><span class="zero" style="left:28%"></span></div>
+          </div>
         </div>
-        <div class="pillbar" data-k="pill"><i data-k="pillFill"></i><span class="tick" style="left:20%"></span><span class="tick" style="left:80%"></span></div>
-        <div class="kv">
-          <div><span class="lbl">BMS</span><span class="num" data-k="bms"></span><span class="u">%</span></div>
-          <div><span class="lbl">SOH</span><span class="num" data-k="soh"></span><span class="u">%</span></div>
-          <div><span class="lbl">온도</span><span class="num" data-k="batT"></span><span class="u">°C</span></div>
-        </div>
-        ${g.cells ? `<div class="kv cells">
-          <div><span class="lbl">셀 최고</span><span class="num" data-k="cellMax"></span><span class="u">V</span></div>
-          <div><span class="lbl">셀 최저</span><span class="num" data-k="cellMin"></span><span class="u">V</span></div>
-          <div><span class="lbl">셀 편차</span><span class="num" data-k="cellDiff"></span><span class="u">mV</span></div>
-        </div>` : ""}
-        <div class="pwr">
-          <div class="pwr-head"><span class="lbl" data-k="pwrLbl"></span><span><span class="num" data-k="kw"></span><span class="lbl"> kW</span></span></div>
-          <div class="pwr-bar"><i data-k="pwrFill"></i><span class="zero" style="left:28%"></span></div>
+
+        <div class="pt-body" data-pt="ice" hidden>
+          <div class="bat-head"><span class="lbl">연료 <span style="color:var(--txt3)" data-k="tripKm"></span></span><span class="lbl">주행가능</span></div>
+          <div class="bat-main">
+            <div class="soc"><span class="num" data-k="fuelPct"></span><span class="u">%</span></div>
+            <div class="range"><span class="num" data-k="iceDte"></span><span class="u">km</span><span class="eff" data-k="avgKmL"></span></div>
+          </div>
+          <div class="pillbar" data-k="fuelPill"><i data-k="fuelFill"></i><span class="tick" style="left:25%"></span><span class="tick" style="left:50%"></span><span class="tick" style="left:75%"></span></div>
+          <div class="kv ice-r1">
+            <div><span class="lbl">순간연비</span><span class="num" data-k="instKmL"></span><span class="u">km/L</span></div>
+            <div><span class="lbl">냉각수</span><span class="num" data-k="coolant"></span><span class="u">°C</span></div>
+            <div><span class="lbl">12V</span><span class="num" data-k="volt12"></span><span class="u">V</span></div>
+          </div>
+          ${g.cells ? `<div class="kv cells ice-r2">
+            <div><span class="lbl">주행시간</span><span class="num" data-k="runTime"></span><span class="u">분</span></div>
+            <div><span class="lbl">공회전</span><span class="num" data-k="idleTime"></span><span class="u">분</span></div>
+            <div><span class="lbl">누적거리</span><span class="num sm" data-k="odoKm"></span><span class="u">km</span></div>
+          </div>` : ""}
+          <div class="pwr" data-k="rpmBox">
+            <div class="pwr-head"><span class="lbl" data-k="rpmLbl">엔진 회전</span><span><span class="num" data-k="rpm"></span><span class="lbl"> rpm</span></span></div>
+            <div class="rpm-bar">
+              <i data-k="rpmFill"></i>
+              <span class="rtick" style="left:14.29%"></span><span class="rtick" style="left:28.57%"></span>
+              <span class="rtick" style="left:42.86%"></span><span class="rtick" style="left:57.14%"></span>
+              <span class="rtick" style="left:71.43%"></span><span class="rtick" style="left:85.71%"></span>
+            </div>
+          </div>
         </div>
       </div>
 
       <div class="card media" data-layout="${g.mediaLayout}" style="${box(g.media)}">
-        <div class="md-top">
-          <div class="art"></div>
+        <div class="art"></div>
+        <div class="md-body">
           <div class="md-txt">
             <span class="md-src" data-k="src"></span>
             <span class="md-title" data-k="title"></span>
             <span class="md-artist" data-k="artist"></span>
           </div>
-        </div>
-        <div class="md-bottom">
-          <div class="md-prog"><i data-k="prog"></i></div>
-          <div class="md-row"><span data-k="pos"></span><span data-k="dur"></span></div>
+          <div class="md-bottom">
+            <div class="md-prog"><i data-k="prog"></i></div>
+            <div class="md-row"><span data-k="pos"></span><span data-k="dur"></span></div>
+          </div>
         </div>
       </div>
 
@@ -485,10 +548,22 @@
   }
 
   const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  const fmtDur = (min) => min >= 60 ? [`${Math.floor(min / 60)}:${String(min % 60).padStart(2, "0")}`, ""] : [String(min), "분"];
+
+  let ptMode = "ev";      // "ev" | "ice"
+  let rpmSigMode = "ok";  // "ok" | "off"
+  let milMode = "scene";  // "scene" | "off" | "on"
+
+  function milOf(s) {
+    if (milMode === "on") return true;
+    if (milMode === "off") return false;
+    return !!s.mil;
+  }
 
   function render(lcd, s) {
     const $ = (k) => lcd.querySelector(`[data-k="${k}"]`);
     const set = (k, v) => { const el = $(k); if (el) el.textContent = v; };
+    const isIce = ptMode === "ice";
 
     // Visualisation overlays: speed, limits, turn-by-turn
     Array.from($("prnd").children).forEach((el) => el.classList.toggle("on", el.textContent === s.gear));
@@ -500,6 +575,8 @@
     $("ttHead").classList.toggle("on", !!TL.head);
     $("ttHigh").classList.toggle("on", !!TL.high);
     $("ttPbrake").classList.toggle("on", !!s.pbrake);
+    $("ttMil").hidden = !isIce;
+    $("ttMil").classList.toggle("on", isIce && milOf(s));
     $("limBox").style.display = shownLimit > 0 ? "grid" : "none";
     $("limBox").classList.toggle("road", !camera);
     set("limit", shownLimit);
@@ -523,32 +600,86 @@
     lcd.querySelector(".vbot").style.display = parked ? "none" : "";
     lcd.querySelector(".vtpms").classList.toggle("top", parked && !s.tbt.dist);
 
-    // Battery
-    set("soc", s.soc.toFixed(1));
-    $("soc").style.color = s.soc < 20 ? "var(--amber)" : "";
-    set("dte", s.dte);
-    set("eff", `${s.eff.toFixed(1)} km/kWh`);
-    set("remain", `· 잔여 ${s.remainKwh.toFixed(1)} kWh`);
-    $("pill").classList.toggle("low", s.soc < 20);
-    $("pillFill").style.width = s.soc + "%";
-    set("bms", s.bmsSoc.toFixed(1));
-    set("soh", s.soh.toFixed(1));
-    set("batT", s.batT.toFixed(1));
-    set("cellMax", s.cellMax.toFixed(2));
-    set("cellMin", s.cellMin.toFixed(2));
-    set("cellDiff", s.cellDiff);
-    const kw = s.kw;
-    set("kw", (kw > 0 ? "+" : kw < 0 ? "−" : "") + Math.abs(kw).toFixed(1));
-    $("kw").style.color = kw < -0.05 ? "var(--green)" : "";
-    set("pwrLbl", kw < -0.05 ? "회생 제동" : (kw > 0.05 ? "출력" : "대기"));
-    const zero = 28; // % position of 0 kW: regen 0..-60 left, power 0..+150 right
-    const f = $("pwrFill");
-    if (kw >= 0) {
-      const w = Math.min(1, kw / 150) * (100 - zero);
-      f.style.left = zero + "%"; f.style.width = w + "%"; f.style.background = "var(--txt)";
+    lcd.querySelector('[data-pt="ev"]').hidden = isIce;
+    lcd.querySelector('[data-pt="ice"]').hidden = !isIce;
+
+    if (!isIce) {
+      // Battery
+      set("soc", s.soc.toFixed(1));
+      $("soc").style.color = s.soc < 20 ? "var(--amber)" : "";
+      set("dte", s.dte);
+      set("eff", `${s.eff.toFixed(1)} km/kWh`);
+      set("remain", `· 잔여 ${s.remainKwh.toFixed(1)} kWh`);
+      $("pill").classList.toggle("low", s.soc < 20);
+      $("pillFill").style.width = s.soc + "%";
+      set("bms", s.bmsSoc.toFixed(1));
+      set("soh", s.soh.toFixed(1));
+      set("batT", s.batT.toFixed(1));
+      set("cellMax", s.cellMax.toFixed(2));
+      set("cellMin", s.cellMin.toFixed(2));
+      set("cellDiff", s.cellDiff);
+      const kw = s.kw;
+      set("kw", (kw > 0 ? "+" : kw < 0 ? "−" : "") + Math.abs(kw).toFixed(1));
+      $("kw").style.color = kw < -0.05 ? "var(--green)" : "";
+      set("pwrLbl", kw < -0.05 ? "회생 제동" : (kw > 0.05 ? "출력" : "대기"));
+      const zero = 28; // % position of 0 kW: regen 0..-60 left, power 0..+150 right
+      const f = $("pwrFill");
+      if (kw >= 0) {
+        const w = Math.min(1, kw / 150) * (100 - zero);
+        f.style.left = zero + "%"; f.style.width = w + "%"; f.style.background = "var(--txt)";
+      } else {
+        const w = Math.min(1, -kw / 60) * zero;
+        f.style.left = (zero - w) + "%"; f.style.width = w + "%"; f.style.background = "var(--green)";
+      }
     } else {
-      const w = Math.min(1, -kw / 60) * zero;
-      f.style.left = (zero - w) + "%"; f.style.width = w + "%"; f.style.background = "var(--green)";
+      // ICE Fuel & Engine
+      const fp = Math.max(0, Math.min(100, s.fuelPct));
+      set("fuelPct", Math.round(fp));
+      $("fuelPct").style.color = fp <= 8 ? "var(--red)" : (fp <= 15 ? "var(--amber)" : "");
+      set("iceDte", s.iceDte);
+      set("avgKmL", s.avgKmL > 0 ? `${s.avgKmL.toFixed(1)} km/L` : "-- km/L");
+      set("tripKm", `· 트립 ${s.tripKm.toFixed(1)} km`);
+      const fuelPill = $("fuelPill");
+      fuelPill.classList.toggle("low", fp <= 15 && fp > 8);
+      fuelPill.classList.toggle("crit", fp <= 8);
+      $("fuelFill").style.width = fp + "%";
+
+      const instEl = $("instKmL");
+      if (s.instKmL > 0) {
+        instEl.textContent = s.instKmL.toFixed(1);
+        instEl.className = "num";
+      } else {
+        instEl.textContent = "--";
+        instEl.className = "num dim";
+      }
+      set("coolant", Math.round(s.coolantC));
+      $("coolant").style.color = s.coolantC < 60 ? "var(--cool)" : (s.coolantC >= 105 ? "var(--red)" : "");
+      set("volt12", s.volt12.toFixed(1));
+      $("volt12").style.color = s.volt12 < 12.0 ? "var(--amber)" : "";
+
+      const rtEl = $("runTime");
+      if (rtEl) {
+        const [rv, ru] = fmtDur(s.runMin);
+        rtEl.textContent = rv; rtEl.nextElementSibling.textContent = ru;
+        const itEl = $("idleTime");
+        const [iv, iu] = fmtDur(s.idleMin);
+        itEl.textContent = iv; itEl.nextElementSibling.textContent = iu;
+        set("odoKm", Math.round(s.odoKm).toLocaleString("en-US"));
+      }
+
+      const rpmLbl = $("rpmLbl"), rpmEl = $("rpm"), rpmFill = $("rpmFill");
+      if (rpmSigMode === "off" || !(s.rpm >= 0)) {
+        rpmLbl.textContent = "엔진 회전";
+        rpmEl.textContent = "--";
+        rpmEl.style.color = "var(--txt3)";
+        rpmFill.style.width = "0%";
+      } else {
+        const rpm = Math.round(s.rpm);
+        rpmLbl.textContent = (s.speed === 0 && rpm > 0) ? "공회전" : "엔진 회전";
+        rpmEl.textContent = rpm.toLocaleString("en-US");
+        rpmEl.style.color = "";
+        rpmFill.style.width = Math.min(100, (rpm / 7000) * 100) + "%";
+      }
     }
 
     // Tyres
@@ -966,8 +1097,9 @@
   function drawParked(ctx, W, H, s) {
     const L = lampsOf(s || {});
     const D = doorsOf(s || {});
-    const ppm = Math.min(W * 0.115, H * 0.24);           // screen px per metre
-    const cx = W * 0.55, cy = H * 0.54;                    // car centre; front points right
+    const wide = W / H > 1.75;
+    const ppm = wide ? Math.min(W * 0.098, H * 0.215) : Math.min(W * 0.115, H * 0.24);
+    const cx = W * (wide ? 0.535 : 0.55), cy = H * (wide ? 0.60 : 0.54);
     const X = (z) => cx + z * ppm, Y = (x) => cy + x * ppm;
 
     // floor
@@ -1368,6 +1500,13 @@
   // ---------------------------------------------------------------------------
   const params = new URLSearchParams(location.search);
   const shot = params.get("shot");
+  if (params.get("pt") === "ev" || params.get("pt") === "ice") ptMode = params.get("pt");
+  if (params.get("rpm") === "ok" || params.get("rpm") === "off") rpmSigMode = params.get("rpm");
+  if (params.get("mil")) milMode = params.get("mil");
+  if (params.get("lamp")) lampMode = params.get("lamp");
+  if (params.get("pdw")) pdwMode = params.get("pdw");
+  if (params.get("door")) doorMode = params.get("door");
+
   const panels = {};
   ["92", "123"].forEach((m) => {
     const frame = document.getElementById("frame" + m);
@@ -1378,7 +1517,8 @@
   });
 
   let scene = params.get("scene") || "drive";
-  let animate = !shot;
+  if (!SCENES[scene]) scene = "drive";
+  let animate = !shot && params.get("anim") !== "off";
   let phase = 0;
   let last = performance.now();
   let live = JSON.parse(JSON.stringify(SCENES[scene]));
@@ -1391,9 +1531,10 @@
   // ---------------------------------------------------------------------------
   const CAP = params.get("cap");
   const TEXT_KEYS = ["speed", "cruise", "sect", "navDist", "navRoad", "navNext", "lane", "remain", "soc", "dte", "eff",
-    "bms", "soh", "batT", "cellMax", "cellMin", "cellDiff", "kw", "pwrLbl", "src", "title", "artist", "pos", "dur",
-    "dr", "fanNum", "inT", "outT", "limit"];
-  const RIGHT_KEYS = new Set(["dte", "eff", "kw", "dur"]);
+    "bms", "soh", "batT", "cellMax", "cellMin", "cellDiff", "kw", "pwrLbl", "tripKm", "fuelPct", "iceDte", "avgKmL",
+    "instKmL", "coolant", "volt12", "runTime", "idleTime", "odoKm", "rpm", "rpmLbl", "src", "title", "artist", "pos",
+    "dur", "dr", "fanNum", "inT", "outT", "limit"];
+  const RIGHT_KEYS = new Set(["dte", "eff", "kw", "iceDte", "avgKmL", "rpm", "dur"]);
   const CENTER_KEYS = new Set(["limit"]);
 
   /** A unit span on the same line right after a value ("%", "km", "°C"); block labels like "km/h" stay static. */
@@ -1404,7 +1545,7 @@
   function applyCapture(lcd, mode) {
     const hide = (el) => { if (el) el.style.visibility = "hidden"; };
     lcd.querySelector('[data-k="road"]').style.visibility = "hidden";
-    ["tbtBox", "limBox", "apBox", "sect", "prog", "pillFill", "pwrFill"].forEach((k) => hide(lcd.querySelector(`[data-k="${k}"]`)));
+    ["tbtBox", "limBox", "apBox", "sect", "prog", "pillFill", "pwrFill", "fuelFill", "rpmFill"].forEach((k) => hide(lcd.querySelector(`[data-k="${k}"]`)));
     hide(lcd.querySelector(".vtpms"));
     hide(lcd.querySelector(".vbot"));
     TEXT_KEYS.forEach((k) => {
@@ -1414,13 +1555,18 @@
       const u = el.nextElementSibling;
       if (isInlineUnit(u)) hide(u);
     });
-    // kW unit label sits in a separate span after the number
+    // kW / rpm unit labels sit in a separate span after the number
     lcd.querySelectorAll(".pwr-head .lbl").forEach((el) => { if (!el.dataset.k) hide(el); });
     const on = mode === "active";
     lcd.querySelectorAll(".prnd span").forEach((el) => el.classList.toggle("on", on));
     lcd.querySelectorAll(".chip").forEach((el) => el.classList.toggle("on", on));
     // telltales follow the live speed width on the device: keep them out of the static layer, all lit in the active one
-    lcd.querySelectorAll(".tt i").forEach((el) => { el.classList.toggle("on", on); el.style.visibility = on ? "" : "hidden"; });
+    lcd.querySelectorAll(".tt i").forEach((el) => {
+      if (!el.hidden) {
+        el.classList.toggle("on", on);
+        el.style.visibility = on ? "" : "hidden";
+      }
+    });
     const st = lcd.querySelector('[data-k="hstate"]');
     st.textContent = "AUTO";
     st.className = "state auto" + (on ? " on" : "");
@@ -1457,7 +1603,7 @@
     const out = ["# key\tx\tbaseline\tsizePx\tbold\tcolorARGB\talign\tmaxW\tunitText\tunitSize\tunitBold\tunitColor\tgapPx"];
     for (const k of TEXT_KEYS) {
       const el = lcd.querySelector(`[data-k="${k}"]`);
-      if (!el) continue;
+      if (!el || el.closest("[hidden]")) continue;
       const cs = getComputedStyle(el);
       const r = el.getBoundingClientRect();
       const align = RIGHT_KEYS.has(k) ? "R" : (CENTER_KEYS.has(k) ? "C" : "L");
@@ -1471,7 +1617,7 @@
           rgbaToHex(ucs.color), D(Math.max(0, ur.left - r.right))];
         right = ur.right;
       }
-      if (k === "kw") {
+      if (k === "kw" || k === "rpm") {
         const kl = el.parentElement.querySelector(".lbl");
         if (kl) {
           const kcs = getComputedStyle(kl);
@@ -1487,13 +1633,15 @@
         rgbaToHex(cs.color), align, maxW].concat(unit).join("\t"));
     }
     const rect = (name, el, extra) => {
-      if (!el) return;
+      if (!el || el.hidden || el.closest("[hidden]")) return;
       const r = el.getBoundingClientRect();
       out.push(["R:" + name, X(r.left), Y(r.top), D(r.width), D(r.height)].concat(extra || []).join("\t"));
     };
     rect("viz", lcd.querySelector(".viz"), [D(14)]);
     rect("pill", lcd.querySelector('[data-k="pill"]'));
+    rect("fuelPill", lcd.querySelector('[data-k="fuelPill"]'));
     rect("pwr", lcd.querySelector(".pwr-bar"));
+    rect("rpm", lcd.querySelector(".rpm-bar"));
     rect("prog", lcd.querySelector(".md-prog"));
     rect("art", lcd.querySelector(".art"), [D(8)]);
     rect("limit", lcd.querySelector('[data-k="limBox"]'));
@@ -1505,6 +1653,7 @@
     rect("ttHead", lcd.querySelector('[data-k="ttHead"]'));
     rect("ttHigh", lcd.querySelector('[data-k="ttHigh"]'));
     rect("ttPbrake", lcd.querySelector('[data-k="ttPbrake"]'));
+    rect("ttMil", lcd.querySelector('[data-k="ttMil"]'));
     rect("airFoot", lcd.querySelector('[data-k="airFoot"]'));
     lcd.querySelectorAll(".prnd span").forEach((el) => rect("prnd" + el.textContent, el));
     lcd.querySelectorAll(".chip").forEach((el) => rect("chip_" + el.dataset.mode, el));
@@ -1539,6 +1688,27 @@
     });
   }
   function setScene(v) { scene = v; live = JSON.parse(JSON.stringify(SCENES[scene])); draw(); }
+  function syncToolbarUi() {
+    const setSeg = (id, v) => {
+      const seg = document.getElementById(id);
+      if (!seg) return;
+      seg.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === v));
+    };
+    setSeg("segPt", ptMode);
+    setSeg("segRpmSig", rpmSigMode);
+    setSeg("segScene", scene);
+    setSeg("segLamp", lampMode);
+    setSeg("segMil", milMode);
+    setSeg("segDoor", doorMode);
+    setSeg("segPdw", pdwMode);
+    setSeg("segAnim", animate ? "on" : "off");
+    const isIce = ptMode === "ice";
+    document.getElementById("ctlRpmSig").hidden = !isIce;
+    document.getElementById("ctlMil").hidden = !isIce;
+    const scBtns = document.getElementById("segScene").querySelectorAll("button");
+    scBtns[1].textContent = isIce ? "감속·근접" : "회생·근접";
+    scBtns[2].textContent = isIce ? "정차·저연료" : "정차·경고";
+  }
   function tick(now) {
     const dt = Math.min(0.1, (now - last) / 1000);
     last = now;
@@ -1548,6 +1718,12 @@
       const t = now / 1000;
       if (base.speed > 0) live.speed = Math.round(base.speed + Math.sin(t * 0.6) * 2);
       live.kw = +(base.kw + Math.sin(t * 0.9) * Math.max(1.2, Math.abs(base.kw) * 0.12)).toFixed(1);
+      if (base.rpm > 0 && rpmSigMode === "ok") {
+        live.rpm = Math.round(base.rpm + Math.sin(t * 0.8) * (base.speed > 0 ? 140 : 25));
+      }
+      if (base.speed > 0 && base.instKmL > 0) {
+        live.instKmL = +(base.instKmL + Math.sin(t * 0.7) * 1.4).toFixed(1);
+      }
       if (base.lead > 0) live.lead = base.lead + Math.sin(t * 0.5) * 1.5;
       if (base.speed > 0) live.steer = base.steer + Math.sin(t * 0.7) * 35;
       if (live.media.playing && live.media.dur > 0) live.media.pos = (base.media.pos + t) % live.media.dur;
@@ -1564,6 +1740,8 @@
       fn(b.dataset.v);
     });
   }
+  bindSeg("segPt", (v) => { ptMode = v; syncToolbarUi(); draw(); });
+  bindSeg("segRpmSig", (v) => { rpmSigMode = v; draw(); });
   bindSeg("segModel", (v) => {
     document.getElementById("fig92").hidden = v === "123";
     document.getElementById("fig123").hidden = v === "92";
@@ -1572,16 +1750,15 @@
   bindSeg("segScene", setScene);
   bindSeg("segAnim", (v) => { animate = v === "on"; });
   bindSeg("segLamp", (v) => { lampMode = v; draw(); });
-  if (params.get("lamp")) lampMode = params.get("lamp");
+  bindSeg("segMil", (v) => { milMode = v; draw(); });
   bindSeg("segDoor", (v) => { doorMode = v; draw(); });
   bindSeg("segPdw", (v) => { pdwMode = v; draw(); });
-  if (params.get("pdw")) pdwMode = params.get("pdw");
-  if (params.get("door")) doorMode = params.get("door");
   if (shot) {
     document.body.classList.add("shot");
     document.getElementById("fig92").hidden = shot !== "92";
     document.getElementById("fig123").hidden = shot !== "123";
   }
+  syncToolbarUi();
   window.addEventListener("resize", fit);
   (document.fonts ? document.fonts.ready : Promise.resolve()).then(fit);
   fit();

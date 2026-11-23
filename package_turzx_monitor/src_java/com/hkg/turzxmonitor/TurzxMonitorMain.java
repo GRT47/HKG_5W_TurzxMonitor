@@ -73,7 +73,10 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.12";
+    public static final String MONITOR_VERSION = "1.5.13";
+    public static final int POWERTRAIN_AUTO = 0;
+    public static final int POWERTRAIN_EV = 1;
+    public static final int POWERTRAIN_ICE = 2;
     private static final Charset UTF8 = Charset.forName("UTF-8");
     public static final String RAMDISK_TMP_DIR = "/dev/hkg_tmp";
     static final String CMD_FILE_PATH = "/dev/hkg_tmp/hkg_turzxmonitor_cmd";
@@ -187,10 +190,10 @@ public class TurzxMonitorMain {
         public boolean usbPushEnabled = true;
         public int usbBrightness = 85;
         public int usbRotation = 270;     // 270 or 90 (1920x462 -> 462x1920 portrait scanout)
-        public int usbJpegQuality = 70;
-        public int usbFps = 12;
+        public int usbJpegQuality = 75;
+        public int usbFps = 15;
         // TURZX CMD 0x0F (frame rate) sent once on connect; 0 = never send (panel firmware default)
-        public int usbPanelFps = 0;
+        public int usbPanelFps = 15;
         // Linux key code that toggles the full-screen dashboard on a 3s long press; 0 = auto (MAP key from .kl)
         public int overlayHotkeyCode = 0;
         // Column 2 3D ADAS road (largest render cost); false = static background only
@@ -198,8 +201,9 @@ public class TurzxMonitorMain {
         public boolean usbIncrementalEncode = true; // v1.4.5: re-encode only changed MCU rows (RST-per-row JPEG)
         public boolean renderParallel = false;      // v1.4.8 default: single-core (render then encode); true = parallel
         public boolean hudDesignTesla = true;       // v1.5.0: Tesla-style HUD (false = classic Chromium 1:1 HUD)
+        public int powertrainMode = POWERTRAIN_AUTO; // v1.5.13: 0=auto, 1=ev, 2=ice
         // Telemetry (Binder/CAN) poll period of the separate poll thread
-        public int telemetryPollMs = 200;
+        public int telemetryPollMs = 100;
         public String commaIp = "";
         public boolean autoUpdate = true;
         public int x = 24;
@@ -249,6 +253,28 @@ public class TurzxMonitorMain {
         public boolean batteryConditioning = false;
         public String gearPos = "D";
         public double accelPedalPct = -1.0;
+
+        // 1b. Internal Combustion Engine (ICE) & Odometer (v1.5.13)
+        public int engineType = -1;               // ITM_HSCANService.getEngineType() (7 = EV, 0..6 = ICE/HEV)
+        public boolean hevServicePresent = false; // com.hkmc.micom.hev service availability
+        public int fuelLevelPct = -1;             // 0..100 %
+        public int fuelDispLvl = -1;
+        public boolean lowFuelWarn = false;
+        public int iceDteKm = -1;                 // km
+        public double avgFuelKmL = -1.0;          // km/L
+        public double instFuelKmL = -1.0;         // km/L (genuine vehicle API only)
+        public int coolantTempC = Integer.MIN_VALUE;
+        public int engineRpm = -1;
+        public int obdSpeedKph = -1;
+        public long engineRunSec = -1L;           // seconds from getCarInfoEnginRunTime()
+        public long engineDriveSec = -1L;
+        public long engineIdleSec = -1L;
+        public double odometerKm = -1.0;
+        public double startOdometerKm = -1.0;
+        public double tripKm = -1.0;
+        public boolean milOn = false;
+        public boolean engineOilWarn = false;
+        public long lastObdIceRxMs = 0L;
 
         // 2. DATC Climate & Indoor/Outdoor Temps
         public boolean hasClimateData = false;
@@ -370,6 +396,23 @@ public class TurzxMonitorMain {
                 return Math.max(0.0, packPowerKw - auxKw);
             }
             return 0.0;
+        }
+
+        /** Auto-detect EV vs ICE (0=auto, 1=EV, 2=ICE). Safe EV default until ICE signals are confirmed. */
+        public boolean isIceMode(int configMode) {
+            if (configMode == POWERTRAIN_EV) return false;
+            if (configMode == POWERTRAIN_ICE) return true;
+            if (engineType == 7) return false;
+            if (displaySocPct > 0.0 || bmsSocPct > 0.0) return false;
+            if ((engineType >= 0 && !hevServicePresent) || (fuelLevelPct >= 0 && !hevServicePresent)
+                    || (engineRpm >= 0 && !hevServicePresent)) {
+                return true;
+            }
+            return false;
+        }
+
+        public String powertrainLabel(int configMode) {
+            return isIceMode(configMode) ? "ice" : "ev";
         }
     }
 
@@ -2904,8 +2947,8 @@ public class TurzxMonitorMain {
             static final float[] PARK_REAR = {938f, 145f};
 
             private static int loadedH = -1;
-            private static Layout L = null;
-            private static Object base, active, egoOff, egoTail, egoBrake, park, lead;
+            private static Layout L = null, layoutEv = null, layoutIce = null;
+            private static Object base, baseEv, baseIce, active, egoOff, egoTail, egoBrake, park, lead;
             private static float parkW = 960f, parkH = 470f;
             private static Object pFill, pStroke, pBmp, pAdd, pShade, rf, rs, rd, path;
             private static Method mDrawBmpXY, mDrawBmpRR, mDrawBmpRRF, mDrawRoundRect, mDrawRect, mDrawOval, mDrawPath,
@@ -2921,20 +2964,29 @@ public class TurzxMonitorMain {
             private static double decel = 0.0;
 
             static boolean isReady() {
-                return L != null && base != null;
+                return layoutEv != null && baseEv != null;
             }
 
             private static boolean ensure(int hudH) throws Exception {
-                if (loadedH == hudH && base != null) return true;
+                if (loadedH == hudH && baseEv != null) return true;
                 loadedH = hudH;
-                base = active = egoOff = egoTail = egoBrake = park = lead = null;
+                base = baseEv = baseIce = active = egoOff = egoTail = egoBrake = park = lead = null;
+                layoutEv = layoutIce = null;
+                L = null;
                 lineShaders = null;
+                parkKey = null;
                 String sfx = (hudH == HUD_HEIGHT_720) ? "_720" : "";
-                byte[] lay = readJarAssetBytes("tesla_layout_" + (hudH == HUD_HEIGHT_720 ? "123" : "92") + ".txt");
-                L = parseLayout(lay != null ? new String(lay, UTF8) : null);
+                String mdl = (hudH == HUD_HEIGHT_720) ? "123" : "92";
+                byte[] lay = readJarAssetBytes("tesla_layout_" + mdl + ".txt");
+                layoutEv = parseLayout(lay != null ? new String(lay, UTF8) : null);
+                byte[] layIce = readJarAssetBytes("tesla_layout_ice_" + mdl + ".txt");
+                layoutIce = parseLayout(layIce != null ? new String(layIce, UTF8) : null);
+                L = layoutEv;
                 Class<?> bfCls = Class.forName("android.graphics.BitmapFactory");
                 Method dec = bfCls.getMethod("decodeByteArray", byte[].class, int.class, int.class);
-                base = decodeAssetBitmap(dec, "tesla_base" + sfx + ".png");
+                baseEv = decodeAssetBitmap(dec, "tesla_base" + sfx + ".png");
+                baseIce = decodeAssetBitmap(dec, "tesla_base_ice" + sfx + ".png");
+                base = baseEv;
                 active = decodeAssetBitmap(dec, "tesla_active" + sfx + ".png");
                 egoOff = decodeAssetBitmap(dec, "tesla_ego_off.png");
                 egoTail = decodeAssetBitmap(dec, "tesla_ego_tail.png");
@@ -2949,10 +3001,10 @@ public class TurzxMonitorMain {
                 if (mDrawBmpXY == null) initReflection();
                 loadNav(dec);
                 DebugManager.logEvent("RENDER", "Tesla HUD assets (" + HUD_WIDTH + "x" + hudH + "): navdy sets="
-                        + (navSets != null ? navSets.length : 0) + " ego=" + (navEgo != null) + ", layout fields="
-                        + L.fields.size() + " rects=" + L.rects.size() + " base=" + (base != null) + " active=" + (active != null)
-                        + " ego=" + (egoOff != null) + " park=" + (park != null));
-                return base != null && !L.fields.isEmpty();
+                        + (navSets != null ? navSets.length : 0) + " ego=" + (navEgo != null) + ", ev fields="
+                        + layoutEv.fields.size() + " ice fields=" + (layoutIce != null ? layoutIce.fields.size() : 0)
+                        + " baseEv=" + (baseEv != null) + " baseIce=" + (baseIce != null) + " active=" + (active != null));
+                return baseEv != null && !layoutEv.fields.isEmpty();
             }
 
             private static void initReflection() throws Exception {
@@ -3093,16 +3145,25 @@ public class TurzxMonitorMain {
 
             /** Draws a layout field (value + optional unit) honouring its alignment; color 0 = layout colour. */
             private static void field(Object c, String key, String value, int color) throws Exception {
+                fieldWithUnit(c, key, value, color, null);
+            }
+
+            private static void field(Object c, String key, String value, int color, boolean showUnit) throws Exception {
+                fieldWithUnit(c, key, value, color, showUnit ? null : "");
+            }
+
+            private static void fieldWithUnit(Object c, String key, String value, int color, String unitOverride) throws Exception {
                 Field f = L.fields.get(key);
                 if (f == null || value == null || value.isEmpty()) return;
                 String v = fit(value, f.size, f.bold, f.maxW);
                 float wv = measure(v, f.size, f.bold);
-                boolean hasUnit = f.unit != null && !f.unit.isEmpty();
-                float wu = hasUnit ? measure(f.unit, f.unitSize, f.unitBold) : 0f;
+                String unitStr = unitOverride != null ? unitOverride : f.unit;
+                boolean hasUnit = unitStr != null && !unitStr.isEmpty();
+                float wu = hasUnit ? measure(unitStr, f.unitSize, f.unitBold) : 0f;
                 float total = wv + (hasUnit ? f.gap + wu : 0f);
                 float x = (f.align == 'R') ? f.x - total : (f.align == 'C' ? f.x - total / 2f : f.x);
                 text(c, v, x, f.y, f.size, f.bold, color != 0 ? color : f.color);
-                if (hasUnit) text(c, f.unit, x + wv + f.gap, f.y, f.unitSize, f.unitBold, f.unitColor);
+                if (hasUnit) text(c, unitStr, x + wv + f.gap, f.y, f.unitSize, f.unitBold, f.unitColor);
             }
 
             private static void barFill(Object c, float[] r, float x0, float x1, int color) throws Exception {
@@ -3113,6 +3174,9 @@ public class TurzxMonitorMain {
             // ---- frame ----
             static void draw(Object c, TelemetrySnapshot s) throws Exception {
                 if (!ensure(activeHudHeight)) throw new IllegalStateException("Tesla HUD assets missing");
+                boolean iceMode = s.isIceMode(LiveTuning.powertrainMode);
+                L = (iceMode && layoutIce != null && !layoutIce.fields.isEmpty()) ? layoutIce : layoutEv;
+                base = (iceMode && baseIce != null) ? baseIce : baseEv;
                 long now = System.nanoTime();
                 float dt = (lastNs == 0L) ? 0f : Math.min(0.2f, (now - lastNs) / 1e9f);
                 lastNs = now;
@@ -3147,12 +3211,13 @@ public class TurzxMonitorMain {
                     float rad = vz.length > 4 ? vz[4] : 28f;
                     mPAddRRect.invoke(path, rf, rad, rad, dirCW);
                     mClipPath.invoke(c, path);
-                    if (parked) drawParkedCached(c, vz, head, brake);
+                    if (parked) drawParkedCached(c, vz, head, brake, iceMode);
                     else drawRoad(c, s, vz, gear, spd, head, brake);
                     mRestore.invoke(c, sc);
                 }
-                drawVizOverlays(c, s, vz, gear, spd, parked);
-                drawBattery(c, s, totalKw);
+                drawVizOverlays(c, s, vz, gear, spd, parked, iceMode);
+                if (iceMode) drawIceFuel(c, s);
+                else drawBattery(c, s, totalKw);
                 drawMedia(c, s);
                 drawClimate(c, s);
             }
@@ -3555,7 +3620,7 @@ public class TurzxMonitorMain {
             }
 
             // ---- v1.5.5 telltales right next to the speed number (always shown: dim grey when off) ----
-            static final int TT_OFF = 0xFF45484F, TT_HEAD = 0xFF3DDC84, TT_HIGH = 0xFF4C8DFF, TT_PBRAKE = 0xFFFF4D4D;
+            static final int TT_OFF = 0xFF45484F, TT_HEAD = 0xFF3DDC84, TT_HIGH = 0xFF4C8DFF, TT_PBRAKE = 0xFFFF4D4D, TT_MIL = 0xFFF5A623;
 
             /** x of the first telltale: speed number's right edge + the exported gap (S:ttGap). */
             static float telltaleX(Layout l, float speedTextWidth) {
@@ -3565,25 +3630,28 @@ public class TurzxMonitorMain {
                 return f.x + speedTextWidth + (gap != null ? gap.floatValue() : 12f);
             }
 
-            private static void drawTelltales(Object c, String speedText, boolean head, boolean high, boolean pbrake) throws Exception {
-                float[] r0 = L.rect("ttHead"), r1 = L.rect("ttHigh"), r2 = L.rect("ttPbrake");
+            private static void drawTelltales(Object c, String speedText, boolean head, boolean high, boolean pbrake,
+                                              boolean iceMode, boolean milOn) throws Exception {
+                float[] r0 = L.rect("ttHead"), r1 = L.rect("ttHigh"), r2 = L.rect("ttPbrake"), r3 = L.rect("ttMil");
                 Field f = L.fields.get("speed");
                 if (r0 == null || r1 == null || r2 == null || f == null || pIcon == null) return;
                 float x0 = telltaleX(L, measure(fit(speedText, f.size, f.bold, f.maxW), f.size, f.bold));
-                float[][] rs = {r0, r1, r2};
-                boolean[] on = {head, high, pbrake};
-                int[] col = {TT_HEAD, TT_HIGH, TT_PBRAKE};
-                for (int i = 0; i < 3; i++) {
+                float[] r3Fallback = r3 != null ? r3 : new float[]{r2[0] + (r2[0] - r1[0]), r2[1], r2[2], r2[3]};
+                float[][] rs = {r0, r1, r2, r3Fallback};
+                boolean[] on = {head, high, pbrake, milOn};
+                int[] col = {TT_HEAD, TT_HIGH, TT_PBRAKE, TT_MIL};
+                int count = iceMode ? 4 : 3;
+                for (int i = 0; i < count; i++) {
                     float x = x0 + (rs[i][0] - r0[0]);
                     drawTelltaleIcon(c, i, x, rs[i][1], rs[i][2], on[i] ? col[i] : TT_OFF);
                 }
             }
 
-            /** ISO-style icons on a 32-unit grid (same paths as the mockup's ICON.lowBeam / highBeam / pbrake). */
+            /** ISO-style icons on a 32-unit grid (same paths as the mockup's ICON.lowBeam / highBeam / pbrake / mil). */
             private static void drawTelltaleIcon(Object c, int kind, float x, float y, float size, int color) throws Exception {
                 float u = size / 32f;
                 mSetColor.invoke(pIcon, color);
-                mSetStrokeW.invoke(pIcon, (kind == 2 ? 2.3f : 2.4f) * u);
+                mSetStrokeW.invoke(pIcon, (kind == 2 ? 2.3f : (kind == 3 ? 2.2f : 2.4f)) * u);
                 mPReset.invoke(path);
                 if (kind < 2) {
                     // lamp body (D shape)
@@ -3604,7 +3672,7 @@ public class TurzxMonitorMain {
                             mPLine.invoke(path, x + 4 * u, y + ry * u);
                         }
                     }
-                } else {
+                } else if (kind == 2) {
                     // parking brake: circle, side arcs, letter P
                     mSetRf.invoke(rf, x + 7.4f * u, y + 7.4f * u, x + 24.6f * u, y + 24.6f * u);
                     mPAddArc.invoke(path, rf, 0f, 359.9f);
@@ -3618,6 +3686,26 @@ public class TurzxMonitorMain {
                     mSetRf.invoke(rf, x + 14.4f * u, y + 11.5f * u, x + 19.6f * u, y + 16.7f * u);
                     mPArcTo.invoke(path, rf, -90f, 180f);
                     mPLine.invoke(path, x + 13.6f * u, y + 16.7f * u);
+                } else {
+                    // check engine / MIL (matching ICON.mil SVG)
+                    mPMove.invoke(path, x + 11 * u, y + 8.5f * u); mPLine.invoke(path, x + 19 * u, y + 8.5f * u);
+                    mPMove.invoke(path, x + 15 * u, y + 8.5f * u); mPLine.invoke(path, x + 15 * u, y + 12 * u);
+                    mPMove.invoke(path, x + 4.5f * u, y + 14 * u); mPLine.invoke(path, x + 4.5f * u, y + 22 * u);
+                    mPMove.invoke(path, x + 4.5f * u, y + 18 * u); mPLine.invoke(path, x + 8 * u, y + 18 * u);
+                    mPMove.invoke(path, x + 8 * u, y + 13.5f * u);
+                    mPLine.invoke(path, x + 10.5f * u, y + 12 * u);
+                    mPLine.invoke(path, x + 18 * u, y + 12 * u);
+                    mPLine.invoke(path, x + 20 * u, y + 14.5f * u);
+                    mPLine.invoke(path, x + 24.2f * u, y + 14.5f * u);
+                    mPLine.invoke(path, x + 26 * u, y + 16.5f * u);
+                    mPLine.invoke(path, x + 26 * u, y + 21 * u);
+                    mPLine.invoke(path, x + 24.2f * u, y + 23 * u);
+                    mPLine.invoke(path, x + 20 * u, y + 23 * u);
+                    mPLine.invoke(path, x + 18 * u, y + 25 * u);
+                    mPLine.invoke(path, x + 10.5f * u, y + 25 * u);
+                    mPLine.invoke(path, x + 8 * u, y + 23 * u);
+                    mPClose.invoke(path);
+                    mPMove.invoke(path, x + 27.5f * u, y + 15.5f * u); mPLine.invoke(path, x + 27.5f * u, y + 21 * u);
                 }
                 mDrawPath.invoke(c, path, pIcon);
             }
@@ -3646,14 +3734,14 @@ public class TurzxMonitorMain {
              * 2026-11-15). Render it with the base image underneath into a viz-sized bitmap and blit that, until the
              * lamps, the doors or the layout change.
              */
-            private static void drawParkedCached(Object c, float[] vz, boolean head, boolean brake) throws Exception {
+            private static void drawParkedCached(Object c, float[] vz, boolean head, boolean brake, boolean iceMode) throws Exception {
                 boolean[] d = BodyProbe.doors();
                 int bits = (head ? 1 : 0) | (brake ? 2 : 0);
                 for (int i = 0; i < d.length; i++) if (d[i]) bits |= 4 << i;
                 int x0 = (int) Math.floor(vz[0]), y0 = (int) Math.floor(vz[1]);
                 int w = (int) Math.ceil(vz[0] + vz[2]) - x0, h = (int) Math.ceil(vz[1] + vz[3]) - y0;
                 if (w <= 0 || h <= 0) return;
-                String key = loadedH + ":" + x0 + "," + y0 + "," + w + "x" + h + ":" + bits + ":"
+                String key = loadedH + ":" + (iceMode ? 1 : 0) + ":" + x0 + "," + y0 + "," + w + "x" + h + ":" + bits + ":"
                         + (navTop != null && navTop.bmp != null) + (topHead != null) + (topTail != null);
                 try {
                     if (parkCache == null || parkCacheW != w || parkCacheH != h) {
@@ -3674,7 +3762,7 @@ public class TurzxMonitorMain {
                         drawParked(pc, vz, head, brake);
                         mRestore.invoke(pc, sc);
                         // the first pass may have decoded the lamp layers: key on what the next frame will see
-                        parkKey = loadedH + ":" + x0 + "," + y0 + "," + w + "x" + h + ":" + bits + ":"
+                        parkKey = loadedH + ":" + (iceMode ? 1 : 0) + ":" + x0 + "," + y0 + "," + w + "x" + h + ":" + bits + ":"
                                 + (navTop != null && navTop.bmp != null) + (topHead != null) + (topTail != null);
                     }
                     mDrawBmpXY.invoke(c, parkCache, (float) x0, (float) y0, null);
@@ -3693,8 +3781,9 @@ public class TurzxMonitorMain {
                 if (topHead == null) topHead = decodeAssetBitmap(navDecode, "navdy_top_head.png");
                 if (topTail == null) topTail = decodeAssetBitmap(navDecode, "navdy_top_tail.png");
                 float vx = vz[0], vy = vz[1], vw = vz[2], vh = vz[3];
-                final float ppm = Math.min(vw * 0.115f, vh * 0.24f);
-                final float cx = vx + vw * 0.55f, cy = vy + vh * 0.54f;     // car centre, front points right
+                boolean wide = (vh > 0f) && ((vw / vh) > 1.75f);
+                final float ppm = wide ? Math.min(vw * 0.098f, vh * 0.215f) : Math.min(vw * 0.115f, vh * 0.24f);
+                final float cx = vx + vw * (wide ? 0.535f : 0.55f), cy = vy + vh * (wide ? 0.60f : 0.54f);     // car centre, front points right
                 boolean[] d = BodyProbe.doors();
                 glow(c, cx, cy, vw * 0.5f, 0xFFFFFF, 0.07f);
                 if (head) {
@@ -3820,11 +3909,12 @@ public class TurzxMonitorMain {
                 }
             }
 
-            private static void drawVizOverlays(Object c, TelemetrySnapshot s, float[] vz, String gear, int spd, boolean parked)
-                    throws Exception {
+            private static void drawVizOverlays(Object c, TelemetrySnapshot s, float[] vz, String gear, int spd, boolean parked,
+                                                boolean iceMode) throws Exception {
                 copyActive(c, L.rect("prnd" + gear));
                 field(c, "speed", String.valueOf(spd), 0);
-                drawTelltales(c, String.valueOf(spd), LampProbe.headLampsOn(), BodyProbe.highBeamOn(), BodyProbe.parkingBrakeOn());
+                drawTelltales(c, String.valueOf(spd), LampProbe.headLampsOn(), BodyProbe.highBeamOn(), BodyProbe.parkingBrakeOn(),
+                        iceMode, s.milOn);
                 // speed limit: camera event -> red ring, otherwise the current road limit -> blue ring
                 boolean camera = !(s.carrotSdiType < 0 && s.carrotSdiDistM <= 0);
                 int limit = Math.max(0, s.carrotSdiSpeedLimit);
@@ -3992,6 +4082,107 @@ public class TurzxMonitorMain {
                         barFill(c, wr, x0, zero, 0xFF3DD68C);
                     }
                     roundRect(c, zero - 2f, wr[1] - 6f, zero + 2f, wr[1] + wr[3] + 6f, 2f, 0xFFC9CBD1);
+                }
+            }
+
+            private static void drawIceDuration(Object c, String key, long sec) throws Exception {
+                if (sec < 0L) {
+                    field(c, key, "--", 0xFF5A5D64, false);
+                    return;
+                }
+                long min = sec / 60L;
+                if (min >= 60L) {
+                    field(c, key, String.format(Locale.US, "%d:%02d", min / 60L, min % 60L), 0, false);
+                } else {
+                    field(c, key, String.valueOf(min), 0, true);
+                }
+            }
+
+            private static void drawIceFuel(Object c, TelemetrySnapshot s) throws Exception {
+                if (s.tripKm >= 0.0) {
+                    field(c, "tripKm", String.format(Locale.US, "· 트립 %.1f km", s.tripKm), 0);
+                }
+                int fp = s.fuelLevelPct;
+                if (fp >= 0) {
+                    int clamped = Math.max(0, Math.min(100, fp));
+                    int fuelCol = clamped <= 8 ? 0xFFE31937 : (clamped <= 15 ? 0xFFF5A623 : 0);
+                    field(c, "fuelPct", String.valueOf(clamped), fuelCol, true);
+                } else {
+                    field(c, "fuelPct", "--", 0xFF5A5D64, false);
+                }
+                if (isValidDteValue(s.iceDteKm)) {
+                    field(c, "iceDte", String.valueOf(s.iceDteKm), 0, true);
+                } else {
+                    field(c, "iceDte", "--", 0xFF5A5D64, true);
+                }
+                field(c, "avgKmL", s.avgFuelKmL > 0.0 ? String.format(Locale.US, "%.1f km/L", s.avgFuelKmL) : "-- km/L", 0);
+
+                float[] fpr = L.rect("fuelPill");
+                if (fpr != null) {
+                    if (fp >= 0) {
+                        int clamped = Math.max(0, Math.min(100, fp));
+                        int barCol = clamped <= 8 ? 0xFFE31937 : (clamped <= 15 ? 0xFFF5A623 : 0xFFF5F5F7);
+                        barFill(c, fpr, fpr[0], fpr[0] + fpr[2] * (clamped / 100f), barCol);
+                    }
+                    mSetShader.invoke(pFill, new Object[]{null});
+                    mSetColor.invoke(pFill, 0x66000000);
+                    for (float f : new float[]{0.25f, 0.50f, 0.75f}) {
+                        float tx = fpr[0] + fpr[2] * f;
+                        mDrawRect.invoke(c, tx - 1.5f, fpr[1] + 3f, tx + 1.5f, fpr[1] + fpr[3] - 3f, pFill);
+                    }
+                }
+
+                // Row 1 (common 9.2" & 12.3"): instant fuel economy, coolant temp, 12V
+                if (s.instFuelKmL > 0.0) {
+                    field(c, "instKmL", String.format(Locale.US, "%.1f", s.instFuelKmL), 0, true);
+                } else {
+                    field(c, "instKmL", "--", 0xFF5A5D64, true);
+                }
+                if (s.coolantTempC > Integer.MIN_VALUE) {
+                    int coolCol = s.coolantTempC < 60 ? 0xFF7EA6FF : (s.coolantTempC >= 105 ? 0xFFE31937 : 0);
+                    field(c, "coolant", String.valueOf(s.coolantTempC), coolCol, true);
+                } else {
+                    field(c, "coolant", "--", 0xFF5A5D64, false);
+                }
+                if (s.auxBattVoltV > 0.0) {
+                    fieldWithUnit(c, "volt12", String.format(Locale.US, "%.1f", s.auxBattVoltV),
+                            s.auxBattVoltV < 12.0 ? 0xFFF5A623 : 0, null);
+                } else if (s.auxBattSocPct >= 0) {
+                    fieldWithUnit(c, "volt12", String.valueOf(s.auxBattSocPct), 0, "%");
+                } else {
+                    field(c, "volt12", "--", 0xFF5A5D64, false);
+                }
+
+                // Row 2 (12.3" only): run time, idle time, odometer
+                drawIceDuration(c, "runTime", s.engineRunSec);
+                drawIceDuration(c, "idleTime", s.engineIdleSec);
+                if (s.odometerKm > 0.0) {
+                    field(c, "odoKm", String.format(Locale.US, "%,d", Math.round(s.odometerKm)), 0, true);
+                } else {
+                    field(c, "odoKm", "--", 0xFF5A5D64, false);
+                }
+
+                // Bottom bar: fixed fuel-agnostic Engine RPM linear gauge (0..7,000 rpm, -- when unavailable)
+                int rpm = s.engineRpm;
+                int spd = Math.max(0, s.carrotSpeedKph);
+                if (rpm >= 0) {
+                    field(c, "rpmLbl", (spd == 0 && rpm > 0) ? "공회전" : "엔진 회전", 0);
+                    field(c, "rpm", String.format(Locale.US, "%,d", rpm), 0, true);
+                } else {
+                    field(c, "rpmLbl", "엔진 회전", 0);
+                    field(c, "rpm", "--", 0xFF5A5D64, true);
+                }
+                float[] rr = L.rect("rpm");
+                if (rr != null) {
+                    if (rpm > 0) {
+                        barFill(c, rr, rr[0], rr[0] + rr[2] * Math.min(1f, rpm / 7000f), 0xFFF5F5F7);
+                    }
+                    mSetShader.invoke(pFill, new Object[]{null});
+                    mSetColor.invoke(pFill, 0x73000000);
+                    for (int k = 1; k <= 6; k++) {
+                        float tx = rr[0] + rr[2] * (k / 7f);
+                        mDrawRect.invoke(c, tx - 1.5f, rr[1] + 2f, tx + 1.5f, rr[1] + rr[3] - 2f, pFill);
+                    }
                 }
             }
 
@@ -5622,6 +5813,14 @@ public class TurzxMonitorMain {
         private static volatile long lastFatcUdsMs = 0L;
         private static volatile long lastUdsReqSentMs = 0L;
         private static volatile int udsReqToggle = 0;
+        private static volatile int obdIceReqIdx = 0;
+        private static volatile String lastMicomGearPos = "";
+        private static volatile long lastMicomGearMs = 0L;
+
+        static void resetMicomIceForTest() {
+            lastMicomGearPos = "";
+            lastMicomGearMs = 0L;
+        }
 
         private static volatile boolean backgroundStarted = false;
         private static volatile long lastCarrotRxMs = 0L;
@@ -6434,8 +6633,10 @@ public class TurzxMonitorMain {
                 DebugManager.recordHscanFrame(b1, b2, b3, data);
                 if ((b1 & 0xFF) == 0xC7 && data != null) {
                     long now = System.currentTimeMillis();
+                    int b3u = b3 & 0xFF;
                     boolean isBmsAddr = ((b3 & 0x7F) == 0x2D) || (b3 == 0);
                     boolean isFatcAddr = ((b3 & 0x7F) == 0x2B);
+                    boolean isObdPowertrainAddr = (b3u == 0xA7) || (b3u == 0xA6);
                     if ((b3 & 0x80) == 0 && data.length >= 8) {
                         synchronized (liveSnapshot) {
                             parseHscanBypassCanFrame(b3 & 0x7F, data, liveSnapshot, now, lastUds0101Ms, lastUds0105Ms);
@@ -6453,7 +6654,30 @@ public class TurzxMonitorMain {
                                 lastFatcUdsMs = now;
                             }
                         }
+                    } else if (isObdPowertrainAddr && data.length >= 3) {
+                        synchronized (liveSnapshot) {
+                            if (parseIceObdPayload(data, liveSnapshot, now)) {
+                                liveSnapshot.lastObdIceRxMs = now;
+                                if (!liveSnapshot.carrotConnected && bcmGetSpeedKmhMethod == null && liveSnapshot.obdSpeedKph >= 0) {
+                                    liveSnapshot.carrotSpeedKph = liveSnapshot.obdSpeedKph;
+                                }
+                            }
+                        }
                     }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        static void onMicomPacket(byte rcv, byte fh, byte fl, byte[] data) {
+            try {
+                String g;
+                synchronized (liveSnapshot) {
+                    g = parseMicomIcePacket(rcv, fh, fl, data, liveSnapshot);
+                }
+                if (g != null && !g.isEmpty()) {
+                    lastMicomGearPos = g;
+                    lastMicomGearMs = System.currentTimeMillis();
                 }
             } catch (Throwable ignored) {
             }
@@ -6470,6 +6694,7 @@ public class TurzxMonitorMain {
             startBackgroundThreadsIfNeeded();
 
             synchronized (liveSnapshot) {
+                liveSnapshot.hevServicePresent = (hevService != null);
                 // 0. If hkg.sysmonitor is also running, ingest its hkg_monitor_state.json (/dev/hkg_tmp first, fallback /data/local/tmp)
                 File sharedJsonFile = resolveFreshSharedFile(
                         SHARED_SYSMONITOR_JSON_PATH, LEGACY_SYSMONITOR_JSON_PATH, 5000L, System.currentTimeMillis());
@@ -6912,14 +7137,16 @@ public class TurzxMonitorMain {
             if (svc == null || sendM == null) return;
             long now = System.currentTimeMillis();
             if (now - lastUdsReqSentMs < 1800L) return;
-            boolean bmsFresh = (now - lastUds0101Ms) < 3500L && (now - lastUds0105Ms) < 3500L;
+            boolean iceMode = liveSnapshot.isIceMode(LiveTuning.powertrainMode);
+            boolean bmsFresh = iceMode || ((now - lastUds0101Ms) < 3500L && (now - lastUds0105Ms) < 3500L);
             boolean fatcFresh = (now - lastFatcUdsMs) < 10000L;
-            if (bmsFresh && fatcFresh) return;
+            boolean obdIceFresh = !iceMode || (now - liveSnapshot.lastObdIceRxMs) < 2500L;
+            if (bmsFresh && fatcFresh && obdIceFresh) return;
 
             lastUdsReqSentMs = now;
             int step = udsReqToggle++;
             // Periodically request TP_DEVICE_FATC (0xAB) UDS 22 01 00 -> 62 01 00 for inCarTempC & outdoorTempC
-            if (!fatcFresh && (bmsFresh || (step % 3) == 2)) {
+            if (!fatcFresh && ((iceMode && obdIceFresh) || (!iceMode && bmsFresh) || (step % 3) == 2)) {
                 try {
                     sendM.invoke(
                             svc,
@@ -6931,6 +7158,26 @@ public class TurzxMonitorMain {
                             new byte[]{(byte) 0x22, (byte) 0x01, (byte) 0x00}
                     );
                 } catch (Throwable ignored) {
+                }
+                return;
+            }
+
+            if (iceMode) {
+                if (!obdIceFresh) {
+                    int idx = (obdIceReqIdx++) % 3;
+                    byte pid = (idx == 0) ? (byte) 0x0C : (idx == 1 ? (byte) 0x05 : (byte) 0x42);
+                    try {
+                        sendM.invoke(
+                                svc,
+                                Byte.valueOf((byte) 0xC7),
+                                Byte.valueOf((byte) 0x40),
+                                Byte.valueOf((byte) 0x80),
+                                Byte.valueOf((byte) 0x40),
+                                Byte.valueOf((byte) 0xA7),
+                                new byte[]{(byte) 0x01, pid}
+                        );
+                    } catch (Throwable ignored) {
+                    }
                 }
                 return;
             }
@@ -7219,6 +7466,13 @@ public class TurzxMonitorMain {
 
         // getMethod() per poll was a per-frame reflection lookup; Method objects are cached per class + name.
         private static final HashMap<String, Method> NO_ARG_METHOD_CACHE = new HashMap<String, Method>();
+        private static final HashMap<String, Method> OPT_METHOD_CACHE = new HashMap<String, Method>();
+        private static final Method MISSING_METHOD;
+        static {
+            Method mm = null;
+            try { mm = Object.class.getMethod("toString"); } catch (Throwable ignored) {}
+            MISSING_METHOD = mm;
+        }
 
         private static Method cachedNoArgMethod(Class<?> cls, String name) throws NoSuchMethodException {
             String key = cls.getName() + "#" + name;
@@ -7230,6 +7484,50 @@ public class TurzxMonitorMain {
                 }
                 return m;
             }
+        }
+
+        private static Method cachedOptionalMethod(Class<?> cls, String name, Class<?>... params) {
+            StringBuilder kb = new StringBuilder(cls.getName()).append('#').append(name);
+            for (int i = 0; i < params.length; i++) kb.append(':').append(params[i].getName());
+            String key = kb.toString();
+            synchronized (OPT_METHOD_CACHE) {
+                Method m = OPT_METHOD_CACHE.get(key);
+                if (m == null) {
+                    try {
+                        m = cls.getMethod(name, params);
+                    } catch (Throwable ignored) {
+                        m = MISSING_METHOD;
+                    }
+                    OPT_METHOD_CACHE.put(key, m);
+                }
+                return m == MISSING_METHOD ? null : m;
+            }
+        }
+
+        private static Number invokeTmNumber0(Object svc, Class<?> sc, String name) {
+            Method m = cachedOptionalMethod(sc, name);
+            if (m == null) return null;
+            try {
+                Object v = m.invoke(svc);
+                return (v instanceof Number) ? (Number) v : null;
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+
+        private static Number invokeTmNumberByteArg(Object svc, Class<?> sc, String name, byte arg) {
+            Method m = cachedOptionalMethod(sc, name, byte.class);
+            if (m == null) return null;
+            try {
+                Object v = m.invoke(svc, Byte.valueOf(arg));
+                return (v instanceof Number) ? (Number) v : null;
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+
+        private static boolean isValidFuelEconomy(double kmPerL) {
+            return !Double.isNaN(kmPerL) && !Double.isInfinite(kmPerL) && kmPerL > 0.5 && kmPerL < 99.9;
         }
 
         private static void pollTmHscanServiceLocked() {
@@ -7248,6 +7546,101 @@ public class TurzxMonitorMain {
                 if (!isValidDteValue(liveSnapshot.dteKm)) {
                     int dte = ((Integer) cachedNoArgMethod(sc, "realTimeAbleDriveDistance").invoke(svc)).intValue();
                     if (isValidDteValue(dte)) liveSnapshot.dteKm = dte;
+                }
+
+                // ICE / powertrain telemetry from ITM_HSCANService (verified on KA4 2026-11-23)
+                Number nEngType = invokeTmNumber0(svc, sc, "getEngineType");
+                if (nEngType != null && nEngType.intValue() >= 0) {
+                    liveSnapshot.engineType = nEngType.intValue();
+                }
+                Number nFuel = invokeTmNumber0(svc, sc, "getFuelLevel");
+                if (nFuel != null && nFuel.intValue() >= 0 && nFuel.intValue() <= 100) {
+                    liveSnapshot.fuelLevelPct = nFuel.intValue();
+                }
+                Number nFuelDisp = invokeTmNumber0(svc, sc, "getFuelDispLvl");
+                if (nFuelDisp != null && nFuelDisp.intValue() >= 0) {
+                    liveSnapshot.fuelDispLvl = nFuelDisp.intValue();
+                }
+                Number nLowFuel = invokeTmNumber0(svc, sc, "getLowFuelWarn");
+                if (nLowFuel != null) {
+                    liveSnapshot.lowFuelWarn = nLowFuel.intValue() > 0;
+                }
+                Number nIceDte = invokeTmNumber0(svc, sc, "getDistanceEmptyInfo");
+                if (nIceDte != null && isValidDteValue(nIceDte.intValue())) {
+                    liveSnapshot.iceDteKm = nIceDte.intValue();
+                    if (!isValidDteValue(liveSnapshot.dteKm)) liveSnapshot.dteKm = nIceDte.intValue();
+                } else {
+                    Number nAbleDte = invokeTmNumberByteArg(svc, sc, "ableDriveDistance", (byte) 0);
+                    if (nAbleDte != null && isValidDteValue(nAbleDte.intValue())) {
+                        liveSnapshot.iceDteKm = nAbleDte.intValue();
+                        if (!isValidDteValue(liveSnapshot.dteKm)) liveSnapshot.dteKm = nAbleDte.intValue();
+                    }
+                }
+
+                Number nDriveSec = invokeTmNumber0(svc, sc, "getCarInfoEnginDriveTime");
+                if (nDriveSec != null && nDriveSec.longValue() >= 0L) {
+                    liveSnapshot.engineDriveSec = nDriveSec.longValue();
+                }
+                Number nIdleSec = invokeTmNumber0(svc, sc, "getCarInfoEnginIdleTime");
+                if (nIdleSec != null && nIdleSec.longValue() >= 0L) {
+                    liveSnapshot.engineIdleSec = nIdleSec.longValue();
+                }
+                Number nRunSec = invokeTmNumber0(svc, sc, "getCarInfoEnginRunTime");
+                if (nRunSec != null && nRunSec.longValue() >= 0L) {
+                    liveSnapshot.engineRunSec = nRunSec.longValue();
+                } else if (liveSnapshot.engineDriveSec >= 0L && liveSnapshot.engineIdleSec >= 0L) {
+                    liveSnapshot.engineRunSec = liveSnapshot.engineDriveSec + liveSnapshot.engineIdleSec;
+                }
+
+                Number nMil = invokeTmNumber0(svc, sc, "getActiveMILOnStatus");
+                if (nMil != null) liveSnapshot.milOn = nMil.intValue() > 0;
+                Number nOil = invokeTmNumber0(svc, sc, "getEngineOilStatus");
+                if (nOil != null) liveSnapshot.engineOilWarn = nOil.intValue() > 0;
+                Number nBatSoc = invokeTmNumber0(svc, sc, "getBatSoc");
+                if (nBatSoc != null && nBatSoc.intValue() > 0 && nBatSoc.intValue() <= 100) {
+                    liveSnapshot.auxBattSocPct = nBatSoc.intValue();
+                }
+
+                if (tmGetAccelPdlMethod != null) {
+                    try {
+                        float pdl = ((Float) tmGetAccelPdlMethod.invoke(svc)).floatValue();
+                        if (!Float.isNaN(pdl) && pdl >= 0.0f && pdl <= 100.0f) {
+                            liveSnapshot.accelPedalPct = pdl;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                Number nAvgFuel = invokeTmNumber0(svc, sc, "getAvgFuel");
+                if (nAvgFuel != null && isValidFuelEconomy(nAvgFuel.doubleValue())) {
+                    liveSnapshot.avgFuelKmL = nAvgFuel.doubleValue();
+                }
+                Number nInstFuel = invokeTmNumberByteArg(svc, sc, "getCurrentFuelEconomy", (byte) 0);
+                if (nInstFuel == null || !isValidFuelEconomy(nInstFuel.doubleValue())) {
+                    nInstFuel = invokeTmNumberByteArg(svc, sc, "get10sFuelEconomy", (byte) 0);
+                }
+                if (nInstFuel == null || !isValidFuelEconomy(nInstFuel.doubleValue())) {
+                    nInstFuel = invokeTmNumber0(svc, sc, "realTimeFuel");
+                }
+                if (nInstFuel != null && isValidFuelEconomy(nInstFuel.doubleValue())) {
+                    liveSnapshot.instFuelKmL = nInstFuel.doubleValue();
+                }
+
+                if (liveSnapshot.odometerKm <= 0.0) {
+                    Number nOdo = invokeTmNumberByteArg(svc, sc, "getOdometer", (byte) 0);
+                    if (nOdo != null && nOdo.doubleValue() >= 1.0 && nOdo.doubleValue() < 1500000.0) {
+                        liveSnapshot.odometerKm = nOdo.doubleValue();
+                    }
+                }
+                if (liveSnapshot.startOdometerKm <= 0.0) {
+                    Number nStartOdo = invokeTmNumberByteArg(svc, sc, "getStartOdometer", (byte) 0);
+                    if (nStartOdo != null && nStartOdo.doubleValue() >= 1.0 && nStartOdo.doubleValue() < 1500000.0) {
+                        liveSnapshot.startOdometerKm = nStartOdo.doubleValue();
+                    }
+                }
+                if (liveSnapshot.odometerKm > 0.0 && liveSnapshot.startOdometerKm > 0.0
+                        && liveSnapshot.odometerKm >= liveSnapshot.startOdometerKm) {
+                    liveSnapshot.tripKm = Math.max(0.0, liveSnapshot.odometerKm - liveSnapshot.startOdometerKm);
                 }
 
                 int acRaw = ((Integer) cachedNoArgMethod(sc, "airConEleConsum").invoke(svc)).intValue();
@@ -7367,6 +7760,15 @@ public class TurzxMonitorMain {
             }
             boolean rearCam = "1".equals(getSystemProperty("persist.sys.rearcam.open", "0"));
             String resolved = resolveGearPosition(tmGearRaw, pgsGearP, pgsGearN, sysGearP, rearCam, liveSnapshot.drivePowerKw);
+            String micomGear = lastMicomGearPos;
+            if (!rearCam && !Boolean.TRUE.equals(pgsGearP) && sysGearP != 1
+                    && (resolved.isEmpty() || ("P".equals(resolved) && !micomGear.isEmpty() && !"P".equals(micomGear)))) {
+                if (!micomGear.isEmpty()) {
+                    resolved = micomGear;
+                } else if (liveSnapshot.carrotSpeedKph >= 2) {
+                    resolved = "D";
+                }
+            }
             if (!resolved.isEmpty()) {
                 liveSnapshot.gearPos = resolved;
             }
@@ -7976,6 +8378,26 @@ public class TurzxMonitorMain {
             c.batteryConditioning = liveSnapshot.batteryConditioning;
             c.gearPos = liveSnapshot.gearPos;
             c.accelPedalPct = liveSnapshot.accelPedalPct;
+            c.engineType = liveSnapshot.engineType;
+            c.hevServicePresent = liveSnapshot.hevServicePresent;
+            c.fuelLevelPct = liveSnapshot.fuelLevelPct;
+            c.fuelDispLvl = liveSnapshot.fuelDispLvl;
+            c.lowFuelWarn = liveSnapshot.lowFuelWarn;
+            c.iceDteKm = liveSnapshot.iceDteKm;
+            c.avgFuelKmL = liveSnapshot.avgFuelKmL;
+            c.instFuelKmL = liveSnapshot.instFuelKmL;
+            c.coolantTempC = liveSnapshot.coolantTempC;
+            c.engineRpm = liveSnapshot.engineRpm;
+            c.obdSpeedKph = liveSnapshot.obdSpeedKph;
+            c.engineRunSec = liveSnapshot.engineRunSec;
+            c.engineDriveSec = liveSnapshot.engineDriveSec;
+            c.engineIdleSec = liveSnapshot.engineIdleSec;
+            c.odometerKm = liveSnapshot.odometerKm;
+            c.startOdometerKm = liveSnapshot.startOdometerKm;
+            c.tripKm = liveSnapshot.tripKm;
+            c.milOn = liveSnapshot.milOn;
+            c.engineOilWarn = liveSnapshot.engineOilWarn;
+            c.lastObdIceRxMs = liveSnapshot.lastObdIceRxMs;
             c.hasClimateData = liveSnapshot.hasClimateData;
             c.hvacOn = liveSnapshot.hvacOn;
             c.hvacAuto = liveSnapshot.hvacAuto;
@@ -8153,26 +8575,46 @@ public class TurzxMonitorMain {
         }
 
         // =================================================================
-        // Full-screen diagnostic dashboard (v1.4.3). Hidden at boot; MAP held 3s (HotkeyWatcher), the launcher
-        // "show"/"toggle" commands or the ✖ button change it. Auto-hidden while reversing / rear camera / screen off.
+        // Full-screen dashboard (v1.5.13 layout): header with four tabs (차량 / 화면 설정 / 성능 / 시스템) and the
+        // update / log / close buttons. Hidden at boot; MAP held 3s (HotkeyWatcher), the launcher "show"/"toggle"
+        // commands or the close button change it. Auto-hidden while reversing / rear camera / screen off.
+        // Every live text, bar and colour comes from buildDashboardValues() (pure, self-tested); the views only
+        // register under a key and applyValues() copies what changed.
         // =================================================================
-        static final String[] CARD_TITLES = new String[]{
-                "USB · 프레임 파이프라인", "배터리", "전력 · 주행", "공조", "미디어", "연결 · 시스템"
-        };
-        private static final int CARD_COUNT = 6;
+        static final String[] TAB_TITLES = new String[]{"차량", "화면 설정", "성능", "시스템"};
+        static final int TAB_VEHICLE = 0, TAB_DISPLAY = 1, TAB_PERF = 2, TAB_SYSTEM = 3;
+        /** Pseudo tuning row for the auto-update switch (saved to monitor.conf at once, not a LiveTuning value). */
+        static final int ROW_AUTO_UPDATE = 100;
         private static final long REFRESH_MS = 500L;
-        private static final Object[] cardBodyTvs = new Object[CARD_COUNT];
-        private static final String[] lastCardTexts = new String[CARD_COUNT];
+        /** Last tab opened; kept while the daemon runs so the dashboard reopens where it was left. */
+        static volatile int currentTab = TAB_VEHICLE;
+
+        static final int C_BG = 0xF6070B14, C_CARD = 0xFF0F172A, C_LINE = 0xFF1E293B, C_TILE = 0xFF111C33,
+                C_TEXT = 0xFFF8FAFC, C_TEXT2 = 0xFFCBD5E1, C_MUTED = 0xFF94A3B8, C_FAINT = 0xFF8391A7,
+                C_ACCENT = 0xFF38BDF8, C_ON_ACCENT = 0xFF04121C, C_TRACK = 0xFF070B14, C_CHIP = 0xFF1E293B,
+                C_GOOD = 0xFF86EFAC, C_GOOD_BG = 0xFF0A2A1B, C_WARN = 0xFFFCD34D, C_WARN_BG = 0xFF3B2A07,
+                C_ORANGE = 0xFFFDBA74, C_ORANGE_BG = 0xFF3B1D0A, C_DOT_OK = 0xFF22C55E, C_DOT_OFF = 0xFF64748B,
+                C_SWITCH_OFF = 0xFF334155, C_KNOB_OFF = 0xFFE2E8F0;
+
+        // ---- view registry (UI thread only; cleared on hide) ----
+        private static final HashMap<String, Object> valueTvs = new HashMap<String, Object>();
+        private static final HashMap<String, String> lastValues = new HashMap<String, String>();
+        private static final HashMap<String, Object[]> barViews = new HashMap<String, Object[]>();   // {fill, rest, fillGd}
+        private static final HashMap<String, Double> lastBars = new HashMap<String, Double>();
+        private static final HashMap<String, Object[]> toneViews = new HashMap<String, Object[]>();  // {textView|null, gd|null}
+        private static final HashMap<String, Integer> lastTones = new HashMap<String, Integer>();
+        private static final List<Object[]> segViews = new ArrayList<Object[]>();     // {tv, gd, row, value, lastSel}
+        private static final List<Object[]> switchViews = new ArrayList<Object[]>();  // {track, trackGd, knobGd, row, lastOn}
+        private static final Object[] tabButtons = new Object[TAB_TITLES.length];
+        private static final Object[] tabButtonGds = new Object[TAB_TITLES.length];
+        private static final Object[] tabPages = new Object[TAB_TITLES.length];
         private static volatile Object subtitleTv = null;
-        // Sized from the experiment panel rows (v1.4.7: a fixed size of 5 broke the dashboard when rows 6-7 were added)
-        static final Object[] controlValueTvs = new Object[LiveTuning.ROW_LABELS.length];
-        static final String[] lastControlTexts = new String[LiveTuning.ROW_LABELS.length];
-        private static volatile Object benchTv = null;
-        private static final String[] lastBenchText = new String[]{""};
         private static String lastSubtitle = "";
+        private static Ui ui = null;
         private static volatile boolean wantVisible = false;
         private static boolean lastShownState = true;
         private static int showRetries = 0; // UI thread only
+        private static boolean refreshErrorLogged = false;
 
         /** Pipeline / system values shown on the dashboard (filled from the live getters, or by self-tests). */
         static final class DashboardStats {
@@ -8253,84 +8695,253 @@ public class TurzxMonitorMain {
             return s.length() <= max ? s : s.substring(0, Math.max(1, max - 1)) + "…";
         }
 
-        /** Card texts: at most 7 short lines each (cards are ~390px wide at 19px). */
-        static String[] buildDashboardBodies(TelemetrySnapshot s, DashboardStats p) {
-            String[] b = new String[CARD_COUNT];
+        /** Everything the dashboard shows, keyed like the views that display it. */
+        static final class DashValues {
+            final HashMap<String, String> text = new HashMap<String, String>();
+            final HashMap<String, Double> bar = new HashMap<String, Double>();     // 0..1
+            /** key -> {text colour, fill colour}; 0 leaves that part as built. */
+            final HashMap<String, int[]> tone = new HashMap<String, int[]>();
 
-            b[0] = cut(p.usbStatus.replace("TURZX ", ""), 22) + "\n"
-                    + String.format(Locale.US, "FPS %.1f / 목표 %d\n", p.fps, p.targetFps)
-                    + "JPEG " + d1(p.jpegKb, p.jpegKb > 0.0) + "KB · "
-                    + (p.dirtyRows.isEmpty() ? "누적 " + p.frames : "갱신 " + p.dirtyRows + "행") + "\n"
-                    + String.format(Locale.US, "렌더 %.0f(도로 %.0f) · 인코딩 %.0f\n", p.renderMs, p.roadMs, p.encodeMs)
-                    + String.format(Locale.US, "전송 %.0f · 응답 %.0fms\n", p.txMs, p.ackMs)
-                    + String.format(Locale.US, "수집 %.0fms · CPU ", p.pollMs)
-                    + (p.cpuPct >= 0.0 ? String.format(Locale.US, "%.0f%%", p.cpuPct) : "--") + "/400%\n"
-                    + "→ " + describeBottleneck(p);
+            String t(String k) {
+                String v = text.get(k);
+                return v != null ? v : "";
+            }
 
-            double soc = s.getEffectiveSocPct();
-            b[1] = "SOC " + d1(soc, soc >= 0.0) + "% · BMS " + d1(s.bmsSocPct, s.bmsSocPct >= 0.0) + "%\n"
-                    + "SOH " + d1(s.sohPct, s.sohPct >= 0.0) + "% · 잔여 "
-                    + d1(s.remainEnergyKwh, s.remainEnergyKwh > 0.0) + "kWh\n"
-                    + "주행가능 " + (isValidDteValue(s.dteKm) ? String.valueOf(s.dteKm) : "--") + "km"
-                    + (s.dteAirconOffDeltaKm > 0 ? " (공조OFF +" + s.dteAirconOffDeltaKm + ")" : "") + "\n"
-                    + "전비 " + d1(s.avgEconomyKmKwh, s.avgEconomyKmKwh > 0.0) + " km/kWh\n"
-                    + "팩 " + d1(s.packVoltV, s.packVoltV > 0.0) + "V · " + d1(s.packCurrA, s.hasPackCurrent) + "A\n"
-                    + "셀 " + (s.cellMaxVoltV > 0.0 ? String.format(Locale.US, "%.2f", s.cellMaxVoltV) : "--") + "/"
-                    + (s.cellMinVoltV > 0.0 ? String.format(Locale.US, "%.2f", s.cellMinVoltV) : "--") + "V · 편차 "
-                    + (s.cellDiffMv >= 0 ? String.valueOf(s.cellDiffMv) : "--") + "mV\n"
-                    + "온도 " + (s.battMinTempC != null ? String.valueOf(s.battMinTempC) : "--") + " ~ "
-                    + (s.battMaxTempC != null ? String.valueOf(s.battMaxTempC) : "--") + "°C";
+            void put(String k, String v) {
+                text.put(k, v != null && !v.isEmpty() ? v : "--");
+            }
 
-            double total = s.getTotalPowerKw();
-            String chg = s.fastCharging ? "급속 충전 중" : (s.stdCharging ? "완속 충전 중" : (s.charging ? "충전 중" : "충전 안 함"));
-            boolean chgOn = s.fastCharging || s.stdCharging || s.charging;
-            b[2] = String.format(Locale.US, "총 %+.1fkW%s · 구동 %.1f\n", total, total < -0.05 ? " (회생)" : "",
-                    s.getEffectiveDriveMotorKw())
-                    + String.format(Locale.US, "공조 %.1f · 전장 %.1f · 배터리 %.1f\n", Math.max(0.0, s.climatePowerKw),
-                    Math.max(0.0, s.electronicsPowerKw), Math.max(0.0, s.batteryCarePowerKw))
-                    + "기어 " + (s.gearPos != null && !s.gearPos.isEmpty() ? s.gearPos : "--")
-                    + " · Ready " + (s.evReady ? "ON" : "OFF") + (chgOn ? " · " + chg : "")
-                    + (s.batteryConditioning ? " · 컨디셔닝" : "") + "\n"
-                    + "속도 " + Math.max(0, s.carrotSpeedKph) + " · 크루즈 "
-                    + (s.carrotCruiseKph > 0 ? String.valueOf(s.carrotCruiseKph) : "--")
-                    + String.format(Locale.US, " · 조향 %+.1f°\n", s.steeringAngleDeg)
-                    + LampProbe.dashboardText(System.currentTimeMillis());
+            void bar(String k, double frac) {
+                bar.put(k, Double.isNaN(frac) ? 0.0 : Math.max(0.0, Math.min(1.0, frac)));
+            }
 
-            StringBuilder flags = new StringBuilder();
-            if (s.hvacAuto) flags.append(" AUTO");
-            if (s.hvacAc) flags.append(" A/C");
-            if (s.hvacHeat) flags.append(" HEAT");
-            if (s.hvacSync) flags.append(" SYNC");
-            b[3] = (s.hvacOn ? "ON ·" + flags : "OFF") + "\n"
-                    + (s.hvacRecirc ? "내기" : "외기") + " · 풍량 "
-                    + (s.hvacBlowerStep >= 0 ? s.hvacBlowerStep + "단" : "--") + "\n"
-                    + "운전석 " + d1(s.hvacDrTempC, s.hvacOn) + "° · 동승석 "
-                    + (s.hvacDriverOnly ? "DRV" : d1(s.hvacPsTempC, s.hvacOn) + "°") + "\n"
-                    + "실내 " + d1(s.inCarTempC, s.inCarTempC > -50.0) + "° · 실외 "
-                    + d1(s.outdoorTempC, s.outdoorTempC > -50.0) + "°\n"
-                    + "모드 " + formatBlowerModeText(s.hvacBlowerMode) + "\n"
-                    + "앞유리 " + (s.hvacFrontDefog ? "ON" : "OFF") + " · 뒷유리 " + (s.hvacRearDefog ? "ON" : "OFF")
-                    + (s.hasClimateData ? "" : "\n(공조 데이터 미수신)");
+            void tone(String k, int fg, int bg) {
+                tone.put(k, new int[]{fg, bg});
+            }
+        }
 
-            b[4] = "소스 " + cut(s.mediaSource, 16) + "\n"
-                    + "제목 " + cut(s.mediaTitle, 16) + "\n"
-                    + "가수 " + cut(s.mediaArtist, 16) + "\n"
-                    + "앨범 " + cut(s.mediaAlbum, 16) + "\n"
-                    + (s.mediaPlaying ? "▶ 재생 " : "❚❚ 정지 ") + TurzxFrameRenderer.formatSecMinTwoDigit(s.mediaPositionSec)
-                    + " / " + TurzxFrameRenderer.formatSecMinTwoDigit(s.mediaDurationSec) + "\n"
-                    + "앨범아트 " + (s.albumArtBitmap != null ? cut(s.albumArtSource, 14) : "없음");
+        private static String f2(double v) {
+            return String.format(Locale.US, "%.2f", v);
+        }
 
-            String recent = p.recentKeys;
-            int comma = recent != null ? recent.indexOf(", ") : -1;
-            if (comma > 0) recent = recent.substring(0, comma); // newest key only
-            b[5] = "Comma " + (s.carrotConnected ? cut(s.carrotIp, 16) : "미연결") + "\n"
-                    + String.format(Locale.US, "TPMS %.0f/%.0f/%.0f/%.0f psi\n",
-                    s.tpmsFlPsi, s.tpmsFrPsi, s.tpmsRlPsi, s.tpmsRrPsi)
-                    + "OTA " + cut(p.otaStatus, 18) + "\n"
-                    + "MAP " + cut(p.hotkeyInfo, 20) + "\n"
-                    + "최근 키 " + cut(recent, 18) + "\n"
-                    + BodyProbe.dashboardText();
-            return b;
+        private static String tirePsi(double v) {
+            return v > 0.0 ? String.format(Locale.US, "%.0f", v) : "--";
+        }
+
+        static DashValues buildDashboardValues(TelemetrySnapshot s, DashboardStats p, long nowMs) {
+            DashValues v = new DashValues();
+            boolean ice = s.isIceMode(LiveTuning.powertrainMode);
+
+            // ---------------- 차량: energy hero + six tiles ----------------
+            if (ice) {
+                String ptTag = LiveTuning.powertrainMode == POWERTRAIN_ICE ? "고정" : "자동";
+                v.put("bat.title", "연료 · 내연차(" + ptTag + ")");
+                v.put("bat.big", s.fuelLevelPct >= 0 ? s.fuelLevelPct + "%" : "--%");
+                v.bar("bat", s.fuelLevelPct >= 0 ? s.fuelLevelPct / 100.0 : 0.0);
+                boolean low = s.lowFuelWarn || (s.fuelLevelPct >= 0 && s.fuelLevelPct < 15);
+                v.tone("bat", 0, low ? 0xFFF59E0B : 0xFF22C55E);
+                v.put("bat.range", isValidDteValue(s.iceDteKm) ? s.iceDteKm + " km" : "-- km");
+                v.put("bat.rangeSub", "주행 가능" + (s.lowFuelWarn ? " · 저연료 경고" : ""));
+                String v12 = s.auxBattVoltV > 0.0 ? d1(s.auxBattVoltV, true) + " V"
+                        : (s.auxBattSocPct >= 0 ? s.auxBattSocPct + "%" : "--");
+                String[][] tiles = {
+                        {"평균 연비 km/L", d1(s.avgFuelKmL, s.avgFuelKmL > 0.0)},
+                        {"순간 연비 km/L", d1(s.instFuelKmL, s.instFuelKmL > 0.0)},
+                        {"냉각수", s.coolantTempC > Integer.MIN_VALUE ? s.coolantTempC + "°C" : "--"},
+                        {"12V 배터리", v12},
+                        {"누적 거리", s.odometerKm > 0.0 ? String.format(Locale.US, "%.0f km", s.odometerKm) : "--"},
+                        {"경고등", s.milOn ? "MIL 켜짐" : (s.engineOilWarn ? "오일 경고" : "없음")}};
+                for (int i = 0; i < tiles.length; i++) {
+                    v.put("m" + i + ".l", tiles[i][0]);
+                    v.put("m" + i + ".v", tiles[i][1]);
+                }
+                v.put("pw.title", "엔진");
+                v.put("pw.big", s.engineRpm >= 0 ? s.engineRpm + " rpm" : "-- rpm");
+                String[][] rows = {
+                        {"페달", s.accelPedalPct >= 0.0 ? String.format(Locale.US, "%.0f%%", s.accelPedalPct) : "--"},
+                        {"주행", s.engineRunSec >= 0L ? (s.engineRunSec / 60L) + "분" : "--"},
+                        {"공회전", s.engineIdleSec >= 0L ? (s.engineIdleSec / 60L) + "분" : "--"},
+                        {"트립", s.tripKm >= 0.0 ? String.format(Locale.US, "%.1f km", s.tripKm) : "--"}};
+                for (int i = 0; i < rows.length; i++) {
+                    v.put("pw" + i + ".l", rows[i][0]);
+                    v.put("pw" + i + ".v", rows[i][1]);
+                    v.bar("pw" + i, i == 0 && s.accelPedalPct >= 0.0 ? s.accelPedalPct / 100.0 : 0.0);
+                }
+            } else {
+                double soc = s.getEffectiveSocPct();
+                v.put("bat.title", "배터리");
+                v.put("bat.big", soc >= 0.0 ? d1(soc, true) + "%" : "--%");
+                v.bar("bat", soc >= 0.0 ? soc / 100.0 : 0.0);
+                v.tone("bat", 0, soc >= 0.0 && soc <= 20.0 ? 0xFFF59E0B : 0xFF22C55E);
+                v.put("bat.range", isValidDteValue(s.dteKm) ? s.dteKm + " km" : "-- km");
+                v.put("bat.rangeSub", "주행 가능" + (s.dteAirconOffDeltaKm > 0 ? " · 공조 끄면 +" + s.dteAirconOffDeltaKm : ""));
+                String temp = "--";
+                if (s.battMinTempC != null && s.battMaxTempC != null && !s.battMinTempC.equals(s.battMaxTempC)) {
+                    temp = s.battMinTempC + "~" + s.battMaxTempC + "°C";
+                } else if (s.battMaxTempC != null) {
+                    temp = s.battMaxTempC + "°C";
+                } else if (s.battMinTempC != null) {
+                    temp = s.battMinTempC + "°C";
+                }
+                String[][] tiles = {
+                        {"배터리 온도", temp},
+                        {"SOH", s.sohPct >= 0.0 ? d1(s.sohPct, true) + "%" : "--"},
+                        {"셀 편차", s.cellDiffMv >= 0 ? s.cellDiffMv + " mV" : "--"},
+                        {"팩 전압", s.packVoltV > 0.0 ? d1(s.packVoltV, true) + " V" : "--"},
+                        {"남은 에너지", s.remainEnergyKwh > 0.0 ? d1(s.remainEnergyKwh, true) + " kWh" : "--"},
+                        {"평균 전비 km/kWh", d1(s.avgEconomyKmKwh, s.avgEconomyKmKwh > 0.0)}};
+                for (int i = 0; i < tiles.length; i++) {
+                    v.put("m" + i + ".l", tiles[i][0]);
+                    v.put("m" + i + ".v", tiles[i][1]);
+                }
+                double total = s.getTotalPowerKw();
+                v.put("pw.title", "소비 전력");
+                v.put("pw.big", total < -0.05 ? String.format(Locale.US, "회생 %.1f kW", -total) : f2(Math.max(0.0, total)) + " kW");
+                double[] kw = {s.getEffectiveDriveMotorKw(), Math.max(0.0, s.climatePowerKw),
+                        Math.max(0.0, s.electronicsPowerKw), Math.max(0.0, s.batteryCarePowerKw)};
+                String[] names = {"구동", "공조", "전장", "배터리"};
+                double sum = 0.0;
+                for (double k : kw) sum += Math.abs(k);
+                double denom = Math.max(1.0, sum);
+                for (int i = 0; i < kw.length; i++) {
+                    v.put("pw" + i + ".l", names[i]);
+                    v.put("pw" + i + ".v", f2(kw[i]));
+                    v.bar("pw" + i, Math.abs(kw[i]) / denom);
+                }
+            }
+
+            // ---------------- 차량: drive / body ----------------
+            boolean chgOn = !ice && (s.fastCharging || s.stdCharging || s.charging);
+            String chg = s.fastCharging ? "급속 충전 중" : (s.stdCharging ? "완속 충전 중" : "충전 중");
+            String gear = s.gearPos != null && !s.gearPos.isEmpty() ? s.gearPos + "단" : "기어 --";
+            v.put("dr.gear", gear + (!ice && s.evReady ? " · READY" : "") + (chgOn ? " · " + chg : ""));
+            if (chgOn) v.tone("dr.gear", C_GOOD, C_GOOD_BG);
+            else v.tone("dr.gear", C_TEXT, C_CHIP);
+            boolean pb = BodyProbe.parkingBrakeOn();
+            v.put("dr.park", BodyProbe.activeParkSource() < 0 ? "주차브레이크 신호 없음" : (pb ? "주차브레이크 체결" : "주차브레이크 해제"));
+            if (pb) v.tone("dr.park", C_ORANGE, C_ORANGE_BG);
+            else v.tone("dr.park", C_TEXT2, C_CHIP);
+            if (!BodyProbe.hasDoorData()) {
+                v.put("dr.door", "문 신호 없음");
+                v.tone("dr.door", C_TEXT2, C_CHIP);
+            } else {
+                String open = BodyProbe.openText();
+                v.put("dr.door", "문 " + (open.isEmpty() ? "닫힘" : open + " 열림") + (BodyProbe.doorsLocked() ? " · 잠김" : " · 잠금 해제"));
+                if (open.isEmpty()) v.tone("dr.door", C_TEXT2, C_CHIP);
+                else v.tone("dr.door", C_ORANGE, C_ORANGE_BG);
+            }
+            v.put("dr.line", s.carrotConnected
+                    ? "콤마 연결 · " + Math.max(0, s.carrotSpeedKph) + " km/h · 크루즈 "
+                    + (s.carrotCruiseKph > 0 ? s.carrotCruiseKph + " km/h" : "--")
+                    : "콤마 미연결");
+            v.put("dr.steer", String.format(Locale.US, "조향 %+.1f°", s.steeringAngleDeg));
+
+            // ---------------- 차량: climate ----------------
+            if (!s.hasClimateData) {
+                v.put("cl.big", "--");
+                v.put("cl.mode", "공조 데이터 미수신");
+            } else if (!s.hvacOn) {
+                v.put("cl.big", "OFF");
+                v.put("cl.mode", "공조 꺼짐");
+            } else {
+                StringBuilder m = new StringBuilder();
+                if (s.hvacAuto) m.append("AUTO · ");
+                if (s.hvacAc) m.append("A/C · ");
+                if (s.hvacHeat) m.append("난방 · ");
+                if (s.hvacSync) m.append("동기화 · ");
+                m.append(s.hvacRecirc ? "내기" : "외기").append(" · ").append(formatBlowerModeText(s.hvacBlowerMode))
+                        .append(" · 바람 ").append(s.hvacBlowerStep >= 0 ? s.hvacBlowerStep + "단" : "--");
+                if (s.hvacFrontDefog) m.append(" · 앞유리");
+                if (s.hvacRearDefog) m.append(" · 뒷유리");
+                v.put("cl.mode", m.toString());
+                boolean same = s.hvacDriverOnly || Math.abs(s.hvacDrTempC - s.hvacPsTempC) < 0.05;
+                v.put("cl.big", d1(s.hvacDrTempC, true) + "°" + (same ? "" : " / " + d1(s.hvacPsTempC, true) + "°"));
+            }
+            v.put("cl.temps", "실내 " + d1(s.inCarTempC, s.inCarTempC > -50.0) + "° · 외기 "
+                    + d1(s.outdoorTempC, s.outdoorTempC > -50.0) + "°");
+
+            // ---------------- 차량: media + tyres ----------------
+            boolean hasMedia = s.mediaTitle != null && !s.mediaTitle.isEmpty();
+            v.put("md.src", cut(s.mediaSource, 18));
+            v.put("md.title", hasMedia ? s.mediaTitle : "재생 정보 없음");
+            StringBuilder ma = new StringBuilder();
+            if (s.mediaArtist != null && !s.mediaArtist.isEmpty()) ma.append(s.mediaArtist);
+            if (s.mediaAlbum != null && !s.mediaAlbum.isEmpty()) ma.append(ma.length() > 0 ? " · " : "").append(s.mediaAlbum);
+            v.put("md.sub", ma.toString());
+            v.put("md.pos", (s.mediaPlaying ? "▶ " : "❚❚ ") + TurzxFrameRenderer.formatSecMinTwoDigit(s.mediaPositionSec));
+            v.put("md.dur", TurzxFrameRenderer.formatSecMinTwoDigit(s.mediaDurationSec));
+            v.bar("md", s.mediaDurationSec > 0 ? (double) s.mediaPositionSec / s.mediaDurationSec : 0.0);
+            v.put("ty.fl", tirePsi(s.tpmsFlPsi));
+            v.put("ty.fr", tirePsi(s.tpmsFrPsi));
+            v.put("ty.rl", tirePsi(s.tpmsRlPsi));
+            v.put("ty.rr", tirePsi(s.tpmsRrPsi));
+
+            // ---------------- 화면 설정 ----------------
+            v.put("ds.q", String.valueOf(LiveTuning.jpegQuality));
+            boolean dirty = LiveTuning.differsFrom(config);
+            v.put("ds.save", dirty ? "저장 안 된 변경이 있습니다 · [저장]을 눌러야 재시작 후에도 유지됩니다"
+                    : "바꾼 값은 바로 적용되고, [저장]을 눌러야 재시작 후에도 유지됩니다");
+            v.tone("ds.save", dirty ? C_WARN : 0xFFCFFAFE, 0);
+
+            // ---------------- 성능 ----------------
+            v.put("pf.panel", p.usbConnected ? TurzxFrameRenderer.getActivePanelLabel() + " 연결됨" : "패널 미연결");
+            v.tone("pf.panel", p.usbConnected ? C_GOOD : C_MUTED, 0);
+            v.put("pf.fps", String.format(Locale.US, "%.1f", p.fps));
+            v.put("pf.target", "/ 목표 " + p.targetFps + " FPS");
+            String bn = describeBottleneck(p);
+            v.put("pf.bn", bn);
+            if (bn.startsWith("목표")) v.tone("pf.bn", C_GOOD, C_GOOD_BG);
+            else if (bn.startsWith("병목")) v.tone("pf.bn", C_WARN, C_WARN_BG);
+            else v.tone("pf.bn", C_TEXT2, C_CHIP);
+            double[] st = {p.renderMs, p.encodeMs, p.txMs, p.ackMs};
+            String[] sk = {"pf.r", "pf.e", "pf.t", "pf.a"};
+            double budget = 1000.0 / Math.max(1, p.targetFps);
+            for (double x : st) budget = Math.max(budget, x);
+            for (int i = 0; i < st.length; i++) {
+                v.put(sk[i] + ".v", String.format(Locale.US, "%.1f", st[i]));
+                v.bar(sk[i], st[i] / budget);
+            }
+            v.put("pf.kb", p.jpegKb > 0.0 ? String.format(Locale.US, "%.0f KB", p.jpegKb) : "--");
+            v.put("pf.rows", p.dirtyRows.isEmpty() ? "--" : p.dirtyRows);
+            v.put("pf.poll", String.format(Locale.US, "%.0f ms", p.pollMs));
+            v.put("pf.cpu", p.cpuPct >= 0.0 ? String.format(Locale.US, "%.0f%%", p.cpuPct) : "--");
+            v.put("pf.foot", cut(p.encoder, 44) + String.format(Locale.US, " · 도로 %.1fms · 누적 %,d장", p.roadMs, p.frames));
+            StringBuilder bench = new StringBuilder(FpsBench.statusLine(nowMs));
+            List<String[]> rec = FpsBench.recent(3);
+            for (int i = 0; i < rec.size(); i++) bench.append("\n").append(rec.get(i)[0]).append("\n   ").append(rec.get(i)[1]);
+            v.put("pf.bench", bench.toString());
+            String rst = PanelRstTest.statusLine(nowMs);
+            v.put("pf.rst", rst.isEmpty() ? "재시작 마커 지원 확인 · A/B/C 각 6초 · 결과 없음" : rst);
+
+            // ---------------- 시스템 ----------------
+            v.put("sy.usb.sub", cut(p.usbStatus, 40));
+            v.put("sy.usb.st", p.usbConnected ? "연결" : "미연결");
+            v.tone("sy.usb.st", p.usbConnected ? C_GOOD : C_MUTED, 0);
+            v.tone("sy.usb.dot", 0, p.usbConnected ? C_DOT_OK : C_DOT_OFF);
+            v.put("sy.comma.sub", s.carrotConnected && s.carrotIp != null && !s.carrotIp.isEmpty() ? s.carrotIp : "자동 검색 중");
+            v.put("sy.comma.st", s.carrotConnected ? "연결" : "미연결");
+            v.tone("sy.comma.st", s.carrotConnected ? C_GOOD : C_MUTED, 0);
+            v.tone("sy.comma.dot", 0, s.carrotConnected ? C_DOT_OK : C_DOT_OFF);
+            boolean tap = MicomTap.registered > 0;
+            v.put("sy.micom.sub", MicomTap.shortText());
+            v.put("sy.micom.st", tap ? "수신 중" : "대기");
+            v.tone("sy.micom.st", tap ? C_GOOD : C_MUTED, 0);
+            v.tone("sy.micom.dot", 0, tap ? C_DOT_OK : C_DOT_OFF);
+            boolean key = p.hotkeyInfo != null && !p.hotkeyInfo.isEmpty();
+            v.put("sy.key.sub", cut(p.hotkeyInfo, 40));
+            v.put("sy.key.st", key ? "감시 중" : "없음");
+            v.tone("sy.key.st", key ? C_GOOD : C_MUTED, 0);
+            v.tone("sy.key.dot", 0, key ? C_DOT_OK : C_DOT_OFF);
+            v.put("sy.ver", "v" + MONITOR_VERSION);
+            v.put("sy.ota", cut(p.otaStatus, 26));
+            v.tone("sy.ota", p.otaStatus != null && p.otaStatus.contains("최신") ? C_GOOD : C_TEXT2, 0);
+            String dump = DebugManager.getLastDumpPath();
+            v.put("sy.log", dump == null || dump.isEmpty() ? "이번 실행에서는 아직 저장 안 함" : "마지막 저장: " + cut(dump, 48));
+            v.put("sy.recent", cut(p.recentKeys, 64));
+            v.put("sy.body", BodyProbe.dashboardText());
+            v.put("sy.lamp", LampProbe.dashboardText(nowMs));
+            v.put("sy.tap", MicomTap.shortText());
+            return v;
         }
 
         public static void toggle() {
@@ -8470,229 +9081,15 @@ public class TurzxMonitorMain {
                 return;
             }
             try {
-                Class<?> ctxCls = Class.forName("android.content.Context");
-                Class<?> viewCls = Class.forName("android.view.View");
-                Class<?> vgCls = Class.forName("android.view.ViewGroup");
-                Class<?> vgLpCls = Class.forName("android.view.ViewGroup$LayoutParams");
-                Class<?> llCls = Class.forName("android.widget.LinearLayout");
-                Class<?> llLpCls = Class.forName("android.widget.LinearLayout$LayoutParams");
-                Class<?> tvCls = Class.forName("android.widget.TextView");
-                Class<?> gdCls = Class.forName("android.graphics.drawable.GradientDrawable");
-                Class<?> drawableCls = Class.forName("android.graphics.drawable.Drawable");
-                Method setOrientation = llCls.getMethod("setOrientation", int.class);
-                Method setGravity = llCls.getMethod("setGravity", int.class);
-                Method setPadding = viewCls.getMethod("setPadding", int.class, int.class, int.class, int.class);
-                Method setBg = viewCls.getMethod("setBackgroundDrawable", drawableCls);
-                Method addView = vgCls.getMethod("addView", viewCls, vgLpCls);
-                Method setMargins = llLpCls.getMethod("setMargins", int.class, int.class, int.class, int.class);
-                Constructor<?> llLpCtor = llLpCls.getConstructor(int.class, int.class);
-                Constructor<?> llLpWCtor = llLpCls.getConstructor(int.class, int.class, float.class);
-                Method setLineSpacing = tvCls.getMethod("setLineSpacing", float.class, float.class);
-
+                Ui u = new Ui(sysContext);
+                ui = u;
                 // Root: full screen, vertical
-                Object root = llCls.getConstructor(ctxCls).newInstance(sysContext);
-                setOrientation.invoke(root, 1); // VERTICAL
-                setPadding.invoke(root, 28, 18, 28, 14);
-                setBg.invoke(root, newRoundBg(gdCls, 0xF6070B14, 0f, 0, 0));
-
-                // Header: title · subtitle (version/time/banner) · buttons
-                Object header = llCls.getConstructor(ctxCls).newInstance(sysContext);
-                setOrientation.invoke(header, 0);
-                setGravity.invoke(header, 16); // CENTER_VERTICAL
-                addView.invoke(header, newText(ctxCls, tvCls, viewCls, "TURZX HUD 진단", 34f, 0xFFF8FAFC, true),
-                        llLpCtor.newInstance(-2, -2));
-                Object sub = newText(ctxCls, tvCls, viewCls, "", 22f, 0xFF94A3B8, false);
-                Object subLp = llLpWCtor.newInstance(0, -2, 1f);
-                setMargins.invoke(subLp, 24, 0, 16, 0);
-                addView.invoke(header, sub, subLp);
-
-                String[] labels = new String[]{" ☁️ 업데이트 ", " 💾 로그저장 ", " ✖ 닫기 "};
-                int[] strokes = new int[]{0xFF0284C7, 0xFF0D9488, 0xFF64748B};
-                Runnable[] actions = new Runnable[]{
-                        new Runnable() {
-                            @Override
-                            public void run() {
-                                OtaUpdateManager.triggerManualOta(installDir, false);
-                            }
-                        },
-                        new Runnable() {
-                            @Override
-                            public void run() {
-                                DebugManager.triggerAsyncDump(installDir);
-                            }
-                        },
-                        new Runnable() {
-                            @Override
-                            public void run() {
-                                setEnabledAndShow(false);
-                            }
-                        }
-                };
-                for (int i = 0; i < labels.length; i++) {
-                    Object btn = createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls, labels[i], strokes[i], actions[i]);
-                    Object lpBtn = llLpCtor.newInstance(-2, -2);
-                    setMargins.invoke(lpBtn, 12, 0, 0, 0);
-                    addView.invoke(header, btn, lpBtn);
-                }
-                addView.invoke(root, header, llLpCtor.newInstance(-1, -2));
-
-                // Body: experiment panel (left, full height) + 2 x 3 card grid (right)
-                Object bodyRow = llCls.getConstructor(ctxCls).newInstance(sysContext);
-                setOrientation.invoke(bodyRow, 0);
-                Object bodyRowLp = llLpWCtor.newInstance(-1, 0, 1f);
-                setMargins.invoke(bodyRowLp, 0, 14, 0, 0);
-
-                Object panel = llCls.getConstructor(ctxCls).newInstance(sysContext);
-                setOrientation.invoke(panel, 1);
-                setPadding.invoke(panel, 20, 14, 20, 12);
-                setBg.invoke(panel, newRoundBg(gdCls, 0xFF0B1A24, 16f, 2, 0xFF0E7490));
-                addView.invoke(panel, newText(ctxCls, tvCls, viewCls, "실험 패널 · 저장 전까지 임시 적용", 21f, 0xFF22D3EE, true),
-                        llLpCtor.newInstance(-1, -2));
-                Method setTvGravity = tvCls.getMethod("setGravity", int.class);
-                Method setTvWidth = tvCls.getMethod("setWidth", int.class);
-                for (int row = 0; row < LiveTuning.ROW_LABELS.length; row++) {
-                    final int r = row;
-                    Object ctl = llCls.getConstructor(ctxCls).newInstance(sysContext);
-                    setOrientation.invoke(ctl, 0);
-                    setGravity.invoke(ctl, 16);
-                    addView.invoke(ctl, newText(ctxCls, tvCls, viewCls, LiveTuning.ROW_LABELS[row], 20f, 0xFFCBD5E1, false),
-                            llLpWCtor.newInstance(0, -2, 1f));
-                    addView.invoke(ctl, createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls, " － ", 0xFF475569, 20f,
-                            new Runnable() {
-                                @Override
-                                public void run() {
-                                    LiveTuning.adjust(r, -1);
-                                    refreshOnUiThread();
-                                }
-                            }), llLpCtor.newInstance(-2, -2));
-                    Object val = newText(ctxCls, tvCls, viewCls, LiveTuning.valueText(row), 21f, 0xFFF8FAFC, true);
-                    setTvGravity.invoke(val, 17); // CENTER
-                    setTvWidth.invoke(val, 110);
-                    addView.invoke(ctl, val, llLpCtor.newInstance(-2, -2));
-                    addView.invoke(ctl, createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls, " ＋ ", 0xFF475569, 20f,
-                            new Runnable() {
-                                @Override
-                                public void run() {
-                                    LiveTuning.adjust(r, +1);
-                                    refreshOnUiThread();
-                                }
-                            }), llLpCtor.newInstance(-2, -2));
-                    controlValueTvs[row] = val;
-                    lastControlTexts[row] = "";
-                    Object ctlLp = llLpCtor.newInstance(-1, -2);
-                    setMargins.invoke(ctlLp, 0, 4, 0, 0);
-                    addView.invoke(panel, ctl, ctlLp);
-                }
-
-                Object actRow = llCls.getConstructor(ctxCls).newInstance(sysContext);
-                setOrientation.invoke(actRow, 0);
-                String[] actLabels = new String[]{" ▶측정 ", " 💾저장 ", " ↺복원 ", " 🧪RST "};
-                int[] actStrokes = new int[]{0xFF22D3EE, 0xFF0D9488, 0xFF64748B, 0xFFD9A441};
-                Runnable[] actRuns = new Runnable[]{
-                        new Runnable() {
-                            @Override
-                            public void run() {
-                                FpsBench.restart(LiveTuning.label(), System.currentTimeMillis());
-                                refreshOnUiThread();
-                            }
-                        },
-                        new Runnable() {
-                            @Override
-                            public void run() {
-                                LiveTuning.saveTo(config);
-                                saveMonitorConfig(configFile, config);
-                                DebugManager.logEvent("BENCH", "Saved experiment values to monitor.conf: " + LiveTuning.label());
-                                showBannerMessage("💾 실험 값 저장: " + LiveTuning.label(), 4000L);
-                            }
-                        },
-                        new Runnable() {
-                            @Override
-                            public void run() {
-                                LiveTuning.loadFrom(config);
-                                LiveTuning.panelFpsDirty = LiveTuning.panelFps > 0;
-                                FpsBench.restart(LiveTuning.label(), System.currentTimeMillis());
-                                showBannerMessage("↺ 저장된 설정으로 복원", 3000L);
-                            }
-                        },
-                        new Runnable() {
-                            @Override
-                            public void run() {
-                                // v1.4.4: panel JPEG restart-marker (DRI/RST) support test, A/B/C 6s each on the panel
-                                showBannerMessage("🧪 " + PanelRstTest.start(System.currentTimeMillis()), 5000L);
-                                refreshOnUiThread();
-                            }
-                        }
-                };
-                for (int i = 0; i < actLabels.length; i++) {
-                    Object lpAct = llLpCtor.newInstance(-2, -2);
-                    setMargins.invoke(lpAct, i > 0 ? 8 : 0, 0, 0, 0);
-                    addView.invoke(actRow, createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls,
-                            actLabels[i], actStrokes[i], 19f, actRuns[i]), lpAct);
-                }
-                Object actLp = llLpCtor.newInstance(-1, -2);
-                setMargins.invoke(actLp, 0, 12, 0, 0);
-                addView.invoke(panel, actRow, actLp);
-
-                Object bench = newText(ctxCls, tvCls, viewCls, "", 19f, 0xFFE2E8F0, false);
-                setLineSpacing.invoke(bench, 0f, 1.08f);
-                Object benchLp = llLpCtor.newInstance(-1, -2);
-                setMargins.invoke(benchLp, 0, 10, 0, 0);
-                addView.invoke(panel, bench, benchLp);
-                benchTv = bench;
-                lastBenchText[0] = "";
-                // v1.5.1: 9 tuning rows + actions + bench may exceed the screen height -> scrollable column
-                Object panelHost = panel;
-                try {
-                    Class<?> svCls = Class.forName("android.widget.ScrollView");
-                    Object sv = svCls.getConstructor(ctxCls).newInstance(sysContext);
-                    svCls.getMethod("setFillViewport", boolean.class).invoke(sv, Boolean.TRUE);
-                    addView.invoke(sv, panel, vgLpCls.getConstructor(int.class, int.class).newInstance(-1, -2));
-                    panelHost = sv;
-                } catch (Throwable svErr) {
-                    panelHost = panel;
-                }
-                addView.invoke(bodyRow, panelHost, llLpCtor.newInstance(520, -1));
-
-                Object grid = llCls.getConstructor(ctxCls).newInstance(sysContext);
-                setOrientation.invoke(grid, 1);
-                for (int row = 0; row < 2; row++) {
-                    Object rowLl = llCls.getConstructor(ctxCls).newInstance(sysContext);
-                    setOrientation.invoke(rowLl, 0);
-                    Object rowLp = llLpWCtor.newInstance(-1, 0, 1f);
-                    setMargins.invoke(rowLp, 0, row > 0 ? 14 : 0, 0, 0);
-                    for (int col = 0; col < 3; col++) {
-                        int idx = row * 3 + col;
-                        Object card = llCls.getConstructor(ctxCls).newInstance(sysContext);
-                        setOrientation.invoke(card, 1);
-                        setPadding.invoke(card, 18, 12, 18, 10);
-                        setBg.invoke(card, newRoundBg(gdCls, 0xFF0F172A, 16f, 2, 0xFF1E293B));
-                        addView.invoke(card, newText(ctxCls, tvCls, viewCls, CARD_TITLES[idx], 20f, 0xFF38BDF8, true),
-                                llLpCtor.newInstance(-1, -2));
-                        Object body = newText(ctxCls, tvCls, viewCls, "", 19f, 0xFFE2E8F0, false);
-                        setLineSpacing.invoke(body, 0f, 1.1f);
-                        Object bodyLp = llLpCtor.newInstance(-1, -2);
-                        setMargins.invoke(bodyLp, 0, 6, 0, 0);
-                        addView.invoke(card, body, bodyLp);
-                        cardBodyTvs[idx] = body;
-                        lastCardTexts[idx] = "";
-
-                        Object cardLp = llLpWCtor.newInstance(0, -1, 1f);
-                        setMargins.invoke(cardLp, col > 0 ? 14 : 0, 0, 0, 0);
-                        addView.invoke(rowLl, card, cardLp);
-                    }
-                    addView.invoke(grid, rowLl, rowLp);
-                }
-                Object gridLp = llLpWCtor.newInstance(0, -1, 1f);
-                setMargins.invoke(gridLp, 14, 0, 0, 0);
-                addView.invoke(bodyRow, grid, gridLp);
-                addView.invoke(root, bodyRow, bodyRowLp);
-
-                Object foot = newText(ctxCls, tvCls, viewCls,
-                        "MAP 버튼 3초: 열기/닫기  ·  실험 값은 [저장] 전까지 재시작하면 원래대로  ·  후진(R)·후방카메라·화면 꺼짐 시 자동 숨김",
-                        18f, 0xFF64748B, false);
-                Object footLp = llLpCtor.newInstance(-2, -2);
-                setMargins.invoke(footLp, 4, 8, 0, 0);
-                addView.invoke(root, foot, footLp);
+                Object root = u.ll(true);
+                u.pad(root, 28, 18, 28, 14);
+                u.bg(root, u.gd(C_BG, 0f, 0, 0));
+                buildDashboard(u, root);
+                Class<?> viewCls = u.viewCls;
+                Class<?> vgLpCls = u.vgLpCls;
 
                 Class<?> wmLpCls = Class.forName("android.view.WindowManager$LayoutParams");
                 Constructor<?> lpCtor = wmLpCls.getConstructor(int.class, int.class, int.class, int.class, int.class);
@@ -8708,15 +9105,15 @@ public class TurzxMonitorMain {
 
                 rootView = root;
                 currentWmLp = lp;
-                subtitleTv = sub;
-                lastSubtitle = "";
                 lastShownState = true;
                 isVisible = true;
-                DebugManager.logEvent("OVERLAY", "Full-screen dashboard shown");
+                refreshErrorLogged = false;
+                DebugManager.logEvent("OVERLAY", "Full-screen dashboard shown (tab " + TAB_TITLES[currentTab] + ")");
                 refreshOnUiThread();
             } catch (Throwable t) {
                 DebugManager.logError("OVERLAY", "showOnUiThread", t);
                 rootView = null;
+                ui = null;
                 if (showRetries < 1) {
                     showRetries++;
                     windowManager = null; // re-resolved by ensureUiContext()
@@ -8734,67 +9131,886 @@ public class TurzxMonitorMain {
             }
         }
 
-        private static Object createOverlayButton(Class<?> ctxCls, Class<?> viewCls, Class<?> tvCls, Class<?> gdCls,
-                                                  Class<?> drawableCls, String label, int strokeColor, Runnable onClick)
-                throws Exception {
-            return createOverlayButton(ctxCls, viewCls, tvCls, gdCls, drawableCls, label, strokeColor, 24f, onClick);
+        /** Reflection handles for the dashboard views (android.* is only reachable reflectively in this process). */
+        private static final class Ui {
+            final Object ctx;
+            final Class<?> viewCls, vgLpCls, llCls, llLpCls, tvCls, gdCls, drawableCls;
+            final Constructor<?> llCtor, tvCtor, viewCtor, llLpCtor, llLpWCtor, gdCtor;
+            final Method setOrientation, setLlGravity, setPadding, setBg, addView, setMargins, setLayoutParams,
+                    setVisibility, setText, setTextSize, setTextColor, setTvGravity, setSingleLine, setIncludeFontPadding,
+                    setLineSpacing, gdSetColor, gdSetRadius, gdSetStroke, setAlpha, setOnTouch;
+            final Object boldFace, ellipsizeEnd;
+            final Class<?> touchIfc, tfCls;
+
+            Ui(Object ctx) throws Exception {
+                this.ctx = ctx;
+                Class<?> ctxCls = Class.forName("android.content.Context");
+                viewCls = Class.forName("android.view.View");
+                Class<?> vgCls = Class.forName("android.view.ViewGroup");
+                vgLpCls = Class.forName("android.view.ViewGroup$LayoutParams");
+                llCls = Class.forName("android.widget.LinearLayout");
+                llLpCls = Class.forName("android.widget.LinearLayout$LayoutParams");
+                tvCls = Class.forName("android.widget.TextView");
+                gdCls = Class.forName("android.graphics.drawable.GradientDrawable");
+                drawableCls = Class.forName("android.graphics.drawable.Drawable");
+                llCtor = llCls.getConstructor(ctxCls);
+                tvCtor = tvCls.getConstructor(ctxCls);
+                viewCtor = viewCls.getConstructor(ctxCls);
+                llLpCtor = llLpCls.getConstructor(int.class, int.class);
+                llLpWCtor = llLpCls.getConstructor(int.class, int.class, float.class);
+                gdCtor = gdCls.getConstructor();
+                setOrientation = llCls.getMethod("setOrientation", int.class);
+                setLlGravity = llCls.getMethod("setGravity", int.class);
+                setPadding = viewCls.getMethod("setPadding", int.class, int.class, int.class, int.class);
+                setBg = viewCls.getMethod("setBackgroundDrawable", drawableCls);
+                addView = vgCls.getMethod("addView", viewCls, vgLpCls);
+                setMargins = llLpCls.getMethod("setMargins", int.class, int.class, int.class, int.class);
+                setLayoutParams = viewCls.getMethod("setLayoutParams", vgLpCls);
+                setVisibility = viewCls.getMethod("setVisibility", int.class);
+                setText = tvCls.getMethod("setText", CharSequence.class);
+                setTextSize = tvCls.getMethod("setTextSize", int.class, float.class);
+                setTextColor = tvCls.getMethod("setTextColor", int.class);
+                setTvGravity = tvCls.getMethod("setGravity", int.class);
+                setSingleLine = tvCls.getMethod("setSingleLine", boolean.class);
+                setIncludeFontPadding = tvCls.getMethod("setIncludeFontPadding", boolean.class);
+                setLineSpacing = tvCls.getMethod("setLineSpacing", float.class, float.class);
+                gdSetColor = gdCls.getMethod("setColor", int.class);
+                gdSetRadius = gdCls.getMethod("setCornerRadius", float.class);
+                gdSetStroke = gdCls.getMethod("setStroke", int.class, int.class);
+                setAlpha = viewCls.getMethod("setAlpha", float.class);
+                touchIfc = Class.forName("android.view.View$OnTouchListener");
+                setOnTouch = viewCls.getMethod("setOnTouchListener", touchIfc);
+                tfCls = Class.forName("android.graphics.Typeface");
+                boldFace = tfCls.getField("DEFAULT_BOLD").get(null);
+                Object end = null;
+                try {
+                    Class<?> truncCls = Class.forName("android.text.TextUtils$TruncateAt");
+                    for (Object c : truncCls.getEnumConstants()) if ("END".equals(c.toString())) end = c;
+                } catch (Throwable ignored) {
+                }
+                ellipsizeEnd = end;
+            }
+
+            Object ll(boolean vertical) throws Exception {
+                Object l = llCtor.newInstance(ctx);
+                setOrientation.invoke(l, vertical ? 1 : 0);
+                return l;
+            }
+
+            Object view() throws Exception {
+                return viewCtor.newInstance(ctx);
+            }
+
+            Object lp(int w, int h) throws Exception {
+                return llLpCtor.newInstance(w, h);
+            }
+
+            Object lpw(int w, int h, float weight) throws Exception {
+                return llLpWCtor.newInstance(w, h, weight);
+            }
+
+            Object m(Object lp, int l, int t, int r, int b) throws Exception {
+                setMargins.invoke(lp, l, t, r, b);
+                return lp;
+            }
+
+            void add(Object parent, Object child, Object lp) throws Exception {
+                addView.invoke(parent, child, lp);
+            }
+
+            void pad(Object v, int l, int t, int r, int b) throws Exception {
+                setPadding.invoke(v, l, t, r, b);
+            }
+
+            void gravity(Object ll, int g) throws Exception {
+                setLlGravity.invoke(ll, g);
+            }
+
+            Object gd(int fill, float radius, int strokeW, int strokeColor) throws Exception {
+                Object g = gdCtor.newInstance();
+                gdSetColor.invoke(g, fill);
+                gdSetRadius.invoke(g, radius);
+                if (strokeW > 0) gdSetStroke.invoke(g, strokeW, strokeColor);
+                return g;
+            }
+
+            void bg(Object v, Object gd) throws Exception {
+                setBg.invoke(v, gd);
+            }
+
+            Object text(String s, float px, int color, boolean bold) throws Exception {
+                Object tv = tvCtor.newInstance(ctx);
+                setText.invoke(tv, s);
+                setTextSize.invoke(tv, 0, px); // COMPLEX_UNIT_PX
+                setTextColor.invoke(tv, color);
+                if (bold) tvCls.getMethod("setTypeface", tfCls).invoke(tv, boldFace);
+                return tv;
+            }
+
+            void single(Object tv) throws Exception {
+                setSingleLine.invoke(tv, true);
+                if (ellipsizeEnd != null) {
+                    tvCls.getMethod("setEllipsize", ellipsizeEnd.getClass()).invoke(tv, ellipsizeEnd);
+                }
+            }
+
+            /** Runs r on finger-up; dims the view while pressed. Touch handled directly so 0.5s text refreshes never cancel a tap. */
+            void onTap(final Object v, final Runnable r) throws Exception {
+                Object proxy = Proxy.newProxyInstance(touchIfc.getClassLoader(), new Class<?>[]{touchIfc}, new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object p, Method method, Object[] args) {
+                        if ("onTouch".equals(method.getName()) && args != null && args.length >= 2 && args[1] != null) {
+                            try {
+                                Object me = args[1];
+                                int act = ((Integer) me.getClass().getMethod("getAction").invoke(me)).intValue() & 0xFF;
+                                if (act == 0) {
+                                    setAlpha.invoke(v, 0.55f);
+                                } else if (act == 1 || act == 3) {
+                                    setAlpha.invoke(v, 1.0f);
+                                    if (act == 1 && r != null) r.run();
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                            return Boolean.TRUE;
+                        }
+                        if ("equals".equals(method.getName()) && args != null && args.length == 1) return p == args[0];
+                        if ("hashCode".equals(method.getName())) return System.identityHashCode(p);
+                        if ("toString".equals(method.getName())) return "DashTap";
+                        return Boolean.FALSE;
+                    }
+                });
+                setOnTouch.invoke(v, proxy);
+                viewCls.getMethod("setClickable", boolean.class).invoke(v, true);
+            }
         }
 
-        private static Object createOverlayButton(
-                Class<?> ctxCls,
-                Class<?> viewCls,
-                Class<?> tvCls,
-                final Class<?> gdCls,
-                Class<?> drawableCls,
-                String label,
-                final int strokeColor,
-                float textSizePx,
-                final Runnable onClick
-        ) throws Exception {
-            final Object btn = tvCls.getConstructor(ctxCls).newInstance(sysContext);
-            tvCls.getMethod("setText", CharSequence.class).invoke(btn, label);
-            tvCls.getMethod("setTextSize", int.class, float.class).invoke(btn, 0, textSizePx);
-            tvCls.getMethod("setTextColor", int.class).invoke(btn, 0xFFF8FAFC);
-            int padH = Math.round(textSizePx * 0.9f);
-            int padV = Math.round(textSizePx * 0.45f);
-            viewCls.getMethod("setPadding", int.class, int.class, int.class, int.class).invoke(btn, padH, padV, padH, padV);
+        // ---- registered building blocks ----
+        private static Object val(Ui u, String key, float px, int color, boolean bold) throws Exception {
+            Object tv = u.text("", px, color, bold);
+            valueTvs.put(key, tv);
+            return tv;
+        }
 
-            final Object gd = newRoundBg(gdCls, 0xFF1E293B, 12f, 2, strokeColor);
-            viewCls.getMethod("setBackgroundDrawable", drawableCls).invoke(btn, gd);
-            viewCls.getMethod("setClickable", boolean.class).invoke(btn, true);
+        private static Object card(Ui u, String title) throws Exception {
+            Object c = u.ll(true);
+            u.pad(c, 22, 16, 22, 16);
+            u.bg(c, u.gd(C_CARD, 18f, 2, C_LINE));
+            if (title != null) u.add(c, u.text(title, 20f, C_ACCENT, true), u.lp(-1, -2));
+            return c;
+        }
 
-            // Handle touch directly on ACTION_DOWN / ACTION_UP so periodic text refreshes never cancel clicks
-            Class<?> touchIfc = Class.forName("android.view.View$OnTouchListener");
-            Object touchProxy = Proxy.newProxyInstance(
-                    touchIfc.getClassLoader(),
-                    new Class<?>[]{touchIfc},
-                    new InvocationHandler() {
-                        @Override
-                        public Object invoke(Object proxy, Method method, Object[] args) {
-                            if ("onTouch".equals(method.getName()) && args != null && args.length >= 2 && args[1] != null) {
-                                try {
-                                    Object me = args[1];
-                                    int act = ((Integer) me.getClass().getMethod("getAction").invoke(me)).intValue() & 0xFF;
-                                    if (act == 0) { // ACTION_DOWN: instant highlight feedback
-                                        gdCls.getMethod("setColor", int.class).invoke(gd, strokeColor);
-                                        btn.getClass().getMethod("invalidate").invoke(btn);
-                                    } else if (act == 1 || act == 3) { // ACTION_UP / ACTION_CANCEL
-                                        gdCls.getMethod("setColor", int.class).invoke(gd, 0xFF1E293B);
-                                        btn.getClass().getMethod("invalidate").invoke(btn);
-                                        if (act == 1 && onClick != null) {
-                                            onClick.run();
-                                        }
-                                    }
-                                } catch (Throwable ignored) {
-                                }
-                                return Boolean.TRUE;
-                            }
-                            return Boolean.FALSE;
-                        }
+        private static void addSpacer(Ui u, Object parent, boolean vertical) throws Exception {
+            u.add(parent, u.view(), vertical ? u.lpw(-1, 0, 1f) : u.lpw(0, 1, 1f));
+        }
+
+        private static void addDivider(Ui u, Object parent, int topMargin) throws Exception {
+            Object d = u.view();
+            u.bg(d, u.gd(C_LINE, 0f, 0, 0));
+            u.add(parent, d, u.m(u.lp(-1, 1), 0, topMargin, 0, 0));
+        }
+
+        private static Object label(Ui u, String s) throws Exception {
+            return u.text(s, 18f, C_TEXT2, false);
+        }
+
+        /** Horizontal bar: fill + rest children whose weights applyValues() sets from the 0..1 value. */
+        private static Object bar(Ui u, String key, int height, int fillColor) throws Exception {
+            Object track = u.ll(false);
+            u.bg(track, u.gd(C_LINE, height / 2f, 0, 0));
+            Object fill = u.view();
+            Object fillGd = u.gd(fillColor, height / 2f, 0, 0);
+            u.bg(fill, fillGd);
+            Object rest = u.view();
+            u.add(track, fill, u.lpw(0, -1, 0f));
+            u.add(track, rest, u.lpw(0, -1, 1f));
+            barViews.put(key, new Object[]{fill, rest, fillGd});
+            return track;
+        }
+
+        private static Object chip(Ui u, String key, float px) throws Exception {
+            Object tv = val(u, key, px, C_TEXT, false);
+            Object g = u.gd(C_CHIP, 40f, 0, 0);
+            u.bg(tv, g);
+            u.pad(tv, 16, 7, 16, 7);
+            toneViews.put(key, new Object[]{tv, g});
+            return tv;
+        }
+
+        private static Object dot(Ui u, String key) throws Exception {
+            Object d = u.view();
+            Object g = u.gd(C_DOT_OFF, 7f, 0, 0);
+            u.bg(d, g);
+            toneViews.put(key, new Object[]{null, g});
+            return d;
+        }
+
+        /** Coloured-text value (no background) whose colour follows DashValues.tone. */
+        private static Object toned(Ui u, String key, float px, int color, boolean bold) throws Exception {
+            Object tv = val(u, key, px, color, bold);
+            toneViews.put(key, new Object[]{tv, null});
+            return tv;
+        }
+
+        private static Object button(Ui u, String text, float px, int fill, int stroke, int textColor, boolean bold,
+                                     Runnable r) throws Exception {
+            Object b = u.text(text, px, textColor, bold);
+            u.setTvGravity.invoke(b, 17);
+            u.bg(b, u.gd(fill, 13f, stroke != 0 ? 2 : 0, stroke));
+            u.pad(b, 20, 0, 20, 0);
+            u.onTap(b, r);
+            return b;
+        }
+
+        /** One-of-N buttons for a tuning row; the selected one is filled with the accent colour. */
+        private static Object segmented(Ui u, final int row, String[] labels, int[] values, float px) throws Exception {
+            Object box = u.ll(false);
+            u.pad(box, 5, 5, 5, 5);
+            u.bg(box, u.gd(C_TRACK, 12f, 0, 0));
+            for (int i = 0; i < labels.length; i++) {
+                final int value = values[i];
+                Object tv = u.text(labels[i], px, C_TEXT2, false);
+                u.setTvGravity.invoke(tv, 17);
+                Object g = u.gd(0x00000000, 9f, 0, 0);
+                u.bg(tv, g);
+                u.onTap(tv, new Runnable() {
+                    @Override
+                    public void run() {
+                        applySelection(row, value);
                     }
-            );
-            viewCls.getMethod("setOnTouchListener", touchIfc).invoke(btn, touchProxy);
-            return btn;
+                });
+                u.add(box, tv, u.m(u.lpw(0, 48, 1f), i > 0 ? 4 : 0, 0, 0, 0));
+                segViews.add(new Object[]{tv, g, Integer.valueOf(row), Integer.valueOf(value), null});
+            }
+            return box;
+        }
+
+        /** On/off switch (track + knob) for a boolean tuning row. */
+        private static Object switchView(Ui u, final int row) throws Exception {
+            Object track = u.ll(false);
+            u.pad(track, 4, 4, 4, 4);
+            Object trackGd = u.gd(C_SWITCH_OFF, 23f, 0, 0);
+            u.bg(track, trackGd);
+            Object knob = u.view();
+            Object knobGd = u.gd(C_KNOB_OFF, 19f, 0, 0);
+            u.bg(knob, knobGd);
+            u.add(track, knob, u.lp(38, 38));
+            u.onTap(track, new Runnable() {
+                @Override
+                public void run() {
+                    applySelection(row, tuningValue(row) != 0 ? 0 : 1);
+                }
+            });
+            switchViews.add(new Object[]{track, trackGd, knobGd, Integer.valueOf(row), null});
+            return track;
+        }
+
+        private static void addSwitchRow(Ui u, Object parent, String title, int row) throws Exception {
+            addDivider(u, parent, 12);
+            Object r = u.ll(false);
+            u.gravity(r, 16);
+            u.add(r, u.text(title, 20f, C_TEXT, false), u.lpw(0, -2, 1f));
+            u.add(r, switchView(u, row), u.lp(84, 46));
+            u.add(parent, r, u.m(u.lp(-1, -2), 0, 10, 0, 0));
+        }
+
+        private static void addLabeled(Ui u, Object parent, String title, Object control, int topMargin) throws Exception {
+            u.add(parent, label(u, title), u.m(u.lp(-1, -2), 0, topMargin, 0, 0));
+            u.add(parent, control, u.m(u.lp(-1, -2), 0, 6, 0, 0));
+        }
+
+        private static Object tile(Ui u, String key) throws Exception {
+            Object t = u.ll(true);
+            u.pad(t, 14, 10, 14, 10);
+            u.bg(t, u.gd(C_TILE, 12f, 0, 0));
+            Object l = val(u, key + ".l", 16f, C_MUTED, false);
+            u.single(l);
+            u.add(t, l, u.lp(-1, -2));
+            Object v = val(u, key + ".v", 27f, C_TEXT, true);
+            u.single(v);
+            u.add(t, v, u.lp(-1, -2));
+            return t;
+        }
+
+        private static Object fixedTile(Ui u, String title, String key) throws Exception {
+            Object t = u.ll(true);
+            u.pad(t, 14, 10, 14, 10);
+            u.bg(t, u.gd(C_TILE, 12f, 0, 0));
+            u.add(t, u.text(title, 16f, C_MUTED, false), u.lp(-1, -2));
+            Object v = val(u, key, 26f, C_TEXT, true);
+            u.single(v);
+            u.add(t, v, u.lp(-1, -2));
+            return t;
+        }
+
+        private static Object scroll(Ui u, Object content) throws Exception {
+            try {
+                Class<?> svCls = Class.forName("android.widget.ScrollView");
+                Object sv = svCls.getConstructor(Class.forName("android.content.Context")).newInstance(u.ctx);
+                svCls.getMethod("setFillViewport", boolean.class).invoke(sv, Boolean.TRUE);
+                u.add(sv, content, u.vgLpCls.getConstructor(int.class, int.class).newInstance(-1, -2));
+                return sv;
+            } catch (Throwable t) {
+                return content;
+            }
+        }
+
+        // ---- tabs ----
+        private static Object buildVehicleTab(Ui u) throws Exception {
+            Object row = u.ll(false);
+
+            // battery / fuel hero
+            Object hero = card(u, null);
+            u.add(hero, val(u, "bat.title", 20f, C_ACCENT, true), u.lp(-1, -2));
+            Object big = u.ll(false);
+            u.gravity(big, 80); // BOTTOM
+            Object bigTv = val(u, "bat.big", 84f, C_TEXT, true);
+            u.setIncludeFontPadding.invoke(bigTv, false);
+            u.add(big, bigTv, u.lp(-2, -2));
+            Object rangeCol = u.ll(true);
+            u.add(rangeCol, val(u, "bat.range", 40f, C_TEXT, true), u.lp(-2, -2));
+            u.add(rangeCol, val(u, "bat.rangeSub", 17f, C_MUTED, false), u.lp(-2, -2));
+            u.add(big, rangeCol, u.m(u.lp(-2, -2), 20, 0, 0, 0));
+            u.add(hero, big, u.m(u.lp(-1, -2), 0, 8, 0, 0));
+            u.add(hero, bar(u, "bat", 18, 0xFF22C55E), u.m(u.lp(-1, 18), 0, 14, 0, 0));
+            addSpacer(u, hero, true);
+            for (int r = 0; r < 2; r++) {
+                Object tr = u.ll(false);
+                for (int c = 0; c < 3; c++) {
+                    u.add(tr, tile(u, "m" + (r * 3 + c)), u.m(u.lpw(0, -2, 1f), c > 0 ? 10 : 0, 0, 0, 0));
+                }
+                u.add(hero, tr, u.m(u.lp(-1, -2), 0, r > 0 ? 10 : 14, 0, 0));
+            }
+            u.add(row, hero, u.lpw(0, -1, 1.15f));
+
+            // power + drive
+            Object mid = u.ll(true);
+            Object pw = card(u, null);
+            Object pwHead = u.ll(false);
+            u.gravity(pwHead, 16);
+            u.add(pwHead, val(u, "pw.title", 20f, C_ACCENT, true), u.lpw(0, -2, 1f));
+            u.add(pwHead, val(u, "pw.big", 34f, C_TEXT, true), u.lp(-2, -2));
+            u.add(pw, pwHead, u.lp(-1, -2));
+            int[] colors = {0xFF38BDF8, 0xFFF59E0B, 0xFFA78BFA, 0xFF34D399};
+            for (int i = 0; i < 4; i++) {
+                Object r = u.ll(false);
+                u.gravity(r, 16);
+                u.add(r, val(u, "pw" + i + ".l", 18f, C_TEXT2, false), u.lp(80, -2));
+                u.add(r, bar(u, "pw" + i, 12, colors[i]), u.lpw(0, 12, 1f));
+                Object vv = val(u, "pw" + i + ".v", 18f, C_TEXT, false);
+                u.setTvGravity.invoke(vv, 5);
+                u.add(r, vv, u.lp(100, -2));
+                u.add(pw, r, u.m(u.lp(-1, -2), 0, i == 0 ? 12 : 8, 0, 0));
+            }
+            u.add(mid, pw, u.lpw(-1, 0, 1f));
+
+            Object dr = card(u, "주행 · 차체");
+            Object chips1 = u.ll(false);
+            u.add(chips1, chip(u, "dr.gear", 19f), u.lp(-2, -2));
+            u.add(chips1, chip(u, "dr.park", 19f), u.m(u.lp(-2, -2), 10, 0, 0, 0));
+            u.add(dr, chips1, u.m(u.lp(-1, -2), 0, 10, 0, 0));
+            u.add(dr, chip(u, "dr.door", 19f), u.m(u.lp(-2, -2), 0, 10, 0, 0));
+            addSpacer(u, dr, true);
+            Object drBottom = u.ll(false);
+            Object line = val(u, "dr.line", 18f, C_TEXT2, false);
+            u.single(line);
+            u.add(drBottom, line, u.lpw(0, -2, 1f));
+            u.add(drBottom, val(u, "dr.steer", 18f, C_MUTED, false), u.m(u.lp(-2, -2), 12, 0, 0, 0));
+            u.add(dr, drBottom, u.lp(-1, -2));
+            u.add(mid, dr, u.m(u.lpw(-1, 0, 1f), 0, 14, 0, 0));
+            u.add(row, mid, u.m(u.lpw(0, -1, 1f), 14, 0, 0, 0));
+
+            // climate / media / tyres
+            Object right = u.ll(true);
+            Object cl = card(u, null);
+            Object clRow = u.ll(false);
+            u.gravity(clRow, 16);
+            Object clCol = u.ll(true);
+            u.add(clCol, u.text("공조", 20f, C_ACCENT, true), u.lp(-1, -2));
+            Object clMode = val(u, "cl.mode", 18f, C_TEXT2, false);
+            u.single(clMode);
+            u.add(clCol, clMode, u.lp(-1, -2));
+            u.add(clCol, val(u, "cl.temps", 17f, C_MUTED, false), u.lp(-1, -2));
+            u.add(clRow, clCol, u.lpw(0, -2, 1f));
+            u.add(clRow, val(u, "cl.big", 44f, C_TEXT, true), u.m(u.lp(-2, -2), 12, 0, 0, 0));
+            u.add(cl, clRow, u.lp(-1, -2));
+            u.add(right, cl, u.lp(-1, -2));
+
+            Object md = card(u, null);
+            Object mdHead = u.ll(false);
+            u.add(mdHead, u.text("미디어", 20f, C_ACCENT, true), u.lpw(0, -2, 1f));
+            u.add(mdHead, val(u, "md.src", 17f, C_MUTED, false), u.lp(-2, -2));
+            u.add(md, mdHead, u.lp(-1, -2));
+            Object mdTitle = val(u, "md.title", 24f, C_TEXT, true);
+            u.single(mdTitle);
+            u.add(md, mdTitle, u.m(u.lp(-1, -2), 0, 4, 0, 0));
+            Object mdSub = val(u, "md.sub", 18f, C_TEXT2, false);
+            u.single(mdSub);
+            u.add(md, mdSub, u.lp(-1, -2));
+            addSpacer(u, md, true);
+            Object prog = u.ll(false);
+            u.gravity(prog, 16);
+            u.add(prog, val(u, "md.pos", 17f, C_MUTED, false), u.lp(-2, -2));
+            u.add(prog, bar(u, "md", 8, 0xFFE2E8F0), u.m(u.lpw(0, 8, 1f), 12, 0, 12, 0));
+            u.add(prog, val(u, "md.dur", 17f, C_MUTED, false), u.lp(-2, -2));
+            u.add(md, prog, u.lp(-1, -2));
+            u.add(right, md, u.m(u.lpw(-1, 0, 1f), 0, 14, 0, 0));
+
+            Object ty = card(u, null);
+            Object tyRow = u.ll(false);
+            u.gravity(tyRow, 16);
+            Object tyTitle = u.ll(true);
+            u.add(tyTitle, u.text("타이어", 20f, C_ACCENT, true), u.lp(-2, -2));
+            u.add(tyTitle, u.text("psi", 15f, C_MUTED, false), u.lp(-2, -2));
+            u.add(tyRow, tyTitle, u.lp(100, -2));
+            Object tyGrid = u.ll(true);
+            String[][] keys = {{"ty.fl", "ty.fr"}, {"ty.rl", "ty.rr"}};
+            for (String[] kr : keys) {
+                Object gr = u.ll(false);
+                for (String k : kr) {
+                    Object tv = val(u, k, 26f, C_TEXT, true);
+                    u.setTvGravity.invoke(tv, 17);
+                    u.add(gr, tv, u.lpw(0, -2, 1f));
+                }
+                u.add(tyGrid, gr, u.lp(-1, -2));
+            }
+            u.add(tyRow, tyGrid, u.lpw(0, -2, 1f));
+            u.add(ty, tyRow, u.lp(-1, -2));
+            u.add(right, ty, u.m(u.lp(-1, -2), 0, 14, 0, 0));
+            u.add(row, right, u.m(u.lpw(0, -1, 1f), 14, 0, 0, 0));
+            return row;
+        }
+
+        private static Object buildDisplayTab(Ui u) throws Exception {
+            Object col = u.ll(true);
+            Object row = u.ll(false);
+
+            Object g1 = card(u, "화면");
+            addLabeled(u, g1, "디자인", segmented(u, 7, new String[]{"테슬라", "클래식"}, new int[]{1, 0}, 20f), 12);
+            addLabeled(u, g1, "차종 모드", segmented(u, 9, new String[]{"자동", "전기차", "내연차"},
+                    new int[]{POWERTRAIN_AUTO, POWERTRAIN_EV, POWERTRAIN_ICE}, 20f), 12);
+            addSwitchRow(u, g1, "화면 180° 회전", 8);
+            addSwitchRow(u, g1, "ADAS 도로 표시", 3);
+            u.add(row, g1, u.lpw(0, -1, 1f));
+
+            Object g2 = card(u, "화질 · 속도");
+            Object q = u.ll(false);
+            u.gravity(q, 16);
+            u.add(q, u.text("JPEG 품질", 20f, C_TEXT, false), u.lpw(0, -2, 1f));
+            Object minus = button(u, "－", 26f, 0xFF111827, 0xFF475569, C_TEXT, false, new Runnable() {
+                @Override
+                public void run() {
+                    LiveTuning.adjust(0, -1);
+                    refreshOnUiThread();
+                }
+            });
+            u.pad(minus, 0, 0, 0, 0);
+            u.add(q, minus, u.lp(64, 52));
+            Object qv = val(u, "ds.q", 30f, C_TEXT, true);
+            u.setTvGravity.invoke(qv, 17);
+            u.add(q, qv, u.lp(84, -2));
+            Object plus = button(u, "＋", 26f, 0xFF111827, 0xFF475569, C_TEXT, false, new Runnable() {
+                @Override
+                public void run() {
+                    LiveTuning.adjust(0, +1);
+                    refreshOnUiThread();
+                }
+            });
+            u.pad(plus, 0, 0, 0, 0);
+            u.add(q, plus, u.lp(64, 52));
+            u.add(g2, q, u.m(u.lp(-1, -2), 0, 12, 0, 0));
+            String[] fpsLabels = new String[LiveTuning.TARGET_FPS_STEPS.length];
+            for (int i = 0; i < fpsLabels.length; i++) fpsLabels[i] = String.valueOf(LiveTuning.TARGET_FPS_STEPS[i]);
+            addLabeled(u, g2, "목표 FPS", segmented(u, 1, fpsLabels, LiveTuning.TARGET_FPS_STEPS, 19f), 14);
+            String[] pollLabels = new String[LiveTuning.POLL_MS_STEPS.length];
+            for (int i = 0; i < pollLabels.length; i++) pollLabels[i] = String.valueOf(LiveTuning.POLL_MS_STEPS[i]);
+            addLabeled(u, g2, "데이터 수집 주기 (ms)", segmented(u, 4, pollLabels, LiveTuning.POLL_MS_STEPS, 19f), 14);
+            u.add(row, g2, u.m(u.lpw(0, -1, 1f), 14, 0, 0, 0));
+
+            Object g3 = card(u, null);
+            Object g3Head = u.ll(false);
+            u.gravity(g3Head, 80);
+            u.add(g3Head, u.text("고급", 20f, C_ACCENT, true), u.lpw(0, -2, 1f));
+            u.add(g3Head, u.text("보통은 그대로 두세요", 16f, C_MUTED, false), u.lp(-2, -2));
+            u.add(g3, g3Head, u.lp(-1, -2));
+            String[] panelLabels = new String[LiveTuning.PANEL_FPS_STEPS.length];
+            for (int i = 0; i < panelLabels.length; i++) {
+                panelLabels[i] = LiveTuning.PANEL_FPS_STEPS[i] > 0 ? String.valueOf(LiveTuning.PANEL_FPS_STEPS[i]) : "끔";
+            }
+            addLabeled(u, g3, "패널 FPS (0x0F)", segmented(u, 2, panelLabels, LiveTuning.PANEL_FPS_STEPS, 19f), 12);
+            addLabeled(u, g3, "렌더 방식", segmented(u, 6, new String[]{"싱글코어", "병렬"}, new int[]{0, 1}, 19f), 12);
+            // v1.5.13: always visible - the parallel pipeline keeps two of the four cores busy
+            Object warn = u.ll(false);
+            u.pad(warn, 12, 8, 12, 8);
+            u.bg(warn, u.gd(0xFF2A1F06, 10f, 1, 0xFF854D0E));
+            u.add(warn, u.text("⚠", 18f, C_WARN, true), u.lp(-2, -2));
+            Object warnTv = u.text("병렬은 CPU 코어를 2개 써서 헤드유닛 전체(내비·음악·터치)가 느려질 수 있습니다",
+                    16f, 0xFFFDE68A, false);
+            u.setLineSpacing.invoke(warnTv, 0f, 1.15f);
+            u.add(warn, warnTv, u.m(u.lpw(0, -2, 1f), 8, 0, 0, 0));
+            u.add(g3, warn, u.m(u.lp(-1, -2), 0, 8, 0, 0));
+            addSwitchRow(u, g3, "부분 인코딩", 5);
+            u.add(row, g3, u.m(u.lpw(0, -1, 1f), 14, 0, 0, 0));
+
+            u.add(col, row, u.lpw(-1, 0, 1f));
+
+            Object save = u.ll(false);
+            u.gravity(save, 16);
+            u.pad(save, 20, 0, 8, 0);
+            u.bg(save, u.gd(0xFF0B1A24, 16f, 2, 0xFF0E7490));
+            Object saveTv = toned(u, "ds.save", 19f, 0xFFCFFAFE, false);
+            u.single(saveTv);
+            u.add(save, saveTv, u.lpw(0, -2, 1f));
+            u.add(save, button(u, "저장된 값으로 되돌리기", 19f, 0xFF111827, 0xFF475569, 0xFFE2E8F0, false, new Runnable() {
+                @Override
+                public void run() {
+                    LiveTuning.loadFrom(config);
+                    LiveTuning.panelFpsDirty = LiveTuning.panelFps > 0;
+                    FpsBench.restart(LiveTuning.label(), System.currentTimeMillis());
+                    showBannerMessage("저장된 설정으로 되돌림", 3000L);
+                }
+            }), u.m(u.lp(-2, 46), 12, 0, 0, 0));
+            u.add(save, button(u, "저장", 19f, 0xFF0D9488, 0, 0xFFF0FDFA, true, new Runnable() {
+                @Override
+                public void run() {
+                    LiveTuning.saveTo(config);
+                    saveMonitorConfig(configFile, config);
+                    DebugManager.logEvent("BENCH", "Saved experiment values to monitor.conf: " + LiveTuning.label());
+                    showBannerMessage("설정 저장: " + LiveTuning.label(), 4000L);
+                }
+            }), u.m(u.lp(120, 46), 10, 0, 0, 0));
+            u.add(col, save, u.m(u.lp(-1, 60), 0, 14, 0, 0));
+            return col;
+        }
+
+        private static Object buildPerfTab(Ui u) throws Exception {
+            Object row = u.ll(false);
+
+            Object pl = card(u, null);
+            Object head = u.ll(false);
+            u.gravity(head, 16);
+            u.add(head, u.text("USB 패널 · 프레임 파이프라인", 20f, C_ACCENT, true), u.lpw(0, -2, 1f));
+            u.add(head, toned(u, "pf.panel", 18f, C_GOOD, false), u.lp(-2, -2));
+            u.add(pl, head, u.lp(-1, -2));
+            Object big = u.ll(false);
+            u.gravity(big, 80);
+            Object fps = val(u, "pf.fps", 84f, C_TEXT, true);
+            u.setIncludeFontPadding.invoke(fps, false);
+            u.add(big, fps, u.lp(-2, -2));
+            u.add(big, val(u, "pf.target", 26f, C_MUTED, false), u.m(u.lp(-2, -2), 14, 0, 0, 6));
+            addSpacer(u, big, false);
+            u.add(big, chip(u, "pf.bn", 20f), u.m(u.lp(-2, -2), 0, 0, 0, 8));
+            u.add(pl, big, u.m(u.lp(-1, -2), 0, 10, 0, 0));
+            u.add(pl, u.text("프레임 1장당 시간 (ms) · 렌더와 인코딩은 동시에, 전송과 응답은 이어서", 17f, C_MUTED, false),
+                    u.m(u.lp(-1, -2), 0, 14, 0, 0));
+            String[] names = {"렌더", "인코딩", "전송", "패널 응답"};
+            String[] keys = {"pf.r", "pf.e", "pf.t", "pf.a"};
+            int[] colors = {0xFF38BDF8, 0xFFA78BFA, 0xFFF59E0B, 0xFFF472B6};
+            for (int i = 0; i < names.length; i++) {
+                Object r = u.ll(false);
+                u.gravity(r, 16);
+                u.add(r, u.text(names[i], 19f, C_TEXT2, false), u.lp(110, -2));
+                u.add(r, bar(u, keys[i], 16, colors[i]), u.lpw(0, 16, 1f));
+                Object vv = val(u, keys[i] + ".v", 19f, C_TEXT, false);
+                u.setTvGravity.invoke(vv, 5);
+                u.add(r, vv, u.lp(90, -2));
+                u.add(pl, r, u.m(u.lp(-1, -2), 0, 8, 0, 0));
+            }
+            addSpacer(u, pl, true);
+            Object tiles = u.ll(false);
+            String[][] tl = {{"JPEG 크기", "pf.kb"}, {"갱신 행", "pf.rows"}, {"수집", "pf.poll"}, {"CPU (최대 400%)", "pf.cpu"}};
+            for (int i = 0; i < tl.length; i++) {
+                u.add(tiles, fixedTile(u, tl[i][0], tl[i][1]), u.m(u.lpw(0, -2, 1f), i > 0 ? 10 : 0, 0, 0, 0));
+            }
+            u.add(pl, tiles, u.m(u.lp(-1, -2), 0, 12, 0, 0));
+            Object foot = val(u, "pf.foot", 16f, C_MUTED, false);
+            u.single(foot);
+            u.add(pl, foot, u.m(u.lp(-1, -2), 0, 10, 0, 0));
+            u.add(row, pl, u.lpw(0, -1, 1.3f));
+
+            Object right = u.ll(true);
+            Object bc = card(u, null);
+            Object bHead = u.ll(false);
+            u.gravity(bHead, 16);
+            u.add(bHead, u.text("FPS 측정", 20f, C_ACCENT, true), u.lpw(0, -2, 1f));
+            u.add(bHead, button(u, "▶ 측정 시작", 19f, C_ACCENT, 0, C_ON_ACCENT, true, new Runnable() {
+                @Override
+                public void run() {
+                    FpsBench.restart(LiveTuning.label(), System.currentTimeMillis());
+                    refreshOnUiThread();
+                }
+            }), u.lp(-2, 50));
+            u.add(bc, bHead, u.lp(-1, -2));
+            Object bench = val(u, "pf.bench", 18f, C_TEXT2, false);
+            u.setLineSpacing.invoke(bench, 0f, 1.1f);
+            u.add(bc, bench, u.m(u.lp(-1, -2), 0, 10, 0, 0));
+            u.add(right, bc, u.lpw(-1, 0, 1f));
+
+            Object rc = card(u, null);
+            Object rRow = u.ll(false);
+            u.gravity(rRow, 16);
+            Object rCol = u.ll(true);
+            u.add(rCol, u.text("패널 RST 테스트", 20f, C_ACCENT, true), u.lp(-1, -2));
+            u.add(rCol, val(u, "pf.rst", 17f, C_MUTED, false), u.lp(-1, -2));
+            u.add(rRow, rCol, u.lpw(0, -2, 1f));
+            u.add(rRow, button(u, "테스트 실행", 19f, 0xFF1F1806, 0xFFD9A441, 0xFFFDE68A, false, new Runnable() {
+                @Override
+                public void run() {
+                    // v1.4.4: panel JPEG restart-marker (DRI/RST) support test, A/B/C 6s each on the panel
+                    showBannerMessage(PanelRstTest.start(System.currentTimeMillis()), 5000L);
+                    refreshOnUiThread();
+                }
+            }), u.m(u.lp(-2, 50), 12, 0, 0, 0));
+            u.add(rc, rRow, u.lp(-1, -2));
+            u.add(right, rc, u.m(u.lp(-1, -2), 0, 14, 0, 0));
+            u.add(row, right, u.m(u.lpw(0, -1, 1f), 14, 0, 0, 0));
+            return row;
+        }
+
+        private static void addStatusRow(Ui u, Object parent, String title, String key, boolean divider) throws Exception {
+            Object r = u.ll(false);
+            u.gravity(r, 16);
+            u.add(r, dot(u, key + ".dot"), u.lp(14, 14));
+            Object c = u.ll(true);
+            u.add(c, u.text(title, 20f, C_TEXT, false), u.lp(-1, -2));
+            Object sub = val(u, key + ".sub", 16f, C_MUTED, false);
+            u.single(sub);
+            u.add(c, sub, u.lp(-1, -2));
+            u.add(r, c, u.m(u.lpw(0, -2, 1f), 14, 0, 12, 0));
+            u.add(r, toned(u, key + ".st", 18f, C_TEXT2, false), u.lp(-2, -2));
+            u.add(parent, r, u.m(u.lp(-1, -2), 0, 12, 0, 12));
+            if (divider) addDivider(u, parent, 0);
+        }
+
+        private static void addInfo(Ui u, Object parent, String title, String key, int topMargin) throws Exception {
+            u.add(parent, u.text(title, 17f, C_MUTED, false), u.m(u.lp(-1, -2), 0, topMargin, 0, 0));
+            Object tv = val(u, key, 19f, 0xFFE2E8F0, false);
+            u.setLineSpacing.invoke(tv, 0f, 1.08f);
+            u.add(parent, tv, u.m(u.lp(-1, -2), 0, 2, 0, 0));
+        }
+
+        private static Object buildSystemTab(Ui u) throws Exception {
+            Object row = u.ll(false);
+
+            Object conn = card(u, "연결 상태");
+            addStatusRow(u, conn, "USB 패널", "sy.usb", true);
+            addStatusRow(u, conn, "콤마 (carrot)", "sy.comma", true);
+            addStatusRow(u, conn, "차량 신호 (마이컴)", "sy.micom", true);
+            addStatusRow(u, conn, "MAP 키 (대시보드 버튼)", "sy.key", false);
+            u.add(row, conn, u.lpw(0, -1, 1f));
+
+            Object mid = u.ll(true);
+            Object up = card(u, "업데이트");
+            Object verRow = u.ll(false);
+            u.gravity(verRow, 80);
+            u.add(verRow, val(u, "sy.ver", 44f, C_TEXT, true), u.lp(-2, -2));
+            u.add(verRow, toned(u, "sy.ota", 18f, C_TEXT2, false), u.m(u.lpw(0, -2, 1f), 14, 0, 0, 8));
+            u.add(up, verRow, u.m(u.lp(-1, -2), 0, 6, 0, 0));
+            u.add(up, u.text("GitHub에서 새 버전을 확인합니다 · 위의 [업데이트]로 바로 확인", 17f, C_MUTED, false),
+                    u.m(u.lp(-1, -2), 0, 4, 0, 0));
+            addSpacer(u, up, true);
+            addSwitchRow(u, up, "자동 업데이트", ROW_AUTO_UPDATE);
+            u.add(mid, up, u.lpw(-1, 0, 1f));
+            Object lg = card(u, "로그");
+            Object logTv = val(u, "sy.log", 17f, C_TEXT2, false);
+            u.single(logTv);
+            u.add(lg, logTv, u.m(u.lp(-1, -2), 0, 6, 0, 0));
+            u.add(lg, u.text("USB 메모리를 꽂고 위의 [로그 저장]을 누르세요", 17f, C_MUTED, false), u.lp(-1, -2));
+            u.add(mid, lg, u.m(u.lp(-1, -2), 0, 14, 0, 0));
+            u.add(row, mid, u.m(u.lpw(0, -1, 1f), 14, 0, 0, 0));
+
+            Object diag = card(u, "입력 · 진단");
+            addInfo(u, diag, "최근 키 입력", "sy.recent", 8);
+            addDivider(u, diag, 12);
+            addInfo(u, diag, "차체 신호", "sy.body", 10);
+            addInfo(u, diag, "램프 신호", "sy.lamp", 10);
+            addInfo(u, diag, "마이컴 탭", "sy.tap", 10);
+            u.add(row, diag, u.m(u.lpw(0, -1, 1f), 14, 0, 0, 0));
+            return row;
+        }
+
+        private static Object buildHeader(Ui u) throws Exception {
+            Object header = u.ll(false);
+            u.gravity(header, 16);
+            Object titleCol = u.ll(true);
+            u.add(titleCol, u.text("TURZX HUD", 30f, C_TEXT, true), u.lp(-2, -2));
+            Object sub = u.text("", 17f, C_MUTED, false);
+            u.single(sub);
+            u.add(titleCol, sub, u.lp(-1, -2));
+            subtitleTv = sub;
+            lastSubtitle = "";
+            u.add(header, titleCol, u.lp(330, -2));
+
+            Object tabs = u.ll(false);
+            u.pad(tabs, 6, 6, 6, 6);
+            u.bg(tabs, u.gd(C_CARD, 16f, 2, C_LINE));
+            for (int i = 0; i < TAB_TITLES.length; i++) {
+                final int t = i;
+                Object tb = u.text(TAB_TITLES[i], 22f, C_TEXT2, false);
+                u.setTvGravity.invoke(tb, 17);
+                Object g = u.gd(0x00000000, 11f, 0, 0);
+                u.bg(tb, g);
+                u.onTap(tb, new Runnable() {
+                    @Override
+                    public void run() {
+                        selectTab(t);
+                    }
+                });
+                tabButtons[i] = tb;
+                tabButtonGds[i] = g;
+                u.add(tabs, tb, u.m(u.lpw(0, 52, 1f), i > 0 ? 6 : 0, 0, 0, 0));
+            }
+            u.add(header, tabs, u.m(u.lpw(0, -2, 1f), 16, 0, 24, 0));
+
+            u.add(header, button(u, "업데이트", 20f, 0xFF0B1A24, 0xFF0284C7, 0xFFE0F2FE, false, new Runnable() {
+                @Override
+                public void run() {
+                    OtaUpdateManager.triggerManualOta(installDir, false);
+                }
+            }), u.lp(-2, 56));
+            u.add(header, button(u, "로그 저장", 20f, 0xFF0B1A1A, 0xFF0D9488, 0xFFCCFBF1, false, new Runnable() {
+                @Override
+                public void run() {
+                    DebugManager.triggerAsyncDump(installDir);
+                }
+            }), u.m(u.lp(-2, 56), 10, 0, 0, 0));
+            Object close = button(u, "✖", 24f, 0xFF111827, 0xFF475569, 0xFFE2E8F0, false, new Runnable() {
+                @Override
+                public void run() {
+                    setEnabledAndShow(false);
+                }
+            });
+            u.pad(close, 0, 0, 0, 0);
+            u.add(header, close, u.m(u.lp(56, 56), 10, 0, 0, 0));
+            return header;
+        }
+
+        /** Builds the whole dashboard into root (vertical LinearLayout). */
+        private static void buildDashboard(Ui u, Object root) throws Exception {
+            valueTvs.clear();
+            lastValues.clear();
+            barViews.clear();
+            lastBars.clear();
+            toneViews.clear();
+            lastTones.clear();
+            segViews.clear();
+            switchViews.clear();
+
+            u.add(root, buildHeader(u), u.lp(-1, 64));
+            Object pages = u.ll(true);
+            Object[] contents = {buildVehicleTab(u), buildDisplayTab(u), buildPerfTab(u), buildSystemTab(u)};
+            for (int i = 0; i < contents.length; i++) {
+                tabPages[i] = scroll(u, contents[i]);
+                u.add(pages, tabPages[i], u.lp(-1, -1));
+            }
+            u.add(root, pages, u.m(u.lpw(-1, 0, 1f), 0, 14, 0, 0));
+            Object foot = u.text("MAP 버튼 3초: 열기/닫기  ·  후진(R)·후방카메라·화면 꺼짐 시 자동 숨김", 17f, C_FAINT, false);
+            u.add(root, foot, u.m(u.lp(-2, -2), 4, 8, 0, 0));
+            applyTabState();
+        }
+
+        static void selectTab(int t) {
+            if (t < 0 || t >= TAB_TITLES.length) return;
+            currentTab = t;
+            applyTabState();
+            refreshOnUiThread();
+        }
+
+        private static void applyTabState() {
+            Ui u = ui;
+            if (u == null) return;
+            int cur = currentTab;
+            for (int i = 0; i < TAB_TITLES.length; i++) {
+                try {
+                    if (tabPages[i] != null) u.setVisibility.invoke(tabPages[i], i == cur ? 0 : 8);
+                    if (tabButtonGds[i] != null) u.gdSetColor.invoke(tabButtonGds[i], i == cur ? C_ACCENT : 0x00000000);
+                    if (tabButtons[i] != null) {
+                        u.setTextColor.invoke(tabButtons[i], i == cur ? C_ON_ACCENT : C_TEXT2);
+                        u.viewCls.getMethod("invalidate").invoke(tabButtons[i]);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+
+        /** Current value of a tuning row as the segmented / switch controls compare it. */
+        static int tuningValue(int row) {
+            if (row == ROW_AUTO_UPDATE) return config.autoUpdate ? 1 : 0;
+            return LiveTuning.currentValue(row);
+        }
+
+        /** A segment / switch was tapped: LiveTuning rows apply at once (saved by [저장]); auto-update saves now. */
+        static void applySelection(int row, int value) {
+            if (row == ROW_AUTO_UPDATE) {
+                config.autoUpdate = value != 0;
+                saveMonitorConfig(configFile, config);
+                DebugManager.logEvent("OTA", "Auto update " + (config.autoUpdate ? "enabled" : "disabled") + " from the dashboard");
+                showBannerMessage(config.autoUpdate ? "자동 업데이트 켬" : "자동 업데이트 끔", 3000L);
+            } else {
+                LiveTuning.select(row, value);
+            }
+            refreshOnUiThread();
+        }
+
+        /** Copies whatever changed from v into the registered views (UI thread). */
+        private static void applyValues(DashValues v) throws Exception {
+            Ui u = ui;
+            if (u == null) return;
+            for (Map.Entry<String, Object> e : valueTvs.entrySet()) {
+                String t = v.text.get(e.getKey());
+                if (t == null) continue;
+                if (t.equals(lastValues.get(e.getKey()))) continue;
+                lastValues.put(e.getKey(), t);
+                u.setText.invoke(e.getValue(), t);
+            }
+            for (Map.Entry<String, Object[]> e : barViews.entrySet()) {
+                Double f = v.bar.get(e.getKey());
+                if (f == null) continue;
+                Double old = lastBars.get(e.getKey());
+                if (old != null && Math.abs(old.doubleValue() - f.doubleValue()) < 0.004) continue;
+                lastBars.put(e.getKey(), f);
+                float w = (float) f.doubleValue();
+                u.setLayoutParams.invoke(e.getValue()[0], u.lpw(0, -1, w));
+                u.setLayoutParams.invoke(e.getValue()[1], u.lpw(0, -1, 1f - w));
+            }
+            for (Map.Entry<String, Object[]> e : toneViews.entrySet()) {
+                int[] tn = v.tone.get(e.getKey());
+                if (tn == null) continue;
+                int sig = tn[0] * 31 + tn[1];
+                Integer old = lastTones.get(e.getKey());
+                if (old != null && old.intValue() == sig) continue;
+                lastTones.put(e.getKey(), Integer.valueOf(sig));
+                Object tv = e.getValue()[0];
+                Object g = e.getValue()[1];
+                if (tv != null && tn[0] != 0) u.setTextColor.invoke(tv, tn[0]);
+                if (g != null && tn[1] != 0) u.gdSetColor.invoke(g, tn[1]); // GradientDrawable.setColor invalidates itself
+            }
+            // bars with a tone (battery level colour)
+            for (Map.Entry<String, Object[]> e : barViews.entrySet()) {
+                int[] tn = v.tone.get(e.getKey());
+                if (tn == null || tn[1] == 0) continue;
+                Integer old = lastTones.get("bar:" + e.getKey());
+                if (old != null && old.intValue() == tn[1]) continue;
+                lastTones.put("bar:" + e.getKey(), Integer.valueOf(tn[1]));
+                u.gdSetColor.invoke(e.getValue()[2], tn[1]);
+                u.viewCls.getMethod("invalidate").invoke(e.getValue()[0]);
+            }
+            for (Object[] s : segViews) {
+                boolean sel = tuningValue(((Integer) s[2]).intValue()) == ((Integer) s[3]).intValue();
+                if (s[4] != null && ((Boolean) s[4]).booleanValue() == sel) continue;
+                s[4] = Boolean.valueOf(sel);
+                u.gdSetColor.invoke(s[1], sel ? C_ACCENT : 0x00000000);
+                u.setTextColor.invoke(s[0], sel ? C_ON_ACCENT : C_TEXT2);
+                u.viewCls.getMethod("invalidate").invoke(s[0]);
+            }
+            for (Object[] s : switchViews) {
+                boolean on = tuningValue(((Integer) s[3]).intValue()) != 0;
+                if (s[4] != null && ((Boolean) s[4]).booleanValue() == on) continue;
+                s[4] = Boolean.valueOf(on);
+                u.gdSetColor.invoke(s[1], on ? C_ACCENT : C_SWITCH_OFF);
+                u.gdSetColor.invoke(s[2], on ? C_ON_ACCENT : C_KNOB_OFF);
+                u.gravity(s[0], on ? 21 : 19); // RIGHT|CENTER_VERTICAL : LEFT|CENTER_VERTICAL
+                u.viewCls.getMethod("invalidate").invoke(s[0]);
+            }
         }
 
         private static void hideOnUiThread() {
@@ -8809,16 +10025,20 @@ public class TurzxMonitorMain {
             rootView = null;
             currentWmLp = null;
             subtitleTv = null;
-            benchTv = null;
-            lastBenchText[0] = "";
-            for (int i = 0; i < controlValueTvs.length; i++) {
-                controlValueTvs[i] = null;
-                lastControlTexts[i] = "";
+            valueTvs.clear();
+            lastValues.clear();
+            barViews.clear();
+            lastBars.clear();
+            toneViews.clear();
+            lastTones.clear();
+            segViews.clear();
+            switchViews.clear();
+            for (int i = 0; i < TAB_TITLES.length; i++) {
+                tabButtons[i] = null;
+                tabButtonGds[i] = null;
+                tabPages[i] = null;
             }
-            for (int i = 0; i < CARD_COUNT; i++) {
-                cardBodyTvs[i] = null;
-                lastCardTexts[i] = "";
-            }
+            ui = null;
             isVisible = false;
             try {
                 if (oldRoot != null && windowManager != null) {
@@ -8829,20 +10049,6 @@ public class TurzxMonitorMain {
                 }
             } catch (Throwable ignored) {
             }
-        }
-
-        static String buildBenchText(long nowMs) {
-            String rst = PanelRstTest.statusLine(nowMs);
-            if (PanelRstTest.isRunning(nowMs)) return rst;
-            StringBuilder sb = new StringBuilder(FpsBench.statusLine(nowMs));
-            if (!rst.isEmpty()) {
-                sb.append("\n").append(rst);
-            }
-            List<String[]> rec = FpsBench.recent(1); // 8 tuning rows: keep the panel within the screen
-            for (int i = 0; i < rec.size(); i++) {
-                sb.append("\n").append(rec.get(i)[0]).append("\n   ").append(rec.get(i)[1]);
-            }
-            return sb.toString();
         }
 
         private static void setTextIfChanged(Object tv, String text, String[] last, int idx) throws Exception {
@@ -8889,17 +10095,14 @@ public class TurzxMonitorMain {
                     setTextIfChanged(subtitleTv, subtitle, lastSub, 0);
                     lastSubtitle = lastSub[0];
 
-                    String[] bodies = buildDashboardBodies(snap, collectDashboardStats());
-                    for (int i = 0; i < CARD_COUNT; i++) {
-                        setTextIfChanged(cardBodyTvs[i], bodies[i], lastCardTexts, i);
-                    }
-                    for (int i = 0; i < controlValueTvs.length; i++) {
-                        setTextIfChanged(controlValueTvs[i], LiveTuning.valueText(i), lastControlTexts, i);
-                    }
                     FpsBench.tick(now);
-                    setTextIfChanged(benchTv, buildBenchText(now), lastBenchText, 0);
+                    applyValues(buildDashboardValues(snap != null ? snap : new TelemetrySnapshot(), collectDashboardStats(), now));
                 }
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
+                if (!refreshErrorLogged) { // once per open: a broken refresh would otherwise fail silently every 0.5s
+                    refreshErrorLogged = true;
+                    DebugManager.logError("OVERLAY", "refreshOnUiThread", t);
+                }
             }
             postDelayedToUi(REFRESH_TASK, REFRESH_MS);
         }
@@ -9378,6 +10581,11 @@ public class TurzxMonitorMain {
             return registerInfo + " | packets=" + packets + " keys=" + map.size() + " logged=" + logged;
         }
 
+        static synchronized String shortText() {
+            if (registered <= 0) return "등록 안 됨";
+            return String.format(Locale.US, "등록 %d/256 · 패킷 %,d · 종류 %d", registered, packets, map.size());
+        }
+
         /** One line per packet kind, sorted by key: count, payload changes, last payload. */
         static synchronized List<String> keyLines(int max) {
             List<Integer> keys = new ArrayList<Integer>(map.keySet());
@@ -9406,6 +10614,7 @@ public class TurzxMonitorMain {
         @Override
         public void onEvent(byte rcvId, byte funcH, byte funcL, byte[] data) {
             MicomTap.onPacket(rcvId, funcH, funcL, data);
+            TelemetryCollector.onMicomPacket(rcvId, funcH, funcL, data);
         }
     }
 
@@ -9469,6 +10678,10 @@ public class TurzxMonitorMain {
             boolean[] d = new boolean[6];
             for (int i = 0; i < 6; i++) d[i] = slotOpen(DOOR_OPEN_BASE + i);
             return d;
+        }
+
+        static boolean hasDoorData() {
+            return doorRaw != null;
         }
 
         /** All four doors locked: every unlock-state slot reads DoorUnlockState.LOCK (0). */
@@ -9563,13 +10776,13 @@ public class TurzxMonitorMain {
         static final int[] TARGET_FPS_STEPS = new int[]{5, 8, 10, 12, 15, 20, 25};
         static final int[] PANEL_FPS_STEPS = new int[]{0, 10, 15, 20, 25, 30};
         static final int[] POLL_MS_STEPS = new int[]{100, 150, 200, 300, 500, 1000};
-        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기", "부분 인코딩", "렌더 방식", "디자인", "화면 회전"};
+        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기", "부분 인코딩", "렌더 방식", "디자인", "화면 회전", "차종 모드"};
 
-        static volatile int jpegQuality = 70;
-        static volatile int targetFps = 12;
-        static volatile int panelFps = 0;
+        static volatile int jpegQuality = 75;
+        static volatile int targetFps = 15;
+        static volatile int panelFps = 15;
         static volatile boolean roadEnabled = true;
-        static volatile int pollMs = 200;
+        static volatile int pollMs = 100;
         static volatile boolean incrementalEncode = true;
         /** true: render || encode on two cores (v1.4.4 pipeline); false: render then encode, one core at a time. */
         static volatile boolean parallelPipeline = false;
@@ -9577,6 +10790,8 @@ public class TurzxMonitorMain {
         static volatile boolean teslaDesign = true;
         /** v1.5.1: panel picture turned 180 degrees (usb_rotation 90 instead of 270) for upside-down mounting. */
         static volatile boolean rotate180 = false;
+        /** v1.5.13: 0=auto, 1=EV, 2=ICE. */
+        static volatile int powertrainMode = POWERTRAIN_AUTO;
         /** Set when panelFps changed: the sender thread pushes CMD 0x0F to the connected panel. */
         static volatile boolean panelFpsDirty = false;
 
@@ -9590,6 +10805,8 @@ public class TurzxMonitorMain {
             parallelPipeline = c.renderParallel;
             teslaDesign = c.hudDesignTesla;
             rotate180 = c.usbRotation == 90;
+            powertrainMode = (c.powertrainMode == POWERTRAIN_EV || c.powertrainMode == POWERTRAIN_ICE)
+                    ? c.powertrainMode : POWERTRAIN_AUTO;
         }
 
         static void saveTo(MonitorConfig c) {
@@ -9602,6 +10819,7 @@ public class TurzxMonitorMain {
             c.renderParallel = parallelPipeline;
             c.hudDesignTesla = teslaDesign;
             c.usbRotation = rotate180 ? 90 : 270;
+            c.powertrainMode = powertrainMode;
         }
 
         /** Portrait rotation handed to the encoder (270 = normal, 90 = picture turned 180 degrees). */
@@ -9641,18 +10859,23 @@ public class TurzxMonitorMain {
                     return parallelPipeline ? "멀티코어" : "싱글코어";
                 case 7:
                     return teslaDesign ? "신규" : "기존";
-                default:
+                case 8:
                     return rotate180 ? "180°" : "기본";
+                default:
+                    return powertrainMode == POWERTRAIN_EV ? "EV" : (powertrainMode == POWERTRAIN_ICE ? "내연차" : "자동");
             }
         }
 
         static String label() {
+            String ptSfx = powertrainMode == POWERTRAIN_EV ? " · EV"
+                    : (powertrainMode == POWERTRAIN_ICE ? " · 내연차" : "");
             return "q" + jpegQuality + " · " + targetFps + "fps · 패널" + (panelFps > 0 ? String.valueOf(panelFps) : "끔")
                     + " · 도로" + (roadEnabled ? "ON" : "OFF") + " · 수집" + pollMs
                     + " · 부분" + (incrementalEncode ? "ON" : "OFF")
                     + " · " + (parallelPipeline ? "멀티코어" : "싱글코어")
                     + " · " + (teslaDesign ? "신규" : "기존")
-                    + (rotate180 ? " · 180°" : "");
+                    + (rotate180 ? " · 180°" : "")
+                    + ptSfx;
         }
 
         /** Panel [－]/[＋] handler: applies immediately and restarts the measurement for the new combination. */
@@ -9687,11 +10910,97 @@ public class TurzxMonitorMain {
                 case 7:
                     teslaDesign = !teslaDesign;
                     break;
-                default:
+                case 8:
                     rotate180 = !rotate180;
+                    break;
+                default:
+                    powertrainMode = (powertrainMode + (dir >= 0 ? 1 : 2)) % 3;
                     break;
             }
             FpsBench.restart(label(), System.currentTimeMillis());
+        }
+
+        /** Row value as the dashboard controls compare it (booleans 1/0, powertrain 0/1/2). */
+        static int currentValue(int row) {
+            switch (row) {
+                case 0:
+                    return jpegQuality;
+                case 1:
+                    return targetFps;
+                case 2:
+                    return panelFps;
+                case 3:
+                    return roadEnabled ? 1 : 0;
+                case 4:
+                    return pollMs;
+                case 5:
+                    return incrementalEncode ? 1 : 0;
+                case 6:
+                    return parallelPipeline ? 1 : 0;
+                case 7:
+                    return teslaDesign ? 1 : 0;
+                case 8:
+                    return rotate180 ? 1 : 0;
+                default:
+                    return powertrainMode;
+            }
+        }
+
+        /** v1.5.13 dashboard segment / switch: sets the row to value, applies at once, restarts the measurement. */
+        static void select(int row, int value) {
+            switch (row) {
+                case 0:
+                    jpegQuality = Math.max(50, Math.min(95, value));
+                    break;
+                case 1:
+                    targetFps = Math.max(2, Math.min(25, value));
+                    break;
+                case 2: {
+                    int next = Math.max(0, Math.min(60, value));
+                    if (next != panelFps) {
+                        panelFps = next;
+                        panelFpsDirty = true;
+                    }
+                    break;
+                }
+                case 3:
+                    roadEnabled = value != 0;
+                    break;
+                case 4:
+                    pollMs = Math.max(50, Math.min(2000, value));
+                    break;
+                case 5:
+                    incrementalEncode = value != 0;
+                    break;
+                case 6:
+                    parallelPipeline = value != 0;
+                    break;
+                case 7:
+                    teslaDesign = value != 0;
+                    break;
+                case 8:
+                    rotate180 = value != 0;
+                    break;
+                default:
+                    powertrainMode = (value == POWERTRAIN_EV || value == POWERTRAIN_ICE) ? value : POWERTRAIN_AUTO;
+                    break;
+            }
+            FpsBench.restart(label(), System.currentTimeMillis());
+        }
+
+        /** true when a running value differs from what monitor.conf holds (same normalisation as loadFrom). */
+        static boolean differsFrom(MonitorConfig c) {
+            int pt = (c.powertrainMode == POWERTRAIN_EV || c.powertrainMode == POWERTRAIN_ICE) ? c.powertrainMode : POWERTRAIN_AUTO;
+            return jpegQuality != Math.max(50, Math.min(95, c.usbJpegQuality))
+                    || targetFps != Math.max(2, Math.min(25, c.usbFps))
+                    || panelFps != Math.max(0, Math.min(60, c.usbPanelFps))
+                    || roadEnabled != c.hudRoadEnabled
+                    || pollMs != Math.max(50, Math.min(2000, c.telemetryPollMs))
+                    || incrementalEncode != c.usbIncrementalEncode
+                    || parallelPipeline != c.renderParallel
+                    || teslaDesign != c.hudDesignTesla
+                    || rotate180 != (c.usbRotation == 90)
+                    || powertrainMode != pt;
         }
     }
 
@@ -10476,6 +11785,7 @@ public class TurzxMonitorMain {
                         .append(", usb_incremental_encode=").append(cfg.usbIncrementalEncode)
                         .append(", render_parallel=").append(cfg.renderParallel)
                         .append(", hud_design=").append(cfg.hudDesignTesla ? "tesla" : "classic")
+                        .append(", powertrain_mode=").append(cfg.powertrainMode == POWERTRAIN_EV ? "ev" : (cfg.powertrainMode == POWERTRAIN_ICE ? "ice" : "auto"))
                         .append(", telemetry_poll_ms=").append(cfg.telemetryPollMs)
                         .append(", comma_ip=").append(cfg.commaIp)
                         .append(", auto_update=").append(cfg.autoUpdate)
@@ -10509,7 +11819,13 @@ public class TurzxMonitorMain {
             sb.append("Recent Keys     : ").append(HotkeyWatcher.getRecentKeysText()).append("\n");
             sb.append("Live Tuning     : ").append(LiveTuning.label()).append("\n");
             sb.append("HUD Design      : ").append(LiveTuning.teslaDesign ? "tesla" : "classic")
-                    .append(" | tesla assets ready=").append(TurzxFrameRenderer.TeslaHud.isReady())
+                    .append(" | powertrain=").append(snap != null ? snap.powertrainLabel(LiveTuning.powertrainMode) : "ev")
+                    .append(" (cfg=").append(LiveTuning.valueText(9))
+                    .append(", engType=").append(snap != null ? snap.engineType : -1)
+                    .append(", fuel=").append(snap != null ? snap.fuelLevelPct : -1)
+                    .append("%, rpm=").append(snap != null ? snap.engineRpm : -1)
+                    .append(", cool=").append(snap != null && snap.coolantTempC > Integer.MIN_VALUE ? snap.coolantTempC : -999)
+                    .append("C) | tesla assets ready=").append(TurzxFrameRenderer.TeslaHud.isReady())
                     .append(" | headLampStatus=").append(TelemetryCollector.getLatestSnapshot().headLampStatus).append("\n");
             sb.append("Lamp signals    : ").append(LampProbe.text())
                     .append(" | brakePressureLive=").append(LampProbe.pressureLive()).append("\n");
@@ -11908,6 +13224,112 @@ public class TurzxMonitorMain {
         }
     }
 
+    /**
+     * Parses passive or active OBD-II Mode 01 response payloads received on HSCAN C7.C0.A7 (EMS) / C7.C0.A6 (TCU).
+     * Decodes Engine RPM (01 0C), Coolant Temp (01 05 / 01 67), Control Module 12V (01 42), and Speed (01 0D).
+     */
+    public static boolean parseIceObdPayload(byte[] data, TelemetrySnapshot target, long nowMs) {
+        if (data == null || data.length < 3 || target == null) return false;
+        if ((data[0] & 0xFF) != 0x41) return false;
+        int pid = data[1] & 0xFF;
+        switch (pid) {
+            case 0x0C: {
+                if (data.length < 4) return false;
+                int raw = ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
+                int rpm = (int) Math.round(raw / 4.0);
+                if (rpm >= 0 && rpm <= 12000) {
+                    target.engineRpm = rpm;
+                    if (nowMs > 0L) target.lastObdIceRxMs = nowMs;
+                    return true;
+                }
+                return false;
+            }
+            case 0x05: {
+                int c = (data[2] & 0xFF) - 40;
+                if (c >= -40 && c <= 180) {
+                    target.coolantTempC = c;
+                    if (nowMs > 0L) target.lastObdIceRxMs = nowMs;
+                    return true;
+                }
+                return false;
+            }
+            case 0x67: {
+                if (data.length < 4) return false;
+                int mask = data[2] & 0xFF;
+                int c = Integer.MIN_VALUE;
+                if ((mask & 1) != 0) c = (data[3] & 0xFF) - 40;
+                else if ((mask & 2) != 0 && data.length >= 5) c = (data[4] & 0xFF) - 40;
+                if (c >= -40 && c <= 180) {
+                    target.coolantTempC = c;
+                    if (nowMs > 0L) target.lastObdIceRxMs = nowMs;
+                    return true;
+                }
+                return false;
+            }
+            case 0x42: {
+                if (data.length < 4) return false;
+                int mv = ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
+                double v = mv / 1000.0;
+                if (v >= 6.0 && v <= 18.5) {
+                    target.auxBattVoltV = v;
+                    if (nowMs > 0L) target.lastObdIceRxMs = nowMs;
+                    return true;
+                }
+                return false;
+            }
+            case 0x0D: {
+                int kph = data[2] & 0xFF;
+                if (kph >= 0 && kph <= 260) {
+                    target.obdSpeedKph = kph;
+                    if (nowMs > 0L) target.lastObdIceRxMs = nowMs;
+                    return true;
+                }
+                return false;
+            }
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Decodes verified Gen5W MICOM tap packets used as fallbacks on ICE vehicles (KA4 log 2026-11-23):
+     * - C1.C4.22 (3B): 24-bit big-endian odometer in 0.1 km units
+     * - C4.D0.47 (>=1B): gear position (0=P, 7=R, 6=N, 5=D), returns resolved gear or ""
+     * - 8F.8D.43 (>=3B): 16-bit big-endian DTE km at bytes 1..2
+     */
+    public static String parseMicomIcePacket(byte rcv, byte fh, byte fl, byte[] data, TelemetrySnapshot target) {
+        if (data == null) return "";
+        int key = MicomTap.keyOf(rcv, fh, fl);
+        if (key == 0xC1C422 && data.length == 3 && target != null) {
+            int raw = ((data[0] & 0xFF) << 16) | ((data[1] & 0xFF) << 8) | (data[2] & 0xFF);
+            if (raw > 0 && raw < 15000000) {
+                double km = raw * 0.1;
+                target.odometerKm = km;
+                if (target.startOdometerKm <= 0.0 || km < target.startOdometerKm) {
+                    target.startOdometerKm = km;
+                }
+                target.tripKm = Math.max(0.0, km - target.startOdometerKm);
+            }
+            return "";
+        }
+        if (key == 0xC4D047 && data.length >= 1) {
+            int g = data[0] & 0xFF;
+            if (g == GEAR_STATUS_P) return "P";
+            if (g == GEAR_STATUS_R) return "R";
+            if (g == GEAR_STATUS_N) return "N";
+            if (g == GEAR_STATUS_D) return "D";
+            return "";
+        }
+        if (key == 0x8F8D43 && data.length >= 3 && target != null) {
+            int dte = ((data[1] & 0xFF) << 8) | (data[2] & 0xFF);
+            if (isValidDteValue(dte)) {
+                target.iceDteKm = dte;
+                if (!isValidDteValue(target.dteKm)) target.dteKm = dte;
+            }
+        }
+        return "";
+    }
+
     public static boolean parseTmHscanLogLine(String line, TelemetrySnapshot targetIfDirect) {
         if (line == null || !line.contains("onEventFromMicom")) return false;
         int openIdx = line.indexOf('[');
@@ -12156,6 +13578,7 @@ public class TurzxMonitorMain {
         if (ev == null) return "{\"ok\":false}";
         StringBuilder sb = new StringBuilder(1280);
         sb.append("{\"ok\":true,\"version\":\"").append(MONITOR_VERSION).append("\"");
+        sb.append(",\"powertrain\":\"").append(ev.powertrainLabel(LiveTuning.powertrainMode)).append("\"");
         sb.append(String.format(Locale.US, ",\"soc\":%.1f,\"bmsSoc\":%.1f,\"soh\":%.1f,\"remainKwh\":%.2f",
                 ev.getEffectiveSocPct(), ev.bmsSocPct, ev.sohPct, ev.remainEnergyKwh));
         sb.append(String.format(Locale.US, ",\"dteKm\":%d,\"dteOffDeltaKm\":%d,\"avgEcon\":%.1f",
@@ -12169,6 +13592,22 @@ public class TurzxMonitorMain {
         sb.append(String.format(Locale.US, ",\"pedalPct\":%.1f", ev.accelPedalPct));
         sb.append(String.format(Locale.US, ",\"tpms\":{\"fl\":%.1f,\"fr\":%.1f,\"rl\":%.1f,\"rr\":%.1f}",
                 ev.tpmsFlPsi, ev.tpmsFrPsi, ev.tpmsRlPsi, ev.tpmsRrPsi));
+        sb.append(",\"ice\":{");
+        sb.append("\"engineType\":").append(ev.engineType);
+        sb.append(",\"hevPresent\":").append(ev.hevServicePresent);
+        sb.append(",\"fuelPct\":").append(ev.fuelLevelPct);
+        sb.append(",\"iceDteKm\":").append(ev.iceDteKm);
+        sb.append(String.format(Locale.US, ",\"avgFuelKmL\":%.1f,\"instFuelKmL\":%.1f", ev.avgFuelKmL, ev.instFuelKmL));
+        sb.append(",\"coolantC\":").append(ev.coolantTempC > Integer.MIN_VALUE ? ev.coolantTempC : "null");
+        sb.append(",\"rpm\":").append(ev.engineRpm);
+        sb.append(String.format(Locale.US, ",\"volt12\":%.2f,\"auxSocPct\":%d", ev.auxBattVoltV, ev.auxBattSocPct));
+        sb.append(",\"runSec\":").append(ev.engineRunSec);
+        sb.append(",\"driveSec\":").append(ev.engineDriveSec);
+        sb.append(",\"idleSec\":").append(ev.engineIdleSec);
+        sb.append(String.format(Locale.US, ",\"odoKm\":%.1f,\"tripKm\":%.1f", ev.odometerKm, ev.tripKm));
+        sb.append(",\"milOn\":").append(ev.milOn);
+        sb.append(",\"oilWarn\":").append(ev.engineOilWarn);
+        sb.append("}");
         sb.append(",\"climate\":{");
         sb.append("\"valid\":").append(ev.hasClimateData);
         sb.append(",\"on\":").append(ev.hvacOn);
@@ -13832,7 +15271,7 @@ public class TurzxMonitorMain {
         return "";
     }
 
-    private static final int CONFIG_REV = 3;
+    private static final int CONFIG_REV = 4;
 
     public static MonitorConfig loadMonitorConfig(File file) {
         MonitorConfig cfg = new MonitorConfig();
@@ -13854,16 +15293,21 @@ public class TurzxMonitorMain {
                 else if ("usb_push_enabled".equals(k)) cfg.usbPushEnabled = "1".equals(v) || "true".equalsIgnoreCase(v);
                 else if ("usb_brightness".equals(k)) cfg.usbBrightness = Math.max(0, Math.min(100, parseIntSafe(v, 85)));
                 else if ("usb_rotation".equals(k)) cfg.usbRotation = parseIntSafe(v, 270);
-                else if ("usb_jpeg_quality".equals(k)) cfg.usbJpegQuality = Math.max(50, Math.min(95, parseIntSafe(v, 70)));
+                else if ("usb_jpeg_quality".equals(k)) cfg.usbJpegQuality = Math.max(50, Math.min(95, parseIntSafe(v, 75)));
                 else if ("config_rev".equals(k)) configRev = parseIntSafe(v, 1);
-                else if ("usb_fps".equals(k)) cfg.usbFps = Math.max(2, Math.min(25, parseIntSafe(v, 12)));
-                else if ("usb_panel_fps".equals(k)) cfg.usbPanelFps = Math.max(0, Math.min(60, parseIntSafe(v, 0)));
+                else if ("usb_fps".equals(k)) cfg.usbFps = Math.max(2, Math.min(25, parseIntSafe(v, 15)));
+                else if ("usb_panel_fps".equals(k)) cfg.usbPanelFps = Math.max(0, Math.min(60, parseIntSafe(v, 15)));
                 else if ("overlay_hotkey_code".equals(k)) cfg.overlayHotkeyCode = Math.max(0, Math.min(767, parseIntSafe(v, 0)));
                 else if ("hud_road".equals(k)) cfg.hudRoadEnabled = !"0".equals(v) && !"false".equalsIgnoreCase(v);
                 else if ("usb_incremental_encode".equals(k)) cfg.usbIncrementalEncode = !"0".equals(v) && !"false".equalsIgnoreCase(v);
                 else if ("render_parallel".equals(k)) cfg.renderParallel = !"0".equals(v) && !"false".equalsIgnoreCase(v);
                 else if ("hud_design".equals(k)) cfg.hudDesignTesla = !"classic".equalsIgnoreCase(v) && !"0".equals(v);
-                else if ("telemetry_poll_ms".equals(k)) cfg.telemetryPollMs = Math.max(50, Math.min(2000, parseIntSafe(v, 200)));
+                else if ("powertrain_mode".equals(k)) {
+                    if ("ev".equalsIgnoreCase(v) || "1".equals(v)) cfg.powertrainMode = POWERTRAIN_EV;
+                    else if ("ice".equalsIgnoreCase(v) || "2".equals(v)) cfg.powertrainMode = POWERTRAIN_ICE;
+                    else cfg.powertrainMode = POWERTRAIN_AUTO;
+                }
+                else if ("telemetry_poll_ms".equals(k)) cfg.telemetryPollMs = Math.max(50, Math.min(2000, parseIntSafe(v, 100)));
                 else if ("comma_ip".equals(k)) cfg.commaIp = v;
                 else if ("auto_update".equals(k)) cfg.autoUpdate = !"0".equals(v) && !"false".equalsIgnoreCase(v);
                 else if ("x".equals(k)) cfg.x = parseIntSafe(v, 24);
@@ -13885,6 +15329,15 @@ public class TurzxMonitorMain {
             cfg.renderParallel = false;
             cfg.usbIncrementalEncode = true;
         }
+        // v1.5.13: new standard defaults (q75, 15fps, panel 15fps, poll 100ms, incremental ON).
+        // Configs from config_rev < 4 carrying the previous defaults are upgraded once; custom user values
+        // and any values saved with config_rev >= 4 are respected.
+        if (configRev < 4) {
+            if (cfg.usbJpegQuality == 70) cfg.usbJpegQuality = 75;
+            if (cfg.usbFps == 12) cfg.usbFps = 15;
+            if (cfg.usbPanelFps == 0) cfg.usbPanelFps = 15;
+            if (cfg.telemetryPollMs == 200) cfg.telemetryPollMs = 100;
+        }
         return cfg;
     }
 
@@ -13904,6 +15357,7 @@ public class TurzxMonitorMain {
                     + "usb_incremental_encode=" + (cfg.usbIncrementalEncode ? 1 : 0) + "\n"
                     + "render_parallel=" + (cfg.renderParallel ? 1 : 0) + "\n"
                     + "hud_design=" + (cfg.hudDesignTesla ? "tesla" : "classic") + "\n"
+                    + "powertrain_mode=" + (cfg.powertrainMode == POWERTRAIN_EV ? "ev" : (cfg.powertrainMode == POWERTRAIN_ICE ? "ice" : "auto")) + "\n"
                     + "telemetry_poll_ms=" + cfg.telemetryPollMs + "\n"
                     + "comma_ip=" + (cfg.commaIp != null ? cfg.commaIp : "") + "\n"
                     + "auto_update=" + (cfg.autoUpdate ? 1 : 0) + "\n"
@@ -14361,7 +15815,10 @@ public class TurzxMonitorMain {
             c1.autoUpdate = false;
             saveMonitorConfig(tmpCfg, c1);
             MonitorConfig c2 = loadMonitorConfig(tmpCfg);
-            assertTrue(new MonitorConfig().usbPanelFps == 0, "Expected usb_panel_fps default 0 (CMD 0x0F not sent)");
+            MonitorConfig defCfg = new MonitorConfig();
+            assertTrue(defCfg.usbJpegQuality == 75 && defCfg.usbFps == 15 && defCfg.usbPanelFps == 15
+                            && defCfg.telemetryPollMs == 100 && defCfg.usbIncrementalEncode,
+                    "Expected default tuning q75 / 15fps / panel 15fps / 100ms / incremental ON");
             assertTrue(c2.usbBrightness == 92 && c2.usbRotation == 90 && c2.usbFps == 15 && c2.usbPanelFps == 20
                     && "192.168.43.10".equals(c2.commaIp) && !c2.autoUpdate,
                     "Expected MonitorConfig roundtrip match");
@@ -14806,12 +16263,37 @@ public class TurzxMonitorMain {
             legacy.delete();
             current.delete();
             writeBytesNoSync(legacy, "usb_jpeg_quality=85\nusb_fps=12\n".getBytes(UTF8));
-            assertTrue(loadMonitorConfig(legacy).usbJpegQuality == 70, "Expected legacy q85 config to migrate to 70");
+            MonitorConfig legacyCfg = loadMonitorConfig(legacy);
+            assertTrue(legacyCfg.usbJpegQuality == 75 && legacyCfg.usbFps == 15 && legacyCfg.usbPanelFps == 15
+                            && legacyCfg.telemetryPollMs == 100 && legacyCfg.usbIncrementalEncode,
+                    "Expected legacy q85/12fps config to migrate to v1.5.13 defaults");
             writeBytesNoSync(current, "usb_jpeg_quality=85\nconfig_rev=2\n".getBytes(UTF8));
             assertTrue(loadMonitorConfig(current).usbJpegQuality == 85, "Expected explicit q85 with config_rev=2 to be kept");
             MonitorConfig rt = new MonitorConfig();
             saveMonitorConfig(current, rt);
-            assertTrue(readAllTextQuick(current).contains("config_rev=3"), "Expected saved config to carry config_rev=3");
+            assertTrue(readAllTextQuick(current).contains("config_rev=4"), "Expected saved config to carry config_rev=4");
+            File rev3Cfg = File.createTempFile("turzx_cfg_rev3", ".conf");
+            rev3Cfg.deleteOnExit();
+            rev3Cfg.delete();
+            writeBytesNoSync(rev3Cfg, ("usb_jpeg_quality=70\nusb_fps=12\nusb_panel_fps=0\n"
+                    + "telemetry_poll_ms=200\nusb_incremental_encode=1\nconfig_rev=3\n").getBytes(UTF8));
+            MonitorConfig migRev3 = loadMonitorConfig(rev3Cfg);
+            assertTrue(migRev3.usbJpegQuality == 75 && migRev3.usbFps == 15 && migRev3.usbPanelFps == 15
+                            && migRev3.telemetryPollMs == 100 && migRev3.usbIncrementalEncode,
+                    "Expected config_rev=3 old defaults to migrate to v1.5.13 defaults");
+            rev3Cfg.delete();
+            MonitorConfig rev4Explicit = new MonitorConfig();
+            rev4Explicit.usbJpegQuality = 70;
+            rev4Explicit.usbFps = 12;
+            rev4Explicit.usbPanelFps = 0;
+            rev4Explicit.telemetryPollMs = 200;
+            rev4Explicit.usbIncrementalEncode = false;
+            saveMonitorConfig(rev3Cfg, rev4Explicit);
+            MonitorConfig loadedRev4 = loadMonitorConfig(rev3Cfg);
+            assertTrue(loadedRev4.usbJpegQuality == 70 && loadedRev4.usbFps == 12 && loadedRev4.usbPanelFps == 0
+                            && loadedRev4.telemetryPollMs == 200 && !loadedRev4.usbIncrementalEncode,
+                    "Expected explicit old values saved with config_rev=4 to be preserved");
+            rev3Cfg.delete();
 
             byte[] so = TurzxFrameRenderer.readJarAssetBytesPublic("libturzxjpeg_armv7.so");
             assertTrue(so != null && so.length > 16384 && so[0] == 0x7F && so[1] == 'E' && so[2] == 'L' && so[3] == 'F'
@@ -14872,9 +16354,25 @@ public class TurzxMonitorMain {
             lp.onKey(true, true, 113500L); // autorepeat does not re-arm
             assertTrue(!lp.poll(117000L), "long press: still once per press");
 
-            assertTrue(TurzxOverlayController.controlValueTvs.length == LiveTuning.ROW_LABELS.length
-                            && TurzxOverlayController.lastControlTexts.length == LiveTuning.ROW_LABELS.length,
-                    "dashboard: one value slot per experiment panel row");
+            // v1.5.13 dashboard controls: direct selection + unsaved-change check
+            LiveTuning.loadFrom(new MonitorConfig());
+            MonitorConfig selCfg = new MonitorConfig();
+            assertTrue(!LiveTuning.differsFrom(selCfg), "dashboard: fresh tuning equals config");
+            for (int row = 0; row < LiveTuning.ROW_LABELS.length; row++) {
+                int cur = LiveTuning.currentValue(row);
+                LiveTuning.select(row, cur);
+                assertTrue(LiveTuning.currentValue(row) == cur, "dashboard: select keeps row " + row);
+            }
+            LiveTuning.select(1, 20);
+            LiveTuning.select(6, 1);
+            LiveTuning.select(9, POWERTRAIN_ICE);
+            LiveTuning.select(2, 25);
+            assertTrue(LiveTuning.targetFps == 20 && LiveTuning.parallelPipeline && LiveTuning.powertrainMode == POWERTRAIN_ICE
+                    && LiveTuning.panelFps == 25 && LiveTuning.panelFpsDirty && LiveTuning.differsFrom(selCfg), "dashboard: select applies");
+            LiveTuning.saveTo(selCfg);
+            assertTrue(!LiveTuning.differsFrom(selCfg) && selCfg.renderParallel && selCfg.usbFps == 20, "dashboard: saved == tuning");
+            LiveTuning.loadFrom(new MonitorConfig());
+            LiveTuning.panelFpsDirty = false;
             for (int row = 0; row < LiveTuning.ROW_LABELS.length; row++) {
                 assertTrue(LiveTuning.valueText(row) != null && !LiveTuning.valueText(row).isEmpty(),
                         "dashboard: value text for row " + row);
@@ -14900,12 +16398,16 @@ public class TurzxMonitorMain {
             ds.usbConnected = false;
             assertTrue(TurzxOverlayController.describeBottleneck(ds).contains("미연결"), "dashboard: disconnected");
 
-            String[] bodies = TurzxOverlayController.buildDashboardBodies(new TelemetrySnapshot(), ds);
-            assertTrue(bodies.length == TurzxOverlayController.CARD_TITLES.length, "dashboard: one body per card");
-            for (int i = 0; i < bodies.length; i++) {
-                assertTrue(bodies[i] != null && !bodies[i].isEmpty() && bodies[i].split("\n").length <= 7,
-                        "dashboard: card " + i + " must have 1..7 lines");
-            }
+            TurzxOverlayController.DashValues dv = TurzxOverlayController.buildDashboardValues(new TelemetrySnapshot(), ds, 1000L);
+            String[] dvKeys = {"bat.title", "bat.big", "bat.range", "m0.l", "m5.v", "pw.title", "pw3.v", "dr.gear", "dr.park",
+                    "dr.door", "dr.line", "cl.big", "cl.mode", "md.title", "md.pos", "ty.rr", "ds.q", "ds.save", "pf.fps", "pf.bn",
+                    "pf.r.v", "pf.bench", "pf.rst", "sy.usb.st", "sy.comma.sub", "sy.micom.sub", "sy.ver", "sy.log", "sy.body", "sy.tap"};
+            for (String k : dvKeys) assertTrue(!dv.t(k).isEmpty(), "dashboard value " + k);
+            assertTrue("배터리".equals(dv.t("bat.title")) && dv.t("pf.bn").contains("미연결") && dv.bar.get("bat") != null
+                    && dv.t("sy.ver").equals("v" + MONITOR_VERSION) && dv.t("ds.save").startsWith("바꾼 값"),
+                    "dashboard values: " + dv.text);
+            assertTrue(TurzxOverlayController.TAB_TITLES.length == 4 && TurzxOverlayController.tuningValue(3) == 1,
+                    "dashboard: four tabs, road on by default");
             // Live tuning step lists + windowed FPS bench
             assertTrue(LiveTuning.step(LiveTuning.QUALITY_STEPS, 70, +1) == 75
                     && LiveTuning.step(LiveTuning.QUALITY_STEPS, 70, -1) == 65
@@ -14920,7 +16422,7 @@ public class TurzxMonitorMain {
             tc.hudRoadEnabled = false;
             tc.telemetryPollMs = 300;
             LiveTuning.loadFrom(tc);
-            assertTrue(LiveTuning.label().equals("q60 · 20fps · 패널끔 · 도로OFF · 수집300 · 부분ON · 싱글코어 · 신규"), "tuning: label " + LiveTuning.label());
+            assertTrue(LiveTuning.label().equals("q60 · 20fps · 패널15 · 도로OFF · 수집300 · 부분ON · 싱글코어 · 신규"), "tuning: label " + LiveTuning.label());
             MonitorConfig tc2 = new MonitorConfig();
             LiveTuning.saveTo(tc2);
             assertTrue(tc2.usbJpegQuality == 60 && tc2.usbFps == 20 && !tc2.hudRoadEnabled && tc2.telemetryPollMs == 300,
@@ -14961,7 +16463,7 @@ public class TurzxMonitorMain {
             tc.usbIncrementalEncode = false;
             saveMonitorConfig(tuneCfg, tc);
             assertTrue(loadMonitorConfig(tuneCfg).renderParallel && !loadMonitorConfig(tuneCfg).usbIncrementalEncode,
-                    "tuning: explicit values saved with config_rev=3 are kept");
+                    "tuning: explicit values saved with config_rev=4 are kept");
             tuneCfg.delete(); // File.renameTo cannot replace an existing file on the Windows build host
             writeBytesNoSync(tuneCfg, "render_parallel=1\nusb_incremental_encode=0\nconfig_rev=2\n".getBytes(UTF8));
             MonitorConfig mig = loadMonitorConfig(tuneCfg);
@@ -15264,7 +16766,6 @@ public class TurzxMonitorMain {
             saveMonitorConfig(dcf, dc);
             assertTrue(!loadMonitorConfig(dcf).hudDesignTesla, "design: hud_design=classic roundtrip");
             dcf.delete();
-            assertTrue(TurzxOverlayController.controlValueTvs.length == LiveTuning.ROW_LABELS.length, "design: 9 tuning rows sized");
             assertTrue("신규".equals(LiveTuning.valueText(7)), "design: tuning value text");
             // v1.5.1: 180-degree panel rotation
             MonitorConfig rc = new MonitorConfig();
@@ -15284,7 +16785,8 @@ public class TurzxMonitorMain {
             assertTrue(LiveTuning.rotate180, "rotate: roundtrip");
             rcf.delete();
             LiveTuning.loadFrom(new MonitorConfig());
-            assertTrue(LiveTuning.ROW_LABELS.length == 9 && "화면 회전".equals(LiveTuning.ROW_LABELS[8]), "rotate: row label");
+            assertTrue(LiveTuning.ROW_LABELS.length == 10 && "화면 회전".equals(LiveTuning.ROW_LABELS[8])
+                    && "차종 모드".equals(LiveTuning.ROW_LABELS[9]), "rotate/pt: row labels");
             // v1.5.4: Navdy car sprites + radarState neighbour leads
             byte[] nmRaw = TurzxFrameRenderer.readJarAssetBytesPublic("navdy_meta.txt");
             TurzxFrameRenderer.TeslaHud.NavMeta nm = TurzxFrameRenderer.TeslaHud.parseNavMeta(nmRaw != null ? new String(nmRaw, UTF8) : null);
@@ -15398,6 +16900,130 @@ public class TurzxMonitorMain {
             assertTrue(resolveFreshSharedFile(priTmp.getAbsolutePath(), legTmp.getAbsolutePath(), 10000L, tNow) == null,
                     "ramdisk: null when both stale");
             legTmp.delete();
+
+            // v1.5.13: Widened 9.2" media card + ICE layout assets, OBD-II / MICOM parsers, EV/ICE auto-detect & config
+            TurzxFrameRenderer.TeslaHud.Layout lay92Ev = TurzxFrameRenderer.TeslaHud.parseLayout(
+                    new String(TurzxFrameRenderer.readJarAssetBytesPublic("tesla_layout_92.txt"), UTF8));
+            float[] art92 = lay92Ev.rect("art"), viz92 = lay92Ev.rect("viz");
+            assertTrue(viz92 != null && Math.abs(viz92[2] - 720f) < 2f && art92 != null && art92[3] >= 310f,
+                    "v1.5.13: 9.2 widened media album art reaches full card height (" + (art92 != null ? art92[3] : -1) + ")");
+
+            String[] iceLayouts = {"tesla_layout_ice_92.txt", "tesla_layout_ice_123.txt"};
+            for (int i = 0; i < iceLayouts.length; i++) {
+                byte[] iraw = TurzxFrameRenderer.readJarAssetBytesPublic(iceLayouts[i]);
+                assertTrue(iraw != null && iraw.length > 500, "ice: " + iceLayouts[i] + " bundled");
+                TurzxFrameRenderer.TeslaHud.Layout ilay = TurzxFrameRenderer.TeslaHud.parseLayout(new String(iraw, UTF8));
+                String[] needIceF = {"speed", "tripKm", "fuelPct", "iceDte", "avgKmL", "instKmL", "coolant", "volt12", "rpm", "rpmLbl"};
+                for (int k = 0; k < needIceF.length; k++) {
+                    assertTrue(ilay.fields.containsKey(needIceF[k]), "ice: " + iceLayouts[i] + " field " + needIceF[k]);
+                }
+                if (i == 1) {
+                    assertTrue(ilay.fields.containsKey("runTime") && ilay.fields.containsKey("idleTime")
+                            && ilay.fields.containsKey("odoKm"), "ice: 12.3 Row 2 fields");
+                }
+                String[] needIceR = {"viz", "fuelPill", "rpm", "art", "ttHead", "ttHigh", "ttPbrake", "ttMil"};
+                for (int k = 0; k < needIceR.length; k++) {
+                    assertTrue(ilay.rect(needIceR[k]) != null, "ice: " + iceLayouts[i] + " rect " + needIceR[k]);
+                }
+                assertTrue(!"rpm".equals("kW") && "rpm".equals(ilay.fields.get("rpm").unit), "ice: rpm unit in " + iceLayouts[i]);
+            }
+            for (String ib : new String[]{"tesla_base_ice.png", "tesla_base_ice_720.png"}) {
+                byte[] b = TurzxFrameRenderer.readJarAssetBytesPublic(ib);
+                assertTrue(b != null && b.length > 4096, "ice: base sprite " + ib);
+            }
+
+            // EV vs ICE auto-detect + manual override
+            TelemetrySnapshot ptSnap = new TelemetrySnapshot();
+            assertTrue(!ptSnap.isIceMode(POWERTRAIN_AUTO), "pt: fresh unknown defaults to EV");
+            ptSnap.engineType = 7;
+            ptSnap.hevServicePresent = true;
+            ptSnap.displaySocPct = 80.5;
+            assertTrue(!ptSnap.isIceMode(POWERTRAIN_AUTO), "pt: Niro EV detected as EV");
+            assertTrue(ptSnap.isIceMode(POWERTRAIN_ICE), "pt: manual ICE override wins");
+
+            TelemetrySnapshot ka4 = new TelemetrySnapshot();
+            ka4.engineType = 1;
+            ka4.hevServicePresent = false;
+            ka4.fuelLevelPct = 42;
+            assertTrue(ka4.isIceMode(POWERTRAIN_AUTO), "pt: KA4 ICE auto-detected");
+            assertTrue(!ka4.isIceMode(POWERTRAIN_EV), "pt: manual EV override wins");
+
+            TelemetrySnapshot genericIce = new TelemetrySnapshot();
+            genericIce.hevServicePresent = false;
+            genericIce.engineRpm = 1450;
+            assertTrue(genericIce.isIceMode(POWERTRAIN_AUTO), "pt: OBD RPM without hevService detects ICE");
+
+            // Powertrain config roundtrip + LiveTuning row 9
+            MonitorConfig ptc = new MonitorConfig();
+            assertTrue(ptc.powertrainMode == POWERTRAIN_AUTO, "pt cfg: default auto");
+            ptc.powertrainMode = POWERTRAIN_ICE;
+            File ptf = File.createTempFile("turzx_cfg_pt", ".conf");
+            ptf.deleteOnExit();
+            ptf.delete();
+            saveMonitorConfig(ptf, ptc);
+            assertTrue(loadMonitorConfig(ptf).powertrainMode == POWERTRAIN_ICE, "pt cfg: ice roundtrip");
+            ptc.powertrainMode = POWERTRAIN_EV;
+            ptf.delete();
+            saveMonitorConfig(ptf, ptc);
+            assertTrue(loadMonitorConfig(ptf).powertrainMode == POWERTRAIN_EV, "pt cfg: ev roundtrip");
+            ptf.delete();
+            LiveTuning.loadFrom(new MonitorConfig());
+            assertTrue("자동".equals(LiveTuning.valueText(9)), "pt tuning: default auto");
+            LiveTuning.adjust(9, +1);
+            assertTrue("EV".equals(LiveTuning.valueText(9)) && LiveTuning.label().endsWith(" · EV"), "pt tuning: auto -> EV");
+            LiveTuning.adjust(9, +1);
+            assertTrue("내연차".equals(LiveTuning.valueText(9)) && LiveTuning.label().endsWith(" · 내연차"), "pt tuning: EV -> ICE");
+            LiveTuning.adjust(9, +1);
+            assertTrue("자동".equals(LiveTuning.valueText(9)), "pt tuning: wraps to auto");
+
+            // OBD-II Mode 01 ICE decoding (verified KA4 bytes: 41 0C 13 1E = 1223.5 -> 1224 rpm, 41 05 3C = 20C, 41 67 01 4F = 39C, 41 42 37 0D = 14.093V, 41 0D 2C = 44kph)
+            TelemetrySnapshot obdS = new TelemetrySnapshot();
+            assertTrue(parseIceObdPayload(new byte[]{0x41, 0x0C, 0x13, 0x1E}, obdS, 1000L) && obdS.engineRpm == 1224,
+                    "obd: RPM 41 0C 13 1E -> " + obdS.engineRpm);
+            assertTrue(parseIceObdPayload(new byte[]{0x41, 0x05, 0x3C}, obdS, 1010L) && obdS.coolantTempC == 20,
+                    "obd: coolant 41 05 3C -> " + obdS.coolantTempC);
+            assertTrue(parseIceObdPayload(new byte[]{0x41, 0x67, 0x01, 0x4F, 0x28}, obdS, 1020L) && obdS.coolantTempC == 39,
+                    "obd: coolant 41 67 01 4F -> " + obdS.coolantTempC);
+            assertTrue(parseIceObdPayload(new byte[]{0x41, 0x42, 0x37, 0x0D}, obdS, 1030L)
+                    && Math.abs(obdS.auxBattVoltV - 14.093) < 0.01, "obd: 12V 41 42 37 0D -> " + obdS.auxBattVoltV);
+            assertTrue(parseIceObdPayload(new byte[]{0x41, 0x0D, 0x2C}, obdS, 1040L) && obdS.obdSpeedKph == 44,
+                    "obd: speed 41 0D 2C -> " + obdS.obdSpeedKph);
+            assertTrue(!parseIceObdPayload(new byte[]{0x62, 0x01, 0x01, 0x00}, obdS, 1050L)
+                    && !parseIceObdPayload(new byte[]{0x41, 0x0C, 0x13}, obdS, 1050L), "obd: non-0x41 and truncated rejected");
+
+            // MICOM tap KA4 ICE packets (C1.C4.22 ODO, C4.D0.47 Gear, 8F.8D.43 DTE)
+            TelemetrySnapshot micS = new TelemetrySnapshot();
+            parseMicomIcePacket((byte) 0xC1, (byte) 0xC4, (byte) 0x22, new byte[]{0x0C, 0x4F, (byte) 0xEF}, micS);
+            assertTrue(Math.abs(micS.odometerKm - 80689.5) < 0.05 && Math.abs(micS.tripKm) < 0.05,
+                    "micom: C1.C4.22 first ODO 80689.5km");
+            parseMicomIcePacket((byte) 0xC1, (byte) 0xC4, (byte) 0x22, new byte[]{0x0C, 0x4F, (byte) 0xF5}, micS);
+            assertTrue(Math.abs(micS.odometerKm - 80690.1) < 0.05 && Math.abs(micS.tripKm - 0.6) < 0.05,
+                    "micom: C1.C4.22 delta trip 0.6km");
+            assertTrue("D".equals(parseMicomIcePacket((byte) 0xC4, (byte) 0xD0, (byte) 0x47, new byte[]{0x05}, micS))
+                    && "R".equals(parseMicomIcePacket((byte) 0xC4, (byte) 0xD0, (byte) 0x47, new byte[]{0x07}, micS))
+                    && "N".equals(parseMicomIcePacket((byte) 0xC4, (byte) 0xD0, (byte) 0x47, new byte[]{0x06}, micS))
+                    && "P".equals(parseMicomIcePacket((byte) 0xC4, (byte) 0xD0, (byte) 0x47, new byte[]{0x00}, micS)),
+                    "micom: C4.D0.47 gear P/R/N/D");
+            parseMicomIcePacket((byte) 0x8F, (byte) 0x8D, (byte) 0x43, new byte[]{0x00, 0x00, (byte) 0xE3}, micS);
+            assertTrue(micS.iceDteKm == 227, "micom: 8F.8D.43 DTE 227km");
+
+            // ICE dashboard cards & status JSON
+            ka4.coolantTempC = 90;
+            ka4.engineRpm = 1950;
+            ka4.odometerKm = 80690.0;
+            ka4.engineRunSec = 123L;
+            ka4.engineIdleSec = 62L;
+            TurzxOverlayController.DashboardStats iceDs = new TurzxOverlayController.DashboardStats();
+            iceDs.usbConnected = true;
+            iceDs.targetFps = 12;
+            TurzxOverlayController.DashValues iceVals = TurzxOverlayController.buildDashboardValues(ka4, iceDs, 1000L);
+            assertTrue(iceVals.t("bat.title").contains("내연차(") && "42%".equals(iceVals.t("bat.big"))
+                    && "엔진".equals(iceVals.t("pw.title")) && "1950 rpm".equals(iceVals.t("pw.big"))
+                    && "90°C".equals(iceVals.t("m2.v")), "ice dashboard values: " + iceVals.text);
+            String iceJson = formatTelemetryJson(ka4);
+            assertTrue(iceJson.contains("\"powertrain\":\"ice\"") && iceJson.contains("\"rpm\":1950")
+                    && iceJson.contains("\"fuelPct\":42"), "ice json: " + iceJson);
+            LiveTuning.loadFrom(new MonitorConfig());
         } catch (Exception e) {
             throw new RuntimeException("v1.5.0 Tesla HUD self-test failed", e);
         }

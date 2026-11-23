@@ -3,6 +3,9 @@ export PATH=/data/nemesis/bin:/sbin:/vendor/bin:/system/sbin:/system/bin:/system
 export LD_LIBRARY_PATH=/vendor/lib:/system/lib
 export ANDROID_ROOT=/system
 export ANDROID_DATA=/data
+if [ -z "$BOOTCLASSPATH" ]; then
+    export BOOTCLASSPATH=/system/framework/core.jar:/system/framework/conscrypt.jar:/system/framework/okhttp.jar:/system/framework/core-junit.jar:/system/framework/bouncycastle.jar:/system/framework/ext.jar:/system/framework/framework.jar:/system/framework/framework2.jar:/system/framework/telephony-common.jar:/system/framework/voip-common.jar:/system/framework/mms-common.jar:/system/framework/android.policy.jar:/system/framework/services.jar:/system/framework/apache-xml.jar:/system/framework/webviewchromium.jar:/system/framework/automotive.jar
+fi
 
 if [ -d "/data/nemesis/apps/hkg.turzxmonitor" ]; then
     INSTALL_DIR="/data/nemesis/apps/hkg.turzxmonitor"
@@ -16,8 +19,8 @@ if [ "$INSTALL_DIR" = "/data/nemesis/apps/hkg.turzxmonitor" ]; then
     ln -s "$INSTALL_DIR" /data/nemesis/packages/hkg.turzxmonitor 2>/dev/null
 fi
 
-chmod 755 "$INSTALL_DIR/bin/launch.sh" "$INSTALL_DIR/svc/turzx-daemon.sh" 2>/dev/null
-chmod 644 "$INSTALL_DIR/bin/turzxmonitor.jar" "$INSTALL_DIR/NEMESIS.data" "$INSTALL_DIR/config/monitor.conf" "$INSTALL_DIR/config/version.json" "$INSTALL_DIR/web/turzx_92_mockup.html" 2>/dev/null
+chmod 755 "$INSTALL_DIR/bin/launch.sh" "$INSTALL_DIR/svc/turzx-daemon.sh" "$INSTALL_DIR/hmgapi_mod/bin/open-ui.sh" 2>/dev/null
+chmod 644 "$INSTALL_DIR/bin/turzxmonitor.jar" "$INSTALL_DIR/NEMESIS.data" "$INSTALL_DIR/config/monitor.conf" "$INSTALL_DIR/config/version.json" "$INSTALL_DIR/web/turzx_92_mockup.html" "$INSTALL_DIR/hmgapi_mod/mod.json" "$INSTALL_DIR/hmgapi_mod/HkgTurzxShortcut.apk" "$INSTALL_DIR/hmgapi_mod/"*.png 2>/dev/null
 mkdir -p "$INSTALL_DIR/logs" /data/dalvik-cache /data/local/tmp/dalvik-cache /dev/hkg_tmp 2>/dev/null
 chmod 777 /dev/hkg_tmp 2>/dev/null
 
@@ -71,6 +74,52 @@ pkill -f "com\.hkg\.turzxmonitor(\.TurzxMonitorMain|$)" >/dev/null 2>&1
 rm -f /dev/hkg_tmp/hkg_turzxmonitor_svc.pid /dev/hkg_tmp/hkg_turzxmonitor_java.pid /dev/hkg_tmp/hkg_turzxmonitor_ota_reload 2>/dev/null
 rm -f /data/local/tmp/hkg_turzxmonitor_svc.pid /data/local/tmp/hkg_turzxmonitor_java.pid /data/local/tmp/hkg_turzxmonitor_ota_reload /data/local/tmp/hkg_turzx_state.json /data/local/tmp/hkg_turzx_state.json.tmp 2>/dev/null
 sync
+
+# Register all-apps menu & star-key shortcut mod if HMG-API is installed on this head unit
+if [ -f "/system/framework/hmgapi-hook.jar" ] && [ -d "/data/hmgapi" ] && [ -d "$INSTALL_DIR/hmgapi_mod" ]; then
+    HMG_LOG="/dev/hkg_tmp/hkg_turzxmonitor_hmgapi.log"
+    MOD_KEY_DIR="/data/hmgapi/local-keys"
+    MOD_KEY="$MOD_KEY_DIR/hkg-turzxmonitor.key"
+    STAGE_ROOT="/dev/hkg_tmp/hkg_turzx_mod_stage"
+    STAGE_MOD="$STAGE_ROOT/hkg-turzxmonitor"
+    echo "=== hkg.turzxmonitor HMG-API sync $(date 2>/dev/null) ===" > "$HMG_LOG" 2>/dev/null
+    if [ -x /system/bin/hmgapid ]; then
+        /system/bin/hmgapid ping >/dev/null 2>&1 || /system/bin/hmgapid daemon </dev/null >>"$HMG_LOG" 2>&1 &
+    fi
+    mkdir -p "$MOD_KEY_DIR" 2>/dev/null
+    chmod 700 "$MOD_KEY_DIR" 2>/dev/null
+    if [ ! -s "$MOD_KEY" ]; then
+        CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Signing keygen "$MOD_KEY" >>"$HMG_LOG" 2>&1
+    fi
+    rm -rf "$STAGE_ROOT" 2>/dev/null
+    mkdir -p "$STAGE_MOD/bin" 2>/dev/null
+    cp -f "$INSTALL_DIR/hmgapi_mod/mod.json" "$STAGE_MOD/mod.json" 2>/dev/null
+    cp -f "$INSTALL_DIR/hmgapi_mod/HkgTurzxShortcut.apk" "$STAGE_MOD/HkgTurzxShortcut.apk" 2>/dev/null
+    cp -f "$INSTALL_DIR/hmgapi_mod/"*.png "$STAGE_MOD/" 2>/dev/null
+    cp -f "$INSTALL_DIR/hmgapi_mod/bin/open-ui.sh" "$STAGE_MOD/bin/open-ui.sh" 2>/dev/null
+    chmod 755 "$STAGE_MOD/bin/open-ui.sh" 2>/dev/null
+
+    CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Signing sign "$STAGE_MOD" "$MOD_KEY" >>"$HMG_LOG" 2>&1
+
+    case "$(pm path com.hkg.turzxmonitor.app 2>/dev/null)" in
+        package:*)
+            pm uninstall com.hkg.turzxmonitor.app >>"$HMG_LOG" 2>&1
+            ;;
+    esac
+
+    if ! CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Engine install "$STAGE_MOD" --from-nemesis --force >>"$HMG_LOG" 2>&1; then
+        CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Engine remove hkg-turzxmonitor --from-nemesis >>"$HMG_LOG" 2>&1
+        CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Engine install "$STAGE_MOD" --from-nemesis --force >>"$HMG_LOG" 2>&1
+    fi
+
+    if [ -x /system/bin/hmgapid ]; then
+        /system/bin/hmgapid engine apply >>"$HMG_LOG" 2>&1
+    else
+        CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Engine apps >>"$HMG_LOG" 2>&1
+        CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Engine publish-state >>"$HMG_LOG" 2>&1
+    fi
+    rm -rf "$STAGE_ROOT" 2>/dev/null
+fi
 
 # Show control/preview overlay immediately after installation.
 # The daemon itself is started by NEMESIS (svcmgr) right after this hook returns; starting a copy here

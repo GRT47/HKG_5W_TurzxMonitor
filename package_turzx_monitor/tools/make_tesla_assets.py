@@ -2,12 +2,14 @@
 """Render the Tesla-style HUD design (turzx_redesign_tesla.html) into Android renderer assets (v1.5.0).
 
 Outputs (package_turzx_monitor/design_tesla/, bundled into the jar by build_package.py):
-  tesla_base.png / tesla_base_720.png      static layer (cards, labels, every state OFF), 1920 x 462 / 720
-  tesla_active.png / tesla_active_720.png  same layer with every state ON (rects are copied from it)
-  tesla_layout_92.txt / tesla_layout_123.txt  text anchors + rects in panel pixels (TeslaHud reads them)
-  tesla_lead.png                           lead car sprite (grey sedan)
-  tesla_ego_off/tail/brake.png             ego car sprites (3D "2019 Kia e-Niro" by tonielpro520, CC BY 4.0)
-  tesla_park.png                           parked car photo (front 3/4, chroma-keyed)
+  tesla_base.png / tesla_base_720.png         EV static layer, 1920 x 462 / 720
+  tesla_base_ice.png / tesla_base_ice_720.png ICE static layer, 1920 x 462 / 720
+  tesla_active.png / tesla_active_720.png     shared active-state layer (rects are copied from it)
+  tesla_layout_92.txt / tesla_layout_123.txt  EV text anchors + rects in panel pixels
+  tesla_layout_ice_92.txt / tesla_layout_ice_123.txt  ICE text anchors + rects in panel pixels
+  tesla_lead.png                              lead car sprite (grey sedan)
+  tesla_ego_off/tail/brake.png                ego car sprites (3D "2019 Kia e-Niro" by tonielpro520, CC BY 4.0)
+  tesla_park.png                              parked car photo (front 3/4, chroma-keyed)
 
 Needs Edge/Chrome (same as build_package.generate_hud_assets).
 Usage: python package_turzx_monitor/tools/make_tesla_assets.py
@@ -82,8 +84,8 @@ def main() -> int:
     port = bp._get_free_port()
     profile = PKG / "build" / "tesla_profile"
     proc = subprocess.Popen([bp.find_browser(), "--headless=new", "--disable-gpu", "--no-first-run",
-                             "--allow-file-access-from-files", f"--user-data-dir={profile}",
-                             f"--remote-debugging-port={port}", "about:blank"],
+                             "--allow-file-access-from-files", "--window-size=2000,1200",
+                             f"--user-data-dir={profile}", f"--remote-debugging-port={port}", "about:blank"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         ws = None
@@ -105,7 +107,7 @@ def main() -> int:
         cdp.call("Emulation.setDeviceMetricsOverride", {"width": 1200, "height": 800, "deviceScaleFactor": 2, "mobile": False})
         for model, dp_h, suffix in (("92", 231, ""), ("123", 360, "_720")):
             for cap in ("base", "active"):
-                cdp.call("Page.navigate", {"url": HTML.as_uri() + f"?shot={model}&scene=drive&cap={cap}"})
+                cdp.call("Page.navigate", {"url": HTML.as_uri() + f"?shot={model}&scene=drive&pt=ev&cap={cap}"})
                 time.sleep(2.4)
                 png = bp._capture_png(cdp, {"x": 0, "y": 0, "width": 960, "height": dp_h, "scale": 1}, omit_bg=False)
                 (OUT / f"tesla_{cap}{suffix}.png").write_bytes(png)
@@ -113,7 +115,15 @@ def main() -> int:
                     lay = cdp.call("Runtime.evaluate", {"expression": "window.__exportLayout()", "returnByValue": True})
                     text = lay["result"]["value"]
                     (OUT / f"tesla_layout_{model}.txt").write_text(text + "\n", encoding="utf-8")
-                    print(f"{model}: layout {len(text.splitlines())} lines")
+                    print(f"{model} ev: layout {len(text.splitlines())} lines")
+            cdp.call("Page.navigate", {"url": HTML.as_uri() + f"?shot={model}&scene=drive&pt=ice&cap=base"})
+            time.sleep(2.4)
+            ice_png = bp._capture_png(cdp, {"x": 0, "y": 0, "width": 960, "height": dp_h, "scale": 1}, omit_bg=False)
+            (OUT / f"tesla_base_ice{suffix}.png").write_bytes(ice_png)
+            lay_ice = cdp.call("Runtime.evaluate", {"expression": "window.__exportLayout()", "returnByValue": True})
+            ice_text = lay_ice["result"]["value"]
+            (OUT / f"tesla_layout_ice_{model}.txt").write_text(ice_text + "\n", encoding="utf-8")
+            print(f"{model} ice: layout {len(ice_text.splitlines())} lines")
         # Lead car sprite from the mockup's SVG model
         js = """(async () => {
             const img = new Image();

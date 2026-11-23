@@ -1,0 +1,49 @@
+{
+  "id": "hkg-turzxmonitor",
+  "version": "1.5.13",
+  "name": "HKG 5W TURZX 모니터",
+  "hmgapi": ">=1.0.0",
+  "authors": ["GRT47"],
+  "license": "MIT",
+  "repo": "https://github.com/GRT47/HKG_5W_TurzxMonitor",
+  "description": "HKG 5W TURZX 클러스터 모니터 대시보드를 순정 전체 앱 메뉴와 사용자 버튼(★)에 추가합니다.",
+  "apps": [
+    {
+      "package": "com.hkg.turzxmonitor.app",
+      "apk": "HkgTurzxShortcut.apk"
+    }
+  ],
+  "services": [
+    {
+      "name": "open-ui",
+      "script": "bin/open-ui.sh",
+      "user": "root",
+      "start": "manual",
+      "restart": false
+    }
+  ],
+  "provides": {
+    "launcher": [
+      {
+        "id": "turzxmonitor",
+        "title": "TURZX 모니터",
+        "package": "com.hkg.turzxmonitor.app",
+        "class": ".LaunchActivity",
+        "icon": "icon.png",
+        "icon_night": "icon_night.png",
+        "icon_disabled": "icon_disabled.png",
+        "icon_disabled_night": "icon_disabled_night.png"
+      }
+    ],
+    "star_key": [
+      {
+        "id": "open",
+        "title": "TURZX 모니터",
+        "activity": {
+          "package": "com.hkg.turzxmonitor.app",
+          "class": ".LaunchActivity"
+        }
+      }
+    ]
+  }
+}

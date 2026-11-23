@@ -5,13 +5,17 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
+import re
 import shutil
 import socket
+import struct
 import subprocess
 import time
 import urllib.request
 import zipfile
+import zlib
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -21,11 +25,13 @@ BUILD_DIR = BASE_DIR / "build"
 CLASSES_DIR = BUILD_DIR / "classes"
 ASSETS_DIR = BUILD_DIR / "assets"
 DEX_DIR = BUILD_DIR / "dex"
+SHORTCUT_CLASSES_DIR = BUILD_DIR / "shortcut_classes"
+SHORTCUT_DEX_DIR = BUILD_DIR / "shortcut_dex"
 PKG_STAGE_DIR = BUILD_DIR / "pkg_stage"
 USB_ROOT_DIR = BUILD_DIR / "usb_root"
 
 OUTER_ZIP_PATH = REPO_ROOT / "HKG_5W_TurzxMonitor_USB.zip"
-MONITOR_VERSION = "1.5.12"
+MONITOR_VERSION = "1.5.13"
 
 PUBLIC_SANS_FONTS = {
     "PublicSans-Bold.ttf": "https://fonts.gstatic.com/s/publicsans/v21/ijwGs572Xtc6ZYQws9YVwllKVG8qX1oyOymu8Z65ww.ttf",
@@ -55,28 +61,341 @@ def find_java() -> str:
     return str(Path(javac).with_name("java.exe" if os.name == "nt" else "java"))
 
 
-def find_d8() -> str:
-    d8 = shutil.which("d8") or shutil.which("d8.bat")
-    if d8:
-        return d8
-    sdk_roots = [
+def _version_key(path: Path) -> tuple[int, ...]:
+    nums = re.findall(r"\d+", path.name)
+    return tuple(int(n) for n in nums) if nums else (0,)
+
+
+def find_sdk_roots() -> list[str]:
+    return [
         os.environ.get("ANDROID_HOME", ""),
         os.environ.get("ANDROID_SDK_ROOT", ""),
         os.path.expanduser(r"~\AppData\Local\Android\Sdk"),
         "/usr/local/lib/android/sdk",
         "/usr/lib/android-sdk",
     ]
-    for root in sdk_roots:
+
+
+def find_build_tool(names: tuple[str, ...]) -> str:
+    for n in names:
+        hit = shutil.which(n)
+        if hit:
+            return hit
+    for root in find_sdk_roots():
         if not root or not os.path.isdir(root):
             continue
         bt_dir = Path(root) / "build-tools"
         if bt_dir.is_dir():
-            for ver_dir in sorted(bt_dir.iterdir(), reverse=True):
-                for name in ("d8.bat", "d8"):
-                    cand = ver_dir / name
+            for ver_dir in sorted(bt_dir.iterdir(), key=_version_key, reverse=True):
+                for n in names:
+                    cand = ver_dir / n
                     if cand.is_file():
                         return str(cand)
-    raise RuntimeError("Android SDK d8 not found")
+    raise RuntimeError(f"Android SDK tool not found: {names}")
+
+
+def find_d8() -> str:
+    return find_build_tool(("d8.bat", "d8"))
+
+
+def find_aapt() -> str:
+    return find_build_tool(("aapt.exe", "aapt"))
+
+
+def find_apksigner() -> str:
+    return find_build_tool(("apksigner.bat", "apksigner"))
+
+
+def find_android_jar() -> str:
+    for root in find_sdk_roots():
+        if not root or not os.path.isdir(root):
+            continue
+        plat_dir = Path(root) / "platforms"
+        if plat_dir.is_dir():
+            for ver_dir in sorted(plat_dir.iterdir(), key=_version_key, reverse=True):
+                cand = ver_dir / "android.jar"
+                if cand.is_file():
+                    return str(cand)
+    raise RuntimeError("Android SDK android.jar not found")
+
+
+def find_keytool() -> str:
+    kt = shutil.which("keytool")
+    if kt:
+        return kt
+    javac = find_javac()
+    cand = Path(javac).with_name("keytool.exe" if os.name == "nt" else "keytool")
+    if cand.is_file():
+        return str(cand)
+    raise RuntimeError("keytool not found alongside javac")
+
+
+def png_chunk(tag: bytes, payload: bytes) -> bytes:
+    crc = zlib.crc32(tag + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", crc)
+
+
+def render_turzx_tile_icon_png(
+    bg_top: tuple[int, int, int],
+    bg_bot: tuple[int, int, int],
+    border_col: tuple[int, int, int],
+    bezel_col: tuple[int, int, int],
+    screen_bg: tuple[int, int, int],
+    arc_col: tuple[int, int, int],
+    accent_col: tuple[int, int, int],
+    needle_col: tuple[int, int, int],
+    bar1_col: tuple[int, int, int],
+    bar2_col: tuple[int, int, int],
+    bar3_col: tuple[int, int, int],
+) -> bytes:
+    """Render a 99x99 RGBA PNG launcher tile matching Gen5W app-menu rounded-square proportions."""
+    w, h = 99, 99
+    cx, cy = 49.5, 49.5
+    bx, by, br = 43.5, 43.5, 22.0
+
+    # Ultrawide cluster screen center + half extents
+    scx, scy = 49.5, 47.5
+    sbx, sby, sbr = 27.5, 13.5, 5.2
+
+    # Mini speedometer on left side of screen
+    gcx, gcy = 36.8, 48.2
+    ang_rad = math.radians(-35.0)
+    nx0, ny0 = gcx, gcy
+    nx1, ny1 = gcx + math.cos(ang_rad) * 6.0, gcy + math.sin(ang_rad) * 6.0
+    ndx, ndy = nx1 - nx0, ny1 - ny0
+    nlen2 = ndx * ndx + ndy * ndy
+
+    def rr_dist(px: float, py: float, rcx: float, rcy: float, hx: float, hy: float, r: float) -> float:
+        dx = max(abs(px - rcx) - (hx - r), 0.0)
+        dy = max(abs(py - rcy) - (hy - r), 0.0)
+        return math.hypot(dx, dy) + min(max(abs(px - rcx) - (hx - r), abs(py - rcy) - (hy - r)), 0.0) - r
+
+    def sample(px: float, py: float) -> tuple[int, int, int, int]:
+        dist = rr_dist(px, py, cx, cy, bx, by, br)
+        if dist > 0.0:
+            return (0, 0, 0, 0)
+
+        t = max(0.0, min(1.0, (py - 6.0) / 87.0))
+        r = int(bg_top[0] + (bg_bot[0] - bg_top[0]) * t)
+        g = int(bg_top[1] + (bg_bot[1] - bg_top[1]) * t)
+        b = int(bg_top[2] + (bg_bot[2] - bg_top[2]) * t)
+
+        if dist >= -2.4:
+            r, g, b = border_col
+
+        # Stand neck & base foot under ultrawide cluster housing
+        if (abs(px - scx) <= 3.2 and 60.5 <= py <= 64.2) or (
+            rr_dist(px, py, scx, 65.5, 12.0, 2.0, 1.8) <= 0.0
+        ):
+            r, g, b = bezel_col
+
+        # Ultrawide cluster screen frame + dark glass interior
+        sdist = rr_dist(px, py, scx, scy, sbx, sby, sbr)
+        if sdist <= 0.0:
+            if sdist >= -2.2:
+                r, g, b = bezel_col
+            else:
+                r, g, b = screen_bg
+
+                # Mini digital speed gauge (left)
+                gdx, gdy = px - gcx, py - gcy
+                gr = math.hypot(gdx, gdy)
+                if 4.5 <= gr <= 7.0:
+                    deg = math.degrees(math.atan2(gdy, gdx))
+                    if deg < 40.0:
+                        deg += 360.0
+                    if 135.0 <= deg <= 400.0:
+                        r, g, b = accent_col if deg >= 315.0 else arc_col
+
+                proj = max(0.0, min(1.0, ((px - nx0) * ndx + (py - ny0) * ndy) / nlen2))
+                ndist = math.hypot(px - (nx0 + proj * ndx), py - (ny0 + proj * ndy))
+                if ndist <= 1.25 or gr <= 2.0:
+                    r, g, b = needle_col
+
+                # Right telemetry bars (SOC / power / drive strips)
+                if 48.0 <= px <= 70.5 and 41.2 <= py <= 44.2:
+                    r, g, b = bar1_col
+                elif 48.0 <= px <= 65.5 and 46.2 <= py <= 49.0:
+                    r, g, b = bar2_col
+                elif 48.0 <= px <= 68.5 and 51.0 <= py <= 53.8:
+                    r, g, b = bar3_col
+
+        return (r, g, b, 255)
+
+    rows = bytearray()
+    offsets = (0.25, 0.75)
+    for y in range(h):
+        rows.append(0)
+        for x in range(w):
+            sr = sg = sb = sa = 0
+            for ox in offsets:
+                for oy in offsets:
+                    cr, cg, cb, ca = sample(x + ox, y + oy)
+                    sr += cr
+                    sg += cg
+                    sb += cb
+                    sa += ca
+            rows.extend((sr >> 2, sg >> 2, sb >> 2, sa >> 2))
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", ihdr)
+        + png_chunk(b"IDAT", zlib.compress(bytes(rows), 9))
+        + png_chunk(b"IEND", b"")
+    )
+
+
+def build_shortcut_apk(javac: str, d8: str) -> Path:
+    """Compile & v1-sign HkgTurzxShortcut.apk (API 19 DEX 035 trampoline activity)."""
+    android_jar = find_android_jar()
+    aapt = find_aapt()
+    apksigner = find_apksigner()
+    keytool = find_keytool()
+
+    SHORTCUT_CLASSES_DIR.mkdir(parents=True, exist_ok=True)
+    SHORTCUT_DEX_DIR.mkdir(parents=True, exist_ok=True)
+
+    launch_java = BASE_DIR / "shortcut_app" / "src" / "com" / "hkg" / "turzxmonitor" / "app" / "LaunchActivity.java"
+    manifest_xml = BASE_DIR / "shortcut_app" / "AndroidManifest.xml"
+    subprocess.run(
+        [
+            javac,
+            "--release",
+            "8",
+            "-encoding",
+            "UTF-8",
+            "-cp",
+            android_jar,
+            "-d",
+            str(SHORTCUT_CLASSES_DIR),
+            str(launch_java),
+        ],
+        check=True,
+    )
+
+    class_files = [str(p) for p in sorted(SHORTCUT_CLASSES_DIR.rglob("*.class"))]
+    if not class_files:
+        raise RuntimeError("No shortcut classes compiled")
+    subprocess.run(
+        [
+            d8,
+            "--min-api",
+            "19",
+            "--no-desugaring",
+            "--lib",
+            android_jar,
+            "--output",
+            str(SHORTCUT_DEX_DIR),
+            *class_files,
+        ],
+        check=True,
+    )
+
+    dex_bytes = (SHORTCUT_DEX_DIR / "classes.dex").read_bytes()
+    if dex_bytes[:8] != b"dex\n035\x00":
+        raise RuntimeError(f"Unexpected shortcut DEX magic: {dex_bytes[:8]!r}")
+
+    shortcut_res_dir = BUILD_DIR / "shortcut_res"
+    shortcut_res_drawable = shortcut_res_dir / "drawable"
+    shortcut_res_drawable.mkdir(parents=True, exist_ok=True)
+    (shortcut_res_drawable / "ic_launcher.png").write_bytes(
+        render_turzx_tile_icon_png(
+            bg_top=(28, 42, 66),
+            bg_bot=(14, 22, 38),
+            border_col=(56, 189, 248),
+            bezel_col=(94, 234, 212),
+            screen_bg=(11, 18, 32),
+            arc_col=(56, 189, 248),
+            accent_col=(52, 211, 153),
+            needle_col=(248, 250, 252),
+            bar1_col=(52, 211, 153),
+            bar2_col=(56, 189, 248),
+            bar3_col=(251, 191, 36),
+        )
+    )
+
+    unsigned_apk = BUILD_DIR / "HkgTurzxShortcut-unsigned.apk"
+    subprocess.run(
+        [
+            aapt,
+            "package",
+            "-f",
+            "-M",
+            str(manifest_xml),
+            "-S",
+            str(shortcut_res_dir),
+            "-I",
+            android_jar,
+            "-F",
+            str(unsigned_apk),
+        ],
+        check=True,
+    )
+    with zipfile.ZipFile(unsigned_apk, "a", compression=zipfile.ZIP_DEFLATED) as zf:
+        zinfo = zipfile.ZipInfo("classes.dex", date_time=(2026, 1, 1, 0, 0, 0))
+        zinfo.compress_type = zipfile.ZIP_DEFLATED
+        zf.writestr(zinfo, dex_bytes)
+
+    keystore = BUILD_DIR / "shortcut_sign.p12"
+    if keystore.exists():
+        keystore.unlink()
+    subprocess.run(
+        [
+            keytool,
+            "-genkeypair",
+            "-storetype",
+            "PKCS12",
+            "-keystore",
+            str(keystore),
+            "-storepass",
+            "android",
+            "-keypass",
+            "android",
+            "-alias",
+            "hkgturzx",
+            "-keyalg",
+            "RSA",
+            "-keysize",
+            "2048",
+            "-validity",
+            "10000",
+            "-dname",
+            "CN=HKGTurzxMonitor,O=HKG,C=KR",
+        ],
+        check=True,
+    )
+
+    signed_apk = BUILD_DIR / "HkgTurzxShortcut.apk"
+    subprocess.run(
+        [
+            apksigner,
+            "sign",
+            "--ks",
+            str(keystore),
+            "--ks-pass",
+            "pass:android",
+            "--key-pass",
+            "pass:android",
+            "--v1-signing-enabled",
+            "true",
+            "--v2-signing-enabled",
+            "false",
+            "--v3-signing-enabled",
+            "false",
+            "--min-sdk-version",
+            "19",
+            "--out",
+            str(signed_apk),
+            str(unsigned_apk),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [apksigner, "verify", "--min-sdk-version", "19", str(signed_apk)],
+        check=True,
+    )
+    return signed_apk
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -485,9 +804,12 @@ def build() -> None:
         "scripts/preun.sh",
         "bin/launch.sh",
         "svc/turzx-daemon.sh",
+        "hmgapi_mod/mod.json",
+        "hmgapi_mod/bin/open-ui.sh",
     ]
     for rel in source_files:
         normalize_lf(BASE_DIR / rel)
+    normalize_lf(BASE_DIR / "shortcut_app" / "AndroidManifest.xml")
 
     # 1b. Render 1:1 Chromium HUD layer PNGs + fetch Public Sans .ttf fonts
     if os.environ.get("TURZX_REUSE_OTA_ASSETS") == "1":
@@ -506,7 +828,7 @@ def build() -> None:
     # 1e. v1.5.0 Tesla-style HUD assets (regenerate with tools/make_tesla_assets.py)
     tesla_dir = BASE_DIR / "design_tesla"
     tesla_files = sorted(tesla_dir.glob("tesla_*")) + sorted(tesla_dir.glob("navdy_*"))
-    if len(tesla_files) < 11 + 156:
+    if len(tesla_files) < 15 + 156:
         raise RuntimeError(f"Tesla HUD assets missing in {tesla_dir} ({len(tesla_files)} files)")
     for f in tesla_files:
         shutil.copy2(f, ASSETS_DIR / f.name)
@@ -613,6 +935,72 @@ def build() -> None:
         shutil.copy2(html_src, stage_html)
         normalize_lf(stage_html)
 
+    # 5b. Build & stage HMG-API companion shortcut APK + 99x99 tile PNG icons
+    shortcut_apk = build_shortcut_apk(javac, d8)
+    stage_mod_dir = PKG_STAGE_DIR / "hmgapi_mod"
+    stage_mod_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(shortcut_apk, stage_mod_dir / "HkgTurzxShortcut.apk")
+    (stage_mod_dir / "icon.png").write_bytes(
+        render_turzx_tile_icon_png(
+            bg_top=(28, 42, 66),
+            bg_bot=(14, 22, 38),
+            border_col=(56, 189, 248),
+            bezel_col=(94, 234, 212),
+            screen_bg=(11, 18, 32),
+            arc_col=(56, 189, 248),
+            accent_col=(52, 211, 153),
+            needle_col=(248, 250, 252),
+            bar1_col=(52, 211, 153),
+            bar2_col=(56, 189, 248),
+            bar3_col=(251, 191, 36),
+        )
+    )
+    (stage_mod_dir / "icon_night.png").write_bytes(
+        render_turzx_tile_icon_png(
+            bg_top=(14, 24, 42),
+            bg_bot=(8, 13, 24),
+            border_col=(20, 184, 166),
+            bezel_col=(45, 212, 191),
+            screen_bg=(7, 12, 22),
+            arc_col=(56, 189, 248),
+            accent_col=(52, 211, 153),
+            needle_col=(241, 245, 249),
+            bar1_col=(52, 211, 153),
+            bar2_col=(56, 189, 248),
+            bar3_col=(245, 158, 11),
+        )
+    )
+    (stage_mod_dir / "icon_disabled.png").write_bytes(
+        render_turzx_tile_icon_png(
+            bg_top=(105, 114, 128),
+            bg_bot=(78, 86, 98),
+            border_col=(148, 163, 184),
+            bezel_col=(180, 188, 198),
+            screen_bg=(60, 68, 80),
+            arc_col=(180, 188, 198),
+            accent_col=(200, 208, 216),
+            needle_col=(226, 232, 240),
+            bar1_col=(180, 188, 198),
+            bar2_col=(190, 198, 208),
+            bar3_col=(170, 178, 188),
+        )
+    )
+    (stage_mod_dir / "icon_disabled_night.png").write_bytes(
+        render_turzx_tile_icon_png(
+            bg_top=(34, 40, 50),
+            bg_bot=(22, 26, 34),
+            border_col=(71, 85, 105),
+            bezel_col=(100, 116, 139),
+            screen_bg=(20, 25, 34),
+            arc_col=(100, 116, 139),
+            accent_col=(120, 135, 155),
+            needle_col=(148, 163, 184),
+            bar1_col=(100, 116, 139),
+            bar2_col=(110, 126, 149),
+            bar3_col=(95, 110, 132),
+        )
+    )
+
     # 6. Build inner NEMESIS package zip (packages/hkg.turzxmonitor.zip)
     inner_zip_path = USB_ROOT_DIR / "packages" / "hkg.turzxmonitor.zip"
     inner_zip_path.parent.mkdir(parents=True, exist_ok=True)
@@ -620,7 +1008,13 @@ def build() -> None:
         for file_path in sorted(PKG_STAGE_DIR.rglob("*")):
             if file_path.is_file():
                 arcname = file_path.relative_to(PKG_STAGE_DIR).as_posix()
-                zf.write(file_path, arcname)
+                zinfo = zipfile.ZipInfo(arcname, date_time=(2026, 1, 1, 0, 0, 0))
+                zinfo.compress_type = zipfile.ZIP_DEFLATED
+                if arcname.endswith(".sh"):
+                    zinfo.external_attr = (0o100755 & 0xFFFF) << 16
+                else:
+                    zinfo.external_attr = (0o100644 & 0xFFFF) << 16
+                zf.writestr(zinfo, file_path.read_bytes())
 
     # 7. Build USB root descriptor (usb_root/NEMESIS.data)
     usb_meta = (
@@ -646,6 +1040,7 @@ def build() -> None:
                 zf.write(file_path, arcname)
 
     print(f"Built DEX jar:       {jar_path} ({jar_path.stat().st_size} bytes, sha256={jar_sha[:16]}...)")
+    print(f"Built shortcut APK:  {shortcut_apk} ({shortcut_apk.stat().st_size} bytes)")
     print(f"Built inner package: {inner_zip_path} ({inner_zip_path.stat().st_size} bytes)")
     print(f"Built USB bundle:    {target_zip} ({target_zip.stat().st_size} bytes)")
 
