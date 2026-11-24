@@ -73,12 +73,15 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.14";
+    public static final String MONITOR_VERSION = "1.5.15";
     // v1.5.14: 4MB -> 12MB. Clients <= 1.5.13 still stop at 4MB, so build_package.py keeps the b64 below that.
     static final int OTA_JAR_B64_MAX_BYTES = 12 * 1024 * 1024;
     public static final int POWERTRAIN_AUTO = 0;
     public static final int POWERTRAIN_EV = 1;
     public static final int POWERTRAIN_ICE = 2;
+    public static final int THEME_AUTO = 0;
+    public static final int THEME_DARK = 1;
+    public static final int THEME_LIGHT = 2;
     private static final Charset UTF8 = Charset.forName("UTF-8");
     public static final String RAMDISK_TMP_DIR = "/dev/hkg_tmp";
     static final String CMD_FILE_PATH = "/dev/hkg_tmp/hkg_turzxmonitor_cmd";
@@ -204,6 +207,7 @@ public class TurzxMonitorMain {
         public boolean renderParallel = false;      // v1.4.8 default: single-core (render then encode); true = parallel
         public boolean hudDesignTesla = true;       // v1.5.0: Tesla-style HUD (false = classic Chromium 1:1 HUD)
         public int powertrainMode = POWERTRAIN_AUTO; // v1.5.13: 0=auto, 1=ev, 2=ice
+        public int hudThemeMode = THEME_AUTO;        // v1.5.15: 0=auto, 1=dark, 2=light
         // Telemetry (Binder/CAN) poll period of the separate poll thread
         public int telemetryPollMs = 100;
         public String commaIp = "";
@@ -493,6 +497,7 @@ public class TurzxMonitorMain {
         TurzxUsbDriver.startUsbPusherLoop(installDir);
         HotkeyWatcher.start();
         OtaUpdateManager.startAutoUpdateWorker(installDir);
+        HmgApiShortcutSync.startAsync(installDir);
 
         final File cmdFile = new File(CMD_FILE_PATH);
         final File legacyCmdFile = new File(LEGACY_CMD_FILE_PATH);
@@ -2950,15 +2955,19 @@ public class TurzxMonitorMain {
 
             private static int loadedH = -1;
             private static Layout L = null, layoutEv = null, layoutIce = null;
-            private static Object base, baseEv, baseIce, active, egoOff, egoTail, egoBrake, park, lead;
+            private static Object base, baseEv, baseIce, baseEvLight, baseIceLight, active, activeLight, activeCur, egoOff, egoTail, egoBrake, park, lead;
             private static float parkW = 960f, parkH = 470f;
             private static Object pFill, pStroke, pBmp, pAdd, pShade, rf, rs, rd, path;
             private static Method mDrawBmpXY, mDrawBmpRR, mDrawBmpRRF, mDrawRoundRect, mDrawRect, mDrawOval, mDrawPath,
                     mSave, mRestore, mClipPath, mRotate, mTranslate, mScale, mSetColor, mSetStrokeW, mSetShader,
                     mSetRf, mSetRect, mPReset, mPMove, mPLine, mPClose, mPAddRRect, mMeasure, mSetTextSize, mSetTextAlign, mDrawText;
+            private static Method mBmpGetWidth, mBmpGetHeight, mBmpGetPixels, mBmpCreatePixels;
+            private static Object argb8888Config;
             private static Constructor<?> cLinear, cRadial;
             private static Object clamp, dirCW, alignLeft;
             private static Object[] lineShaders = null;
+            private static boolean lightTheme = false;
+            private static boolean lineShadersLight = false;
             private static float phase = 0f;
             private static long lastNs = 0L;
             private static int lastSpeed = -1;
@@ -2972,7 +2981,7 @@ public class TurzxMonitorMain {
             private static boolean ensure(int hudH) throws Exception {
                 if (loadedH == hudH && baseEv != null) return true;
                 loadedH = hudH;
-                base = baseEv = baseIce = active = egoOff = egoTail = egoBrake = park = lead = null;
+                base = baseEv = baseIce = baseEvLight = baseIceLight = active = activeLight = activeCur = egoOff = egoTail = egoBrake = park = lead = null;
                 layoutEv = layoutIce = null;
                 L = null;
                 lineShaders = null;
@@ -3072,13 +3081,251 @@ public class TurzxMonitorMain {
                 path = pathCls.getConstructor().newInstance();
             }
 
+            // ---- Light theme palette & runtime bitmap transform (v1.5.15, zero extra PNG bloat) ----
+            private static int[] buildRgbLut(int[][] anchors) {
+                int[] lut = new int[256];
+                for (int val = 0; val < 256; val++) {
+                    if (val <= anchors[0][0]) {
+                        lut[val] = (anchors[0][1] << 16) | (anchors[0][2] << 8) | anchors[0][3];
+                        continue;
+                    }
+                    int rgb = (anchors[anchors.length - 1][1] << 16) | (anchors[anchors.length - 1][2] << 8) | anchors[anchors.length - 1][3];
+                    for (int i = 0; i < anchors.length - 1; i++) {
+                        int[] a0 = anchors[i], a1 = anchors[i + 1];
+                        if (val <= a1[0]) {
+                            float t = (val - a0[0]) / (float) (a1[0] - a0[0]);
+                            int rr = Math.round(a0[1] + (a1[1] - a0[1]) * t);
+                            int gg = Math.round(a0[2] + (a1[2] - a0[2]) * t);
+                            int bb = Math.round(a0[3] + (a1[3] - a0[3]) * t);
+                            rgb = (rr << 16) | (gg << 8) | bb;
+                            break;
+                        }
+                    }
+                    lut[val] = rgb;
+                }
+                return lut;
+            }
+
+            private static final int[] LUT_CARD = buildRgbLut(new int[][]{
+                    {0, 226, 230, 238},
+                    {12, 240, 243, 248},
+                    {24, 255, 255, 255},
+                    {33, 241, 244, 249},
+                    {43, 220, 225, 235},
+                    {54, 186, 193, 208},
+                    {92, 112, 120, 138},
+                    {144, 76, 83, 99},
+                    {245, 17, 19, 24},
+                    {255, 17, 19, 24}
+            });
+
+            private static final int[] LUT_BAR = buildRgbLut(new int[][]{
+                    {0, 226, 230, 238},
+                    {10, 235, 238, 244},
+                    {19, 244, 246, 250},
+                    {31, 205, 211, 223},
+                    {43, 194, 201, 214},
+                    {54, 174, 182, 198},
+                    {77, 138, 147, 166},
+                    {92, 105, 112, 130},
+                    {144, 72, 79, 95},
+                    {245, 17, 19, 24},
+                    {255, 17, 19, 24}
+            });
+
+            private static final int[] LUT_VIZ_FG = buildRgbLut(new int[][]{
+                    {37, 226, 232, 240},
+                    {54, 196, 203, 216},
+                    {92, 112, 120, 138},
+                    {144, 76, 83, 99},
+                    {245, 17, 19, 24},
+                    {255, 17, 19, 24}
+            });
+
+            private static float rrSd(float px, float py, float x0, float y0, float w, float h, float rad) {
+                float cx = x0 + w * 0.5f, cy = y0 + h * 0.5f;
+                float hx = w * 0.5f - rad, hy = h * 0.5f - rad;
+                float dx = Math.max(Math.abs(px - cx) - hx, 0f);
+                float dy = Math.max(Math.abs(py - cy) - hy, 0f);
+                return (float) Math.hypot(dx, dy) + Math.min(Math.max(Math.abs(px - cx) - hx, Math.abs(py - cy) - hy), 0f) - rad;
+            }
+
+            private static int blendRgb(int rgb0, int rgb1, float t) {
+                if (t <= 0f) return rgb0;
+                if (t >= 1f) return rgb1;
+                int r0 = (rgb0 >> 16) & 0xFF, g0 = (rgb0 >> 8) & 0xFF, b0 = rgb0 & 0xFF;
+                int r1 = (rgb1 >> 16) & 0xFF, g1 = (rgb1 >> 8) & 0xFF, b1 = rgb1 & 0xFF;
+                return (Math.round(r0 + (r1 - r0) * t) << 16)
+                        | (Math.round(g0 + (g1 - g0) * t) << 8)
+                        | Math.round(b0 + (b1 - b0) * t);
+            }
+
+            private static boolean inBox1(int x, int y, float[] r) {
+                return r != null && x >= r[0] - 1f && x <= r[0] + r[2] + 1f && y >= r[1] - 1f && y <= r[1] + r[3] + 1f;
+            }
+
+            /** Maps dark-theme static / active layer pixels cleanly to Light Mode (0xAARRGGBB). */
+            static void remapLightPixels(int[] px, int w, int h, boolean isActive, Layout lay) {
+                if (px == null || w <= 0 || h <= 0 || lay == null) return;
+                float[] vz = lay.rect("viz");
+                float vx = vz != null ? vz[0] : 16f, vy = vz != null ? vz[1] : 16f;
+                float vw = vz != null ? vz[2] : 720f, vh = vz != null ? vz[3] : 362f;
+                float vrad = (vz != null && vz.length > 4) ? vz[4] : 28f;
+                int vix0 = (int) Math.floor(vx), viy0 = (int) Math.floor(vy);
+                int vix1 = (int) Math.ceil(vx + vw), viy1 = (int) Math.ceil(vy + vh);
+                float[] art = lay.rect("art");
+                float artRad = (art != null && art.length > 4) ? art[4] : 16f;
+                int barY = Math.round(vy + vh) + 6;
+
+                float[] heatR = lay.rect("chip_heat");
+                float[][] blueChips = new float[][]{
+                        lay.rect("auto"), lay.rect("chip_ac"), lay.rect("chip_fdef"),
+                        lay.rect("chip_rdef"), lay.rect("chip_recirc")
+                };
+                float[][] blueIcons = new float[][]{
+                        lay.rect("airFace"), lay.rect("airFoot"),
+                        lay.rect("fan0"), lay.rect("fan1"), lay.rect("fan2"), lay.rect("fan3"),
+                        lay.rect("fan4"), lay.rect("fan5"), lay.rect("fan6")
+                };
+
+                final int CANVAS_RGB = 0xE2E6EE;
+                final int BLUE_BG = 0xDBE7FF, BLUE_BDR = 0x3B76F6, BLUE_FG = 0x1D54D6, BLUE_TXT = 0x14306E;
+                final int HEAT_BG = 0xFFE7D4, HEAT_BDR = 0xE8722A, HEAT_FG = 0xC44408;
+
+                for (int y = 0; y < h; y++) {
+                    boolean inBar = y >= barY;
+                    float vt = Math.max(0f, Math.min(1f, (y - vy) / Math.max(1f, vh)));
+                    int vizBg = (vt <= 0.45f)
+                            ? blendRgb(0xD8DFE9, 0xE6EBF2, vt / 0.45f)
+                            : blendRgb(0xE6EBF2, 0xF1F4F8, (vt - 0.45f) / 0.55f);
+                    int rowOff = y * w;
+                    for (int x = 0; x < w; x++) {
+                        int argb = px[rowOff + x];
+                        int alphaMask = argb & 0xFF000000;
+                        int r = (argb >> 16) & 0xFF, g = (argb >> 8) & 0xFF, b = argb & 0xFF;
+                        int lum = (r * 77 + g * 150 + b * 29) >> 8;
+                        int sat = Math.max(r, Math.max(g, b)) - Math.min(r, Math.min(g, b));
+
+                        if (isActive && inBar) {
+                            if (inBox1(x, y, heatR)) {
+                                int rgb;
+                                if (r <= 8 && g <= 8 && b <= 8) rgb = CANVAS_RGB;
+                                else if (r < 40 && b < 18) rgb = blendRgb(CANVAS_RGB, HEAT_BG, r / 38f);
+                                else if (lum <= 98 && r >= b) rgb = blendRgb(HEAT_BG, HEAT_BDR, (r - 38) / 86f);
+                                else rgb = blendRgb(HEAT_BG, HEAT_FG, (lum - 85) / 92f);
+                                px[rowOff + x] = alphaMask | rgb;
+                                continue;
+                            }
+                            boolean hitBlueChip = false;
+                            for (int bi = 0; bi < blueChips.length; bi++) {
+                                if (inBox1(x, y, blueChips[bi])) {
+                                    hitBlueChip = true;
+                                    break;
+                                }
+                            }
+                            if (hitBlueChip) {
+                                int rgb;
+                                if (r <= 3 && g <= 5 && b <= 10) rgb = CANVAS_RGB;
+                                else if (r <= 12 && g <= 21 && b <= 44) rgb = blendRgb(CANVAS_RGB, BLUE_BG, b / 41f);
+                                else if (sat <= 20) rgb = blendRgb(BLUE_BG, BLUE_TXT, (lum - 24) / 221f);
+                                else if (r <= 34 && g <= 56 && b <= 120) rgb = blendRgb(BLUE_BG, BLUE_BDR, (b - 41) / 73f);
+                                else rgb = blendRgb(BLUE_BG, BLUE_FG, (lum - 20) / 133f);
+                                px[rowOff + x] = alphaMask | rgb;
+                                continue;
+                            }
+                            boolean hitBlueIcon = false;
+                            for (int ii = 0; ii < blueIcons.length; ii++) {
+                                if (inBox1(x, y, blueIcons[ii])) {
+                                    hitBlueIcon = true;
+                                    break;
+                                }
+                            }
+                            if (hitBlueIcon) {
+                                px[rowOff + x] = alphaMask | blendRgb(CANVAS_RGB, BLUE_FG, b / 255f);
+                                continue;
+                            }
+                        }
+
+                        if (!isActive && inBox1(x, y, art)) {
+                            float sd = rrSd(x + 0.5f, y + 0.5f, art[0], art[1], art[2], art[3], artRad);
+                            int rgb;
+                            if (sd >= 0.8f) rgb = 0xFFFFFF;
+                            else if (sd <= -0.8f) rgb = argb & 0x00FFFFFF;
+                            else rgb = blendRgb(0xFFFFFF, argb & 0x00FFFFFF, 0.5f - sd / 1.6f);
+                            px[rowOff + x] = alphaMask | rgb;
+                            continue;
+                        }
+
+                        if (x >= vix0 && x <= vix1 && y >= viy0 && y <= viy1) {
+                            float sd = rrSd(x + 0.5f, y + 0.5f, vx, vy, vw, vh, vrad);
+                            int rgb;
+                            if (sd >= 0.9f) rgb = CANVAS_RGB;
+                            else if (sd >= -0.9f) rgb = blendRgb(CANVAS_RGB, vizBg, (0.9f - sd) / 1.8f);
+                            else if (lum <= 40) rgb = vizBg;
+                            else if (lum < 56) rgb = blendRgb(vizBg, LUT_VIZ_FG[lum], (lum - 38) / 18f);
+                            else rgb = LUT_VIZ_FG[lum];
+                            px[rowOff + x] = alphaMask | rgb;
+                            continue;
+                        }
+
+                        px[rowOff + x] = alphaMask | (inBar ? LUT_BAR[lum] : LUT_CARD[lum]);
+                    }
+                }
+            }
+
+            private static Object deriveLightBitmap(Object srcBmp, boolean isActive, Layout lay) {
+                if (srcBmp == null) return null;
+                try {
+                    if (mBmpGetPixels == null) {
+                        Class<?> bmpCls = gfxClasses[0];
+                        Class<?> cfgCls = Class.forName("android.graphics.Bitmap$Config");
+                        mBmpGetWidth = bmpCls.getMethod("getWidth");
+                        mBmpGetHeight = bmpCls.getMethod("getHeight");
+                        mBmpGetPixels = bmpCls.getMethod("getPixels", int[].class, int.class, int.class,
+                                int.class, int.class, int.class, int.class);
+                        mBmpCreatePixels = bmpCls.getMethod("createBitmap", int[].class, int.class, int.class, cfgCls);
+                        argb8888Config = cfgCls.getField("ARGB_8888").get(null);
+                    }
+                    int w = ((Integer) mBmpGetWidth.invoke(srcBmp)).intValue();
+                    int h = ((Integer) mBmpGetHeight.invoke(srcBmp)).intValue();
+                    int[] px = new int[w * h];
+                    mBmpGetPixels.invoke(srcBmp, px, Integer.valueOf(0), Integer.valueOf(w),
+                            Integer.valueOf(0), Integer.valueOf(0), Integer.valueOf(w), Integer.valueOf(h));
+                    remapLightPixels(px, w, h, isActive, lay);
+                    return mBmpCreatePixels.invoke(null, px, Integer.valueOf(w), Integer.valueOf(h), argb8888Config);
+                } catch (Throwable t) {
+                    DebugManager.logError("RENDER", "deriveLightBitmap", t);
+                    return null;
+                }
+            }
+
+            /** Maps Dark-theme palette colors to crisp high-contrast Light-theme equivalents. */
+            static int themeColor(int darkArgb, boolean light) {
+                if (!light || darkArgb == 0) return darkArgb;
+                switch (darkArgb) {
+                    case 0xFFF5F5F7: return 0xFF111318;
+                    case 0xFF8E9099: return 0xFF4C5363;
+                    case 0xFF5A5D64: return 0xFF70788A;
+                    case 0xFF6E95FF: return 0xFF1D54D6;
+                    case 0xFF7EA6FF: return 0xFF2563EB;
+                    case 0xFF3DD68C: return 0xFF16A34A;
+                    case 0xFFFF9A5C: return 0xFFD9530A;
+                    case 0xFFF5A623: return 0xFFD97706;
+                    case 0xFFE31937:
+                    case 0xFFFF4D63: return 0xFFDC2626;
+                    case 0xFFC9CBD1: return 0xFF334155;
+                    default: return darkArgb;
+                }
+            }
+
             // ---- small drawing helpers ----
             private static void copyActive(Object c, float[] r) throws Exception {
-                if (active == null || r == null) return;
+                Object src = activeCur != null ? activeCur : active;
+                if (src == null || r == null) return;
                 int x0 = Math.round(r[0]) - 1, y0 = Math.round(r[1]) - 1, x1 = Math.round(r[0] + r[2]) + 1, y1 = Math.round(r[1] + r[3]) + 1;
                 mSetRect.invoke(rs, x0, y0, x1, y1);
                 mSetRect.invoke(rd, x0, y0, x1, y1);
-                mDrawBmpRR.invoke(c, active, rs, rd, null);
+                mDrawBmpRR.invoke(c, src, rs, rd, null);
             }
 
             private static void roundRect(Object c, float x0, float y0, float x1, float y1, float rad, int color) throws Exception {
@@ -3088,15 +3335,20 @@ public class TurzxMonitorMain {
                 mDrawRoundRect.invoke(c, rf, rad, rad, pFill);
             }
 
-            private static void glow(Object c, float x, float y, float r, int rgb, float a) throws Exception {
+            private static void softGlow(Object c, float x, float y, float r, int rgb, float a, boolean additive) throws Exception {
                 if (r <= 0.5f) return;
                 int a0 = Math.max(0, Math.min(255, Math.round(a * 255)));
                 int a1 = Math.max(0, Math.min(255, Math.round(a * 0.45f * 255)));
                 Object sh = cRadial.newInstance(x, y, r, new int[]{(a0 << 24) | rgb, (a1 << 24) | rgb, rgb & 0x00FFFFFF},
                         new float[]{0f, 0.35f, 1f}, clamp);
-                mSetShader.invoke(pAdd, sh);
-                mDrawRect.invoke(c, x - r, y - r, x + r, y + r, pAdd);
-                mSetShader.invoke(pAdd, new Object[]{null});
+                Object paint = additive ? pAdd : pShade;
+                mSetShader.invoke(paint, sh);
+                mDrawRect.invoke(c, x - r, y - r, x + r, y + r, paint);
+                mSetShader.invoke(paint, new Object[]{null});
+            }
+
+            private static void glow(Object c, float x, float y, float r, int rgb, float a) throws Exception {
+                softGlow(c, x, y, r, rgb, a, true);
             }
 
             private static void shadow(Object c, float cx, float cy, float rx, float squash, float alpha) throws Exception {
@@ -3164,8 +3416,9 @@ public class TurzxMonitorMain {
                 float wu = hasUnit ? measure(unitStr, f.unitSize, f.unitBold) : 0f;
                 float total = wv + (hasUnit ? f.gap + wu : 0f);
                 float x = (f.align == 'R') ? f.x - total : (f.align == 'C' ? f.x - total / 2f : f.x);
-                text(c, v, x, f.y, f.size, f.bold, color != 0 ? color : f.color);
-                if (hasUnit) text(c, unitStr, x + wv + f.gap, f.y, f.unitSize, f.unitBold, f.unitColor);
+                int fc = color != 0 ? themeColor(color, lightTheme) : themeColor(f.color, lightTheme);
+                text(c, v, x, f.y, f.size, f.bold, fc);
+                if (hasUnit) text(c, unitStr, x + wv + f.gap, f.y, f.unitSize, f.unitBold, themeColor(f.unitColor, lightTheme));
             }
 
             private static void barFill(Object c, float[] r, float x0, float x1, int color) throws Exception {
@@ -3176,9 +3429,24 @@ public class TurzxMonitorMain {
             // ---- frame ----
             static void draw(Object c, TelemetrySnapshot s) throws Exception {
                 if (!ensure(activeHudHeight)) throw new IllegalStateException("Tesla HUD assets missing");
+                boolean light = LampProbe.isLightTheme(LiveTuning.hudThemeMode);
+                lightTheme = light;
                 boolean iceMode = s.isIceMode(LiveTuning.powertrainMode);
                 L = (iceMode && layoutIce != null && !layoutIce.fields.isEmpty()) ? layoutIce : layoutEv;
-                base = (iceMode && baseIce != null) ? baseIce : baseEv;
+                if (light) {
+                    if (iceMode) {
+                        if (baseIceLight == null && baseIce != null) baseIceLight = deriveLightBitmap(baseIce, false, L);
+                    } else {
+                        if (baseEvLight == null && baseEv != null) baseEvLight = deriveLightBitmap(baseEv, false, layoutEv);
+                    }
+                    if (activeLight == null && active != null) activeLight = deriveLightBitmap(active, true, layoutEv);
+                    base = (iceMode && baseIceLight != null) ? baseIceLight
+                            : (baseEvLight != null ? baseEvLight : ((iceMode && baseIce != null) ? baseIce : baseEv));
+                    activeCur = activeLight != null ? activeLight : active;
+                } else {
+                    base = (iceMode && baseIce != null) ? baseIce : baseEv;
+                    activeCur = active;
+                }
                 long now = System.nanoTime();
                 float dt = (lastNs == 0L) ? 0f : Math.min(0.2f, (now - lastNs) / 1e9f);
                 lastNs = now;
@@ -3256,6 +3524,7 @@ public class TurzxMonitorMain {
             private static Object topHead = null, topTail = null;
             private static Method navDecode = null;
             private static Object pTintEgo, pTintLead, pTintOther, pLamp, pLampHead, pIcon;
+            private static Object pTintEgoLight, pTintLeadLight, pTintOtherLight, pLampLight, pLampHeadLight;
             private static Method mPCubic, mPArcTo, mPAddArc;
             private static Method mSetAlpha;
             // chase camera of the current frame
@@ -3372,6 +3641,15 @@ public class TurzxMonitorMain {
                         Object lampHead = pc.newInstance(Integer.valueOf(3));
                         setCF.invoke(lampHead, pdcf.newInstance(Integer.valueOf(0xFFE1EEFF), pdCls.getField("SRC_IN").get(null)));
                         paintCls.getMethod("setXfermode", xferCls).invoke(lampHead, pdx.newInstance(pdCls.getField("ADD").get(null)));
+                        // Light-mode car paints: deeper metallic body contrast + crisp non-additive lamps on bright road
+                        Object egoL = pc.newInstance(Integer.valueOf(3)), leadL = pc.newInstance(Integer.valueOf(3)), otherL = pc.newInstance(Integer.valueOf(3));
+                        setCF.invoke(egoL, cmcf.newInstance((Object) tintMatrix(210, 218, 232, 0.88f)));
+                        setCF.invoke(leadL, cmcf.newInstance((Object) tintMatrix(168, 178, 194, 0.82f)));
+                        setCF.invoke(otherL, cmcf.newInstance((Object) tintMatrix(132, 142, 158, 0.72f)));
+                        Object lampL = pc.newInstance(Integer.valueOf(3));
+                        setCF.invoke(lampL, pdcf.newInstance(Integer.valueOf(0xFFE11D48), pdCls.getField("SRC_IN").get(null)));
+                        Object lampHeadL = pc.newInstance(Integer.valueOf(3));
+                        setCF.invoke(lampHeadL, pdcf.newInstance(Integer.valueOf(0xFF2563EB), pdCls.getField("SRC_IN").get(null)));
                         // round-capped stroke paint for telltale icons and door panels
                         Class<?> styleCls = gfxClasses[4];
                         Class<?> capCls = Class.forName("android.graphics.Paint$Cap");
@@ -3384,6 +3662,11 @@ public class TurzxMonitorMain {
                         mPCubic = pathCls.getMethod("cubicTo", float.class, float.class, float.class, float.class, float.class, float.class);
                         mPArcTo = pathCls.getMethod("arcTo", rectFCls, float.class, float.class);
                         mPAddArc = pathCls.getMethod("addArc", rectFCls, float.class, float.class);
+                        pLampHeadLight = lampHeadL;
+                        pLampLight = lampL;
+                        pTintOtherLight = otherL;
+                        pTintLeadLight = leadL;
+                        pTintEgoLight = egoL;
                         pLampHead = lampHead;
                         pIcon = icon;
                         pTintOther = other;
@@ -3411,24 +3694,25 @@ public class TurzxMonitorMain {
                                          float alpha) throws Exception {
                 if (!navBitmaps(sp)) return 0f;
                 float x = gx - sp.ax * scale, y = gy - sp.ay * scale, w = sp.w * scale, h = sp.h * scale;
-                shadow(c, x + w / 2f, y + h - h * 0.04f, w * 0.56f, 0.18f, 0.55f * alpha);
+                shadow(c, x + w / 2f, y + h - h * 0.04f, w * 0.56f, 0.18f, (lightTheme ? 0.36f : 0.55f) * alpha);
                 int a = Math.max(0, Math.min(255, Math.round(alpha * 255f)));
                 mSetAlpha.invoke(paint, a);
                 mSetRf.invoke(rf, x, y, x + w, y + h);
                 mDrawBmpRRF.invoke(c, sp.bmp, null, rf, paint);
                 if (lamp > 0 && sp.lamp != null) {
+                    Object lp = (lightTheme && pLampLight != null) ? pLampLight : pLamp;
                     if (lamp >= 2) {
                         float g = 0.06f;
-                        mSetAlpha.invoke(pLamp, Math.round(a * 0.55f));
+                        mSetAlpha.invoke(lp, Math.round(a * 0.55f));
                         mSetRf.invoke(rf, x - w * g, y - h * g, x + w * (1f + g), y + h * (1f + g));
-                        mDrawBmpRRF.invoke(c, sp.lamp, null, rf, pLamp);
-                        mSetAlpha.invoke(pLamp, a);
+                        mDrawBmpRRF.invoke(c, sp.lamp, null, rf, lp);
+                        mSetAlpha.invoke(lp, a);
                         mSetRf.invoke(rf, x, y, x + w, y + h);
-                        mDrawBmpRRF.invoke(c, sp.lamp, null, rf, pLamp);
-                        mDrawBmpRRF.invoke(c, sp.lamp, null, rf, pLamp);
+                        mDrawBmpRRF.invoke(c, sp.lamp, null, rf, lp);
+                        mDrawBmpRRF.invoke(c, sp.lamp, null, rf, lp);
                     } else {
-                        mSetAlpha.invoke(pLamp, Math.round(a * 0.6f));
-                        mDrawBmpRRF.invoke(c, sp.lamp, null, rf, pLamp);
+                        mSetAlpha.invoke(lp, Math.round(a * (lightTheme ? 0.72f : 0.6f)));
+                        mDrawBmpRRF.invoke(c, sp.lamp, null, rf, lp);
                     }
                 }
                 return sp.ay * scale;
@@ -3472,9 +3756,12 @@ public class TurzxMonitorMain {
                 final float near = kx * camH / (bottom - horizon);
                 float[] xs = new float[45];
                 for (int i = 0; i <= 44; i++) xs[i] = near + 120f * (i / 44f) * (i / 44f);
-                if (lineShaders == null) {
+                if (lineShaders == null || lineShadersLight != lightTheme) {
+                    lineShadersLight = lightTheme;
                     // distance fade = vertical gradient (rows only depend on the panel geometry)
-                    int[][] rgbA = {{160, 164, 172, 128}, {230, 232, 236, 140}, {245, 245, 247, 230}};
+                    int[][] rgbA = lightTheme
+                            ? new int[][]{{148, 156, 170, 130}, {100, 110, 128, 150}, {68, 78, 96, 215}}
+                            : new int[][]{{160, 164, 172, 128}, {230, 232, 236, 140}, {245, 245, 247, 230}};
                     lineShaders = new Object[3];
                     for (int k = 0; k < 3; k++) {
                         int col = (rgbA[k][0] << 16) | (rgbA[k][1] << 8) | rgbA[k][2];
@@ -3482,8 +3769,11 @@ public class TurzxMonitorMain {
                                 new int[]{(rgbA[k][3] << 24) | col, (Math.round(rgbA[k][3] * 0.08f) << 24) | col},
                                 new float[]{0f, 1f}, clamp);
                     }
+                    int[] roadCols = lightTheme
+                            ? new int[]{0x00334155, 0x0C334155, 0x16334155}
+                            : new int[]{0x00FFFFFF, 0x05FFFFFF, 0x09FFFFFF};
                     roadShader = cLinear.newInstance(0f, camV(xs[44]), 0f, bottom,
-                            new int[]{0x00FFFFFF, 0x05FFFFFF, 0x09FFFFFF}, new float[]{0f, 0.35f, 1f}, clamp);
+                            roadCols, new float[]{0f, 0.35f, 1f}, clamp);
                 }
                 // road surface (+-9 m) and lane lines: ego lane +-1.8 bright, neighbour lanes to +-5.4 dashed, edges +-9.0
                 mPReset.invoke(path);
@@ -3522,8 +3812,12 @@ public class TurzxMonitorMain {
                 boolean crit = hasLead && s.leadDistM <= 12f, close = hasLead && s.leadDistM <= 18f;
                 if ("D".equals(gear) || "R".equals(gear)) {
                     float end = hasLead ? leadX - 1.5f : near + 70f;
-                    int rgb = crit ? 0xE31937 : (close ? 0xF5A623 : (s.carrotCruiseKph > 0 ? 0x3E6AE1 : 0xC8CDD7));
-                    int a0 = (s.carrotCruiseKph > 0 || close) ? 140 : 46;
+                    int rgb = lightTheme
+                            ? (crit ? 0xDC2626 : (close ? 0xD97706 : (s.carrotCruiseKph > 0 ? 0x2563EB : 0x475569)))
+                            : (crit ? 0xE31937 : (close ? 0xF5A623 : (s.carrotCruiseKph > 0 ? 0x3E6AE1 : 0xC8CDD7)));
+                    int a0 = lightTheme
+                            ? ((s.carrotCruiseKph > 0 || close) ? 160 : 60)
+                            : ((s.carrotCruiseKph > 0 || close) ? 140 : 46);
                     mPReset.invoke(path);
                     boolean first = true;
                     for (int i = 0; i < xs.length && xs[i] <= end; i++) {
@@ -3586,7 +3880,10 @@ public class TurzxMonitorMain {
                         float elev = (float) Math.toDegrees(Math.atan2(camH, x));
                         NavSprite sp = navSets[navSetFor(navSets, elev)][navIndex(x, y, curve, egoD)];
                         float alpha = Math.max(0.35f, Math.min(1f, 1.3f - (x - egoD) / 90f));
-                        top = drawNav(c, sp, gx, gy, (kx / x) / sp.ppm, isLead[i] ? pTintLead : pTintOther, cl[i], alpha);
+                        Object tp = isLead[i]
+                                ? ((lightTheme && pTintLeadLight != null) ? pTintLeadLight : pTintLead)
+                                : ((lightTheme && pTintOtherLight != null) ? pTintOtherLight : pTintOther);
+                        top = drawNav(c, sp, gx, gy, (kx / x) / sp.ppm, tp, cl[i], alpha);
                     } else if (lead != null) {
                         float w = Math.abs(kx * (1.9f / x)), fullW = w * (200f / 172f), fullH = fullW * 0.8f;
                         drawImage(c, lead, gx - fullW / 2f, gy - fullH * (158f / 160f), fullW, fullH);
@@ -3604,19 +3901,21 @@ public class TurzxMonitorMain {
                     String t = Math.round(s.leadDistM) + " m";
                     float size = vw / 30f;
                     float tw = measure(t, size, true);
-                    text(c, t, tagX - tw / 2f, tagY - vw / 120f, size, true, crit ? 0xFFFF4D63 : (close ? 0xFFF5A623 : 0xFFC9CBD1));
+                    text(c, t, tagX - tw / 2f, tagY - vw / 120f, size, true,
+                            themeColor(crit ? 0xFFFF4D63 : (close ? 0xFFF5A623 : 0xFFC9CBD1), lightTheme));
                 }
 
                 // ego car on the same camera: rear ground point at (egoD, 0) = bottom edge, true scale
                 int egoLamp = brake ? 2 : (head ? 1 : 0);
-                if (nav && drawNav(c, navEgo, camU(egoD, 0f), camV(egoD), (kx / egoD) / navEgo.ppm, pTintEgo, egoLamp, 1f) > 0f) {
+                Object egoPaint = (lightTheme && pTintEgoLight != null) ? pTintEgoLight : pTintEgo;
+                if (nav && drawNav(c, navEgo, camU(egoD, 0f), camV(egoD), (kx / egoD) / navEgo.ppm, egoPaint, egoLamp, 1f) > 0f) {
                     return;
                 }
                 Object ego = brake ? egoBrake : (head ? egoTail : egoOff);
                 if (ego != null) {
                     float w = Math.min(vw * 0.165f, vh * 0.27f), k = (w * 1.13f) / EGO_CAR_W;
                     float ex = camU0, by = bottomV, bodyH = EGO_CAR_H * k;
-                    shadow(c, ex, by - bodyH * 0.02f, EGO_CAR_W * k * 0.58f, 0.14f, 0.55f);
+                    shadow(c, ex, by - bodyH * 0.02f, EGO_CAR_W * k * 0.58f, 0.14f, lightTheme ? 0.36f : 0.55f);
                     drawImage(c, ego, ex - (EGO_CAR_W / 2f + EGO_MARGIN) * k, by - (EGO_CAR_H + EGO_MARGIN) * k, EGO_IMG_W * k, EGO_IMG_H * k);
                 }
             }
@@ -3641,11 +3940,14 @@ public class TurzxMonitorMain {
                 float[] r3Fallback = r3 != null ? r3 : new float[]{r2[0] + (r2[0] - r1[0]), r2[1], r2[2], r2[3]};
                 float[][] rs = {r0, r1, r2, r3Fallback};
                 boolean[] on = {head, high, pbrake, milOn};
-                int[] col = {TT_HEAD, TT_HIGH, TT_PBRAKE, TT_MIL};
+                int[] col = lightTheme
+                        ? new int[]{0xFF16A34A, 0xFF2563EB, 0xFFDC2626, 0xFFD97706}
+                        : new int[]{TT_HEAD, TT_HIGH, TT_PBRAKE, TT_MIL};
+                int offCol = lightTheme ? 0xFFB6BECC : TT_OFF;
                 int count = iceMode ? 4 : 3;
                 for (int i = 0; i < count; i++) {
                     float x = x0 + (rs[i][0] - r0[0]);
-                    drawTelltaleIcon(c, i, x, rs[i][1], rs[i][2], on[i] ? col[i] : TT_OFF);
+                    drawTelltaleIcon(c, i, x, rs[i][1], rs[i][2], on[i] ? col[i] : offCol);
                 }
             }
 
@@ -3743,7 +4045,7 @@ public class TurzxMonitorMain {
                 int x0 = (int) Math.floor(vz[0]), y0 = (int) Math.floor(vz[1]);
                 int w = (int) Math.ceil(vz[0] + vz[2]) - x0, h = (int) Math.ceil(vz[1] + vz[3]) - y0;
                 if (w <= 0 || h <= 0) return;
-                String key = loadedH + ":" + (iceMode ? 1 : 0) + ":" + x0 + "," + y0 + "," + w + "x" + h + ":" + bits + ":"
+                String key = loadedH + ":" + (iceMode ? 1 : 0) + ":" + (lightTheme ? 1 : 0) + ":" + x0 + "," + y0 + "," + w + "x" + h + ":" + bits + ":"
                         + (navTop != null && navTop.bmp != null) + (topHead != null) + (topTail != null);
                 try {
                     if (parkCache == null || parkCacheW != w || parkCacheH != h) {
@@ -3764,7 +4066,7 @@ public class TurzxMonitorMain {
                         drawParked(pc, vz, head, brake);
                         mRestore.invoke(pc, sc);
                         // the first pass may have decoded the lamp layers: key on what the next frame will see
-                        parkKey = loadedH + ":" + (iceMode ? 1 : 0) + ":" + x0 + "," + y0 + "," + w + "x" + h + ":" + bits + ":"
+                        parkKey = loadedH + ":" + (iceMode ? 1 : 0) + ":" + (lightTheme ? 1 : 0) + ":" + x0 + "," + y0 + "," + w + "x" + h + ":" + bits + ":"
                                 + (navTop != null && navTop.bmp != null) + (topHead != null) + (topTail != null);
                     }
                     mDrawBmpXY.invoke(c, parkCache, (float) x0, (float) y0, null);
@@ -3787,12 +4089,16 @@ public class TurzxMonitorMain {
                 final float ppm = wide ? Math.min(vw * 0.098f, vh * 0.215f) : Math.min(vw * 0.115f, vh * 0.24f);
                 final float cx = vx + vw * (wide ? 0.535f : 0.55f), cy = vy + vh * (wide ? 0.60f : 0.54f);     // car centre, front points right
                 boolean[] d = BodyProbe.doors();
-                glow(c, cx, cy, vw * 0.5f, 0xFFFFFF, 0.07f);
+                if (!lightTheme) glow(c, cx, cy, vw * 0.5f, 0xFFFFFF, 0.07f);
                 if (head) {
                     // low-beam pools on the floor ahead
+                    int[] beamCols = lightTheme
+                            ? new int[]{0x423B82F6, 0x223B82F6, 0x0A3B82F6, 0x003B82F6}
+                            : new int[]{0x8CD7E8FF, 0x3DD7E8FF, 0x12D7E8FF, 0x00D7E8FF};
+                    Object beamPaint = lightTheme ? pShade : pAdd;
                     for (int side = -1; side <= 1; side += 2) {
                         float x0 = cx + 2.2f * ppm, y0 = cy + side * 0.62f * ppm, reach = 4.0f * ppm;
-                        Object sh = cRadial.newInstance(x0, y0, reach, new int[]{0x8CD7E8FF, 0x3DD7E8FF, 0x12D7E8FF, 0x00D7E8FF},
+                        Object sh = cRadial.newInstance(x0, y0, reach, beamCols,
                                 new float[]{0f, 0.3f, 0.7f, 1f}, clamp);
                         mPReset.invoke(path);
                         mPMove.invoke(path, x0, y0);
@@ -3800,22 +4106,25 @@ public class TurzxMonitorMain {
                         float a0 = (float) Math.toDegrees(-0.42 + side * 0.05);
                         mPArcTo.invoke(path, rf, a0, (float) Math.toDegrees(0.84));
                         mPClose.invoke(path);
-                        mSetShader.invoke(pAdd, sh);
-                        mDrawPath.invoke(c, path, pAdd);
-                        mSetShader.invoke(pAdd, new Object[]{null});
+                        mSetShader.invoke(beamPaint, sh);
+                        mDrawPath.invoke(c, path, beamPaint);
+                        mSetShader.invoke(beamPaint, new Object[]{null});
                     }
                 }
                 if (head || brake) {
                     for (int side = -1; side <= 1; side += 2) {
                         float x0 = cx - 2.3f * ppm, y0 = cy + side * 0.66f * ppm;
                         if (brake) {
-                            glow(c, x0, y0, 1.25f * ppm, 0xFF192D, 0.55f);
-                            glow(c, x0, y0, 0.45f * ppm, 0xFF3C50, 0.8f);
+                            softGlow(c, x0, y0, 1.25f * ppm, lightTheme ? 0xDC2626 : 0xFF192D, lightTheme ? 0.36f : 0.55f, !lightTheme);
+                            softGlow(c, x0, y0, 0.45f * ppm, lightTheme ? 0xE11D48 : 0xFF3C50, lightTheme ? 0.52f : 0.8f, !lightTheme);
                         } else {
-                            glow(c, x0, y0, 0.8f * ppm, 0xFF1E32, 0.28f);
+                            softGlow(c, x0, y0, 0.8f * ppm, lightTheme ? 0xDC2626 : 0xFF1E32, lightTheme ? 0.22f : 0.28f, !lightTheme);
                         }
                     }
                 }
+                int panelFillCol = lightTheme ? 0xFF9AA3B2 : 0xFFD9DDE3;
+                int glassCutCol = lightTheme ? 0xD93B4252 : 0xD9282C34;
+                int mirrorCol = lightTheme ? 0xFF9AA3B2 : 0xFFC9CDD4;
                 // open door panels (front hinge, swung out 58 deg)
                 double a = Math.toRadians(58);
                 for (int i = 0; i < 4; i++) {
@@ -3824,32 +4133,35 @@ public class TurzxMonitorMain {
                     float hx = cx + hinge * ppm, hy = cy + side * 0.93f * ppm;
                     float ex = hx - (float) Math.cos(a) * len * ppm, ey = hy + side * (float) Math.sin(a) * len * ppm;
                     strokeLine(c, hx, hy, ex, ey, 0.2f * ppm, 0x8C000000 | OPEN_RGB);
-                    strokeLine(c, hx, hy, ex, ey, 0.1f * ppm, 0xFFD9DDE3);
+                    strokeLine(c, hx, hy, ex, ey, 0.1f * ppm, panelFillCol);
                     strokeLine(c, hx + (ex - hx) * 0.12f, hy + (ey - hy) * 0.12f, hx + (ex - hx) * 0.8f, hy + (ey - hy) * 0.8f,
-                            0.035f * ppm, 0xD9282C34);
+                            0.035f * ppm, glassCutCol);
                 }
                 // body: rotated 90 deg so the front points right
-                shadow(c, cx, cy + 0.05f * ppm, 2.55f * ppm, 0.42f, 0.5f);
+                shadow(c, cx, cy + 0.05f * ppm, 2.55f * ppm, 0.42f, lightTheme ? 0.35f : 0.5f);
                 float k = ppm / navTop.ppm;
                 int sc = ((Integer) mSave.invoke(c)).intValue();
                 mTranslate.invoke(c, cx, cy);
                 mRotate.invoke(c, 90f, 0f, 0f);
                 mSetRf.invoke(rf, -navTop.ax * k, -navTop.ay * k, (navTop.w - navTop.ax) * k, (navTop.h - navTop.ay) * k);
-                mSetAlpha.invoke(pTintEgo, 255);
-                mDrawBmpRRF.invoke(c, navTop.bmp, null, rf, pTintEgo);
+                Object topBodyPaint = (lightTheme && pTintEgoLight != null) ? pTintEgoLight : pTintEgo;
+                mSetAlpha.invoke(topBodyPaint, 255);
+                mDrawBmpRRF.invoke(c, navTop.bmp, null, rf, topBodyPaint);
                 if (head && topHead != null) {
-                    mSetAlpha.invoke(pLampHead, 255);
-                    mDrawBmpRRF.invoke(c, topHead, null, rf, pLampHead);
+                    Object thp = (lightTheme && pLampHeadLight != null) ? pLampHeadLight : pLampHead;
+                    mSetAlpha.invoke(thp, 255);
+                    mDrawBmpRRF.invoke(c, topHead, null, rf, thp);
                 }
                 if ((head || brake) && topTail != null) {
-                    mSetAlpha.invoke(pLamp, brake ? 255 : 166);
-                    mDrawBmpRRF.invoke(c, topTail, null, rf, pLamp);
+                    Object ttp = (lightTheme && pLampLight != null) ? pLampLight : pLamp;
+                    mSetAlpha.invoke(ttp, brake ? 255 : (lightTheme ? 190 : 166));
+                    mDrawBmpRRF.invoke(c, topTail, null, rf, ttp);
                 }
                 mRestore.invoke(c, sc);
                 // side mirrors
                 for (int side = -1; side <= 1; side += 2) {
                     float my = cy + side * 0.93f * ppm + (side < 0 ? -0.2f * ppm : 0f);
-                    roundRect(c, cx + 1.02f * ppm, my, cx + 1.18f * ppm, my + 0.2f * ppm, 0.05f * ppm, 0xFFC9CDD4);
+                    roundRect(c, cx + 1.02f * ppm, my, cx + 1.18f * ppm, my + 0.2f * ppm, 0.05f * ppm, mirrorCol);
                 }
                 // door openings on the body
                 for (int i = 0; i < 4; i++) {
@@ -3860,8 +4172,8 @@ public class TurzxMonitorMain {
                 }
                 if (d[4]) {   // trunk: liftgate up, reaching past the rear bumper
                     roundRect(c, cx - 2.95f * ppm, cy - 0.78f * ppm, cx - 2.15f * ppm, cy + 0.78f * ppm, 0.12f * ppm, 0x59000000 | OPEN_RGB);
-                    roundRect(c, cx - 2.88f * ppm, cy - 0.72f * ppm, cx - 2.26f * ppm, cy + 0.72f * ppm, 0.1f * ppm, 0xFFD9DDE3);
-                    roundRect(c, cx - 2.8f * ppm, cy - 0.55f * ppm, cx - 2.5f * ppm, cy + 0.55f * ppm, 0.06f * ppm, 0xD9282C34);
+                    roundRect(c, cx - 2.88f * ppm, cy - 0.72f * ppm, cx - 2.26f * ppm, cy + 0.72f * ppm, 0.1f * ppm, panelFillCol);
+                    roundRect(c, cx - 2.8f * ppm, cy - 0.55f * ppm, cx - 2.5f * ppm, cy + 0.55f * ppm, 0.06f * ppm, glassCutCol);
                 }
                 if (d[5]) {   // hood
                     roundRect(c, cx + 1.66f * ppm, cy - 0.82f * ppm, cx + 2.28f * ppm, cy + 0.82f * ppm, 0.12f * ppm, 0x2E000000 | OPEN_RGB);
@@ -3875,39 +4187,39 @@ public class TurzxMonitorMain {
             /** Pre-v1.5.5 parked view (car photo); used when the top-view sprite is missing. */
             private static void drawParkedPhoto(Object c, float[] vz, boolean head, boolean brake) throws Exception {
                 float vx = vz[0], vy = vz[1], vw = vz[2], vh = vz[3];
-                glow(c, vx + vw * 0.58f, vy + vh * 0.9f, vw * 0.55f, 0xFFFFFF, 0.10f);
+                if (!lightTheme) glow(c, vx + vw * 0.58f, vy + vh * 0.9f, vw * 0.55f, 0xFFFFFF, 0.10f);
                 if (park == null) return;
                 float w = Math.min(vw * 0.78f, vh * 1.36f), h = w * parkH / parkW;
                 float cx = vx + vw * 0.58f, bottom = vy + vh * 0.96f, left = cx - w / 2f, top = bottom - h, k = w / parkW;
-                shadow(c, cx, bottom - h * 0.05f, w * 0.52f, 0.12f, 0.65f);
+                shadow(c, cx, bottom - h * 0.05f, w * 0.52f, 0.12f, lightTheme ? 0.38f : 0.65f);
                 if (head) {
                     int sc = ((Integer) mSave.invoke(c)).intValue();
                     mTranslate.invoke(c, left + 120f * k, bottom - 6f * k);
                     mScale.invoke(c, 1f, 0.22f);
-                    glow(c, 0f, 0f, w * 0.5f, 0xDCEBFF, 0.22f);
+                    softGlow(c, 0f, 0f, w * 0.5f, lightTheme ? 0x3B82F6 : 0xDCEBFF, lightTheme ? 0.18f : 0.22f, !lightTheme);
                     mRestore.invoke(c, sc);
                 }
                 drawImage(c, park, left, top, w, h);
                 if (head) {
                     for (int i = 0; i < PARK_HEAD.length; i++) {
                         float x = left + PARK_HEAD[i][0] * k, y = top + PARK_HEAD[i][1] * k;
-                        glow(c, x, y, 70f * k, 0xCDE1FF, 0.35f);
-                        glow(c, x, y, 20f * k, 0xF5FAFF, 0.95f);
+                        softGlow(c, x, y, 70f * k, lightTheme ? 0x3B82F6 : 0xCDE1FF, lightTheme ? 0.28f : 0.35f, !lightTheme);
+                        softGlow(c, x, y, 20f * k, lightTheme ? 0x93C5FD : 0xF5FAFF, lightTheme ? 0.65f : 0.95f, !lightTheme);
                     }
-                    glow(c, left + PARK_HEAD_FAR[0] * k, top + PARK_HEAD_FAR[1] * k, 42f * k, 0xCDE1FF, 0.35f);
-                    glow(c, left + PARK_HEAD_FAR[0] * k, top + PARK_HEAD_FAR[1] * k, 13f * k, 0xF5FAFF, 0.9f);
+                    softGlow(c, left + PARK_HEAD_FAR[0] * k, top + PARK_HEAD_FAR[1] * k, 42f * k, lightTheme ? 0x3B82F6 : 0xCDE1FF, lightTheme ? 0.28f : 0.35f, !lightTheme);
+                    softGlow(c, left + PARK_HEAD_FAR[0] * k, top + PARK_HEAD_FAR[1] * k, 13f * k, lightTheme ? 0x93C5FD : 0xF5FAFF, lightTheme ? 0.60f : 0.9f, !lightTheme);
                     for (int i = 0; i < PARK_DRL.length; i++) {
-                        glow(c, left + PARK_DRL[i][0] * k, top + PARK_DRL[i][1] * k, 40f * k, 0xBEE1FF, 0.4f);
+                        softGlow(c, left + PARK_DRL[i][0] * k, top + PARK_DRL[i][1] * k, 40f * k, lightTheme ? 0x3B82F6 : 0xBEE1FF, lightTheme ? 0.30f : 0.4f, !lightTheme);
                     }
                 }
                 float rx = left + PARK_REAR[0] * k, ry = top + PARK_REAR[1] * k;
                 if (brake) {
-                    glow(c, rx, ry, 110f * k, 0xFF192D, 0.55f);
-                    glow(c, rx, ry, 45f * k, 0xFF3246, 0.85f);
-                    glow(c, rx, ry, 16f * k, 0xFFAAB4, 1.0f);
+                    softGlow(c, rx, ry, 110f * k, lightTheme ? 0xDC2626 : 0xFF192D, lightTheme ? 0.36f : 0.55f, !lightTheme);
+                    softGlow(c, rx, ry, 45f * k, lightTheme ? 0xE11D48 : 0xFF3246, lightTheme ? 0.58f : 0.85f, !lightTheme);
+                    softGlow(c, rx, ry, 16f * k, lightTheme ? 0xF43F5E : 0xFFAAB4, lightTheme ? 0.72f : 1.0f, !lightTheme);
                 } else if (head) {
-                    glow(c, rx, ry, 42f * k, 0xFF1E32, 0.22f);
-                    glow(c, rx, ry, 16f * k, 0xFF4655, 0.45f);
+                    softGlow(c, rx, ry, 42f * k, lightTheme ? 0xDC2626 : 0xFF1E32, lightTheme ? 0.20f : 0.22f, !lightTheme);
+                    softGlow(c, rx, ry, 16f * k, lightTheme ? 0xE11D48 : 0xFF4655, lightTheme ? 0.35f : 0.45f, !lightTheme);
                 }
             }
 
@@ -3938,7 +4250,7 @@ public class TurzxMonitorMain {
                 float[] wr = L.rect("wheel");
                 if (wr != null) {
                     float cx = wr[0] + wr[2] / 2f, cy = wr[1] + wr[3] / 2f, u = wr[2] / 24f;
-                    int col = s.carrotCruiseKph > 0 ? 0xFF6E95FF : 0xFF5A5D64;
+                    int col = themeColor(s.carrotCruiseKph > 0 ? 0xFF6E95FF : 0xFF5A5D64, lightTheme);
                     int sc = ((Integer) mSave.invoke(c)).intValue();
                     mRotate.invoke(c, Math.max(-540f, Math.min(540f, -s.steeringAngleDeg)), cx, cy);
                     mSetColor.invoke(pStroke, col);
@@ -3974,7 +4286,7 @@ public class TurzxMonitorMain {
                             : (s.carrotConnected ? (s.carrotActive ? "ON" : "대기") : "--");
                     if (lf != null) {
                         float pw = measure("차선 ", lf.size, false);
-                        text(c, "차선 ", lf.x - pw, lf.y, lf.size, false, 0xFF5A5D64);
+                        text(c, "차선 ", lf.x - pw, lf.y, lf.size, false, themeColor(0xFF5A5D64, lightTheme));
                         field(c, "lane", lane, 0);
                     }
                 }
@@ -4002,9 +4314,9 @@ public class TurzxMonitorMain {
                 float wRoad = measure(road, roadSize, false) + (next.isEmpty() ? 0f : roadSize * 0.4f + measure(next, roadSize, true));
                 float wText = Math.max(wNum, wRoad);
                 float h = tr[3], x1 = vz[0] + vz[2] - 20f, y0 = vz[1] + 20f, x0 = x1 - (pad * 2f + icon + pad * 0.8f + wText);
-                roundRect(c, x0, y0, x1, y0 + h, tr.length > 4 ? tr[4] : 24f, 0xDB0E0F12);
+                roundRect(c, x0, y0, x1, y0 + h, tr.length > 4 ? tr[4] : 24f, lightTheme ? 0xEBFFFFFF : 0xDB0E0F12);
                 mSetStrokeW.invoke(pStroke, 2f);
-                mSetColor.invoke(pStroke, 0xFF2A2C31);
+                mSetColor.invoke(pStroke, lightTheme ? 0xFFCBD2DF : 0xFF2A2C31);
                 mSetRf.invoke(rf, x0, y0, x1, y0 + h);
                 float rr = tr.length > 4 ? tr[4] : 24f;
                 mDrawRoundRect.invoke(c, rf, rr, rr, pStroke);
@@ -4017,14 +4329,15 @@ public class TurzxMonitorMain {
                 mPLine.invoke(path, ix - u * 0.7f, iy + u * 0.8f);
                 mPClose.invoke(path);
                 mSetShader.invoke(pFill, new Object[]{null});
-                mSetColor.invoke(pFill, 0xFFF5F5F7);
+                int fgPrimary = themeColor(0xFFF5F5F7, lightTheme), fgSec = themeColor(0xFF8E9099, lightTheme);
+                mSetColor.invoke(pFill, fgPrimary);
                 mDrawPath.invoke(c, path, pFill);
                 float tx = ix + icon / 2f + pad * 0.8f;
                 float base1 = y0 + h * 0.52f, base2 = y0 + h * 0.84f;
-                float w1 = text(c, num, tx, base1, distSize, true, 0xFFF5F5F7);
-                text(c, unit, tx + w1 + distSize * 0.08f, base1, distSize * 0.55f, false, 0xFF8E9099);
-                float w2 = text(c, road, tx, base2, roadSize, false, 0xFF8E9099);
-                if (!next.isEmpty()) text(c, next, tx + w2 + roadSize * 0.4f, base2, roadSize, true, 0xFFF5F5F7);
+                float w1 = text(c, num, tx, base1, distSize, true, fgPrimary);
+                text(c, unit, tx + w1 + distSize * 0.08f, base1, distSize * 0.55f, false, fgSec);
+                float w2 = text(c, road, tx, base2, roadSize, false, fgSec);
+                if (!next.isEmpty()) text(c, next, tx + w2 + roadSize * 0.4f, base2, roadSize, true, fgPrimary);
             }
 
             private static void drawTpms(Object c, TelemetrySnapshot s, float[] vz, boolean top) throws Exception {
@@ -4032,13 +4345,13 @@ public class TurzxMonitorMain {
                 Float ts = L.sizes.get("tpms");
                 if (tr == null || ts == null || vz == null) return;
                 float w = tr[2], h = tr[3], x0 = tr[0], y0 = top ? vz[1] + 20f : tr[1], rad = tr.length > 4 ? tr[4] : 20f;
-                roundRect(c, x0, y0, x0 + w, y0 + h, rad, 0xDB0E0F12);
+                roundRect(c, x0, y0, x0 + w, y0 + h, rad, lightTheme ? 0xEBFFFFFF : 0xDB0E0F12);
                 mSetStrokeW.invoke(pStroke, 2f);
-                mSetColor.invoke(pStroke, 0xFF2A2C31);
+                mSetColor.invoke(pStroke, lightTheme ? 0xFFCBD2DF : 0xFF2A2C31);
                 mSetRf.invoke(rf, x0, y0, x0 + w, y0 + h);
                 mDrawRoundRect.invoke(c, rf, rad, rad, pStroke);
                 float size = ts.floatValue(), cx = x0 + w / 2f, carW = size * 0.95f, carH = h * 0.5f, carTop = y0 + h * 0.12f;
-                mSetColor.invoke(pStroke, 0xFF8E9099);
+                mSetColor.invoke(pStroke, lightTheme ? 0xFF646C7E : 0xFF8E9099);
                 mSetStrokeW.invoke(pStroke, 2.4f);
                 mSetRf.invoke(rf, cx - carW / 2f, carTop, cx + carW / 2f, carTop + carH);
                 mDrawRoundRect.invoke(c, rf, carW * 0.42f, carW * 0.42f, pStroke);
@@ -4049,10 +4362,10 @@ public class TurzxMonitorMain {
                     boolean warn = psi[i] > 0f && psi[i] < 31f;
                     float tw = measure(t, size, true);
                     float x = (i % 2 == 0) ? cx - carW / 2f - gap - tw : cx + carW / 2f + gap;
-                    text(c, t, x, i < 2 ? row1 : row2, size, true, warn ? 0xFFF5A623 : 0xFFF5F5F7);
+                    text(c, t, x, i < 2 ? row1 : row2, size, true, themeColor(warn ? 0xFFF5A623 : 0xFFF5F5F7, lightTheme));
                 }
                 float pw = measure("psi", size * 0.36f, false);
-                text(c, "psi", cx - pw / 2f, y0 + h - size * 0.3f, size * 0.36f, false, 0xFF5A5D64);
+                text(c, "psi", cx - pw / 2f, y0 + h - size * 0.3f, size * 0.36f, false, themeColor(0xFF5A5D64, lightTheme));
             }
 
             private static void drawBattery(Object c, TelemetrySnapshot s, double totalKw) throws Exception {
@@ -4063,7 +4376,10 @@ public class TurzxMonitorMain {
                 if (isValidDteValue(dte)) field(c, "dte", String.valueOf(dte), 0);
                 if (s.avgEconomyKmKwh > 0.0) field(c, "eff", String.format(Locale.US, "%.1f km/kWh", s.avgEconomyKmKwh), 0);
                 float[] pr = L.rect("pill");
-                if (pr != null && soc >= 0.0) barFill(c, pr, pr[0], pr[0] + pr[2] * (float) Math.min(1.0, soc / 100.0), soc < 20.0 ? 0xFFF5A623 : 0xFFF5F5F7);
+                if (pr != null && soc >= 0.0) {
+                    barFill(c, pr, pr[0], pr[0] + pr[2] * (float) Math.min(1.0, soc / 100.0),
+                            themeColor(soc < 20.0 ? 0xFFF5A623 : 0xFFF5F5F7, lightTheme));
+                }
                 if (s.bmsSocPct >= 0.0) field(c, "bms", String.format(Locale.US, "%.1f", s.bmsSocPct), 0);
                 if (s.sohPct >= 0.0) field(c, "soh", String.format(Locale.US, "%.1f", s.sohPct), 0);
                 Integer bt = s.getRepresentativeBattTempC();
@@ -4078,12 +4394,14 @@ public class TurzxMonitorMain {
                 float[] wr = L.rect("pwr");
                 if (wr != null) {
                     float zero = wr[0] + wr[2] * 0.28f;
-                    if (totalKw >= 0.0) barFill(c, wr, zero, zero + (wr[2] * 0.72f) * (float) Math.min(1.0, totalKw / 150.0), 0xFFF5F5F7);
-                    else {
+                    if (totalKw >= 0.0) {
+                        barFill(c, wr, zero, zero + (wr[2] * 0.72f) * (float) Math.min(1.0, totalKw / 150.0),
+                                themeColor(0xFFF5F5F7, lightTheme));
+                    } else {
                         float x0 = zero - (wr[2] * 0.28f) * (float) Math.min(1.0, -totalKw / 60.0);
-                        barFill(c, wr, x0, zero, 0xFF3DD68C);
+                        barFill(c, wr, x0, zero, themeColor(0xFF3DD68C, lightTheme));
                     }
-                    roundRect(c, zero - 2f, wr[1] - 6f, zero + 2f, wr[1] + wr[3] + 6f, 2f, 0xFFC9CBD1);
+                    roundRect(c, zero - 2f, wr[1] - 6f, zero + 2f, wr[1] + wr[3] + 6f, 2f, themeColor(0xFFC9CBD1, lightTheme));
                 }
             }
 
@@ -4123,11 +4441,11 @@ public class TurzxMonitorMain {
                 if (fpr != null) {
                     if (fp >= 0) {
                         int clamped = Math.max(0, Math.min(100, fp));
-                        int barCol = clamped <= 8 ? 0xFFE31937 : (clamped <= 15 ? 0xFFF5A623 : 0xFFF5F5F7);
+                        int barCol = themeColor(clamped <= 8 ? 0xFFE31937 : (clamped <= 15 ? 0xFFF5A623 : 0xFFF5F5F7), lightTheme);
                         barFill(c, fpr, fpr[0], fpr[0] + fpr[2] * (clamped / 100f), barCol);
                     }
                     mSetShader.invoke(pFill, new Object[]{null});
-                    mSetColor.invoke(pFill, 0x66000000);
+                    mSetColor.invoke(pFill, lightTheme ? 0x80FFFFFF : 0x66000000);
                     for (float f : new float[]{0.25f, 0.50f, 0.75f}) {
                         float tx = fpr[0] + fpr[2] * f;
                         mDrawRect.invoke(c, tx - 1.5f, fpr[1] + 3f, tx + 1.5f, fpr[1] + fpr[3] - 3f, pFill);
@@ -4177,10 +4495,10 @@ public class TurzxMonitorMain {
                 float[] rr = L.rect("rpm");
                 if (rr != null) {
                     if (rpm > 0) {
-                        barFill(c, rr, rr[0], rr[0] + rr[2] * Math.min(1f, rpm / 7000f), 0xFFF5F5F7);
+                        barFill(c, rr, rr[0], rr[0] + rr[2] * Math.min(1f, rpm / 7000f), themeColor(0xFFF5F5F7, lightTheme));
                     }
                     mSetShader.invoke(pFill, new Object[]{null});
-                    mSetColor.invoke(pFill, 0x73000000);
+                    mSetColor.invoke(pFill, lightTheme ? 0x8CFFFFFF : 0x73000000);
                     for (int k = 1; k <= 6; k++) {
                         float tx = rr[0] + rr[2] * (k / 7f);
                         mDrawRect.invoke(c, tx - 1.5f, rr[1] + 2f, tx + 1.5f, rr[1] + rr[3] - 2f, pFill);
@@ -4210,7 +4528,7 @@ public class TurzxMonitorMain {
                 field(c, "artist", real ? sub : "", 0);
                 int pos = real ? Math.max(0, s.mediaPositionSec) : 0, dur = real ? Math.max(0, s.mediaDurationSec) : 0;
                 float[] pr = L.rect("prog");
-                if (pr != null && dur > 0) barFill(c, pr, pr[0], pr[0] + pr[2] * Math.min(1f, pos / (float) dur), 0xFFF5F5F7);
+                if (pr != null && dur > 0) barFill(c, pr, pr[0], pr[0] + pr[2] * Math.min(1f, pos / (float) dur), themeColor(0xFFF5F5F7, lightTheme));
                 field(c, "pos", (pos / 60) + ":" + String.format(Locale.US, "%02d", pos % 60), 0);
                 field(c, "dur", dur > 0 ? ("-" + ((dur - pos) / 60) + ":" + String.format(Locale.US, "%02d", Math.max(0, dur - pos) % 60)) : "--:--", 0);
             }
@@ -5796,6 +6114,8 @@ public class TurzxMonitorMain {
 
         private static volatile Object systemService = null;
         private static volatile Method sysGetGearPMethod = null;
+        private static volatile Object videoSetupService = null;
+        private static volatile Object uiModeService = null;
 
         private static volatile boolean hscanListenerRegistered = false;
         private static volatile Object hscanMicomService = null;
@@ -7129,6 +7449,28 @@ public class TurzxMonitorMain {
                     } catch (Throwable ignored) {
                     }
                 }
+
+                if (videoSetupService == null) {
+                    try {
+                        Object b = getSvc.invoke(null, "com.hkmc.micom.videosetup");
+                        if (b != null) {
+                            Class<?> stubCls = Class.forName("com.hkmc.setup.IVideoSetupService$Stub");
+                            videoSetupService = stubCls.getMethod("asInterface", iBinderCls).invoke(null, b);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                if (uiModeService == null) {
+                    try {
+                        Object b = getSvc.invoke(null, "uimode");
+                        if (b != null) {
+                            Class<?> stubCls = Class.forName("android.app.IUiModeManager$Stub");
+                            uiModeService = stubCls.getMethod("asInterface", iBinderCls).invoke(null, b);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
             } catch (Throwable ignored) {
             }
         }
@@ -7687,6 +8029,18 @@ public class TurzxMonitorMain {
                 if (systemService != null) {
                     try {
                         LampProbe.pollSystem(systemService, System.currentTimeMillis());
+                    } catch (Throwable ignored) {
+                    }
+                }
+                if (videoSetupService != null) {
+                    try {
+                        LampProbe.pollVideoSetup(videoSetupService, System.currentTimeMillis());
+                    } catch (Throwable ignored) {
+                    }
+                }
+                if (uiModeService != null) {
+                    try {
+                        LampProbe.pollUiMode(uiModeService, System.currentTimeMillis());
                     } catch (Throwable ignored) {
                     }
                 }
@@ -8530,6 +8884,8 @@ public class TurzxMonitorMain {
             config.usbIncrementalEncode = loaded.usbIncrementalEncode;
             config.renderParallel = loaded.renderParallel;
             config.hudDesignTesla = loaded.hudDesignTesla;
+            config.powertrainMode = loaded.powertrainMode;
+            config.hudThemeMode = loaded.hudThemeMode;
             config.telemetryPollMs = loaded.telemetryPollMs;
             LiveTuning.loadFrom(config);
             config.commaIp = loaded.commaIp;
@@ -8597,6 +8953,76 @@ public class TurzxMonitorMain {
                 C_GOOD = 0xFF86EFAC, C_GOOD_BG = 0xFF0A2A1B, C_WARN = 0xFFFCD34D, C_WARN_BG = 0xFF3B2A07,
                 C_ORANGE = 0xFFFDBA74, C_ORANGE_BG = 0xFF3B1D0A, C_DOT_OK = 0xFF22C55E, C_DOT_OFF = 0xFF64748B,
                 C_SWITCH_OFF = 0xFF334155, C_KNOB_OFF = 0xFFE2E8F0;
+
+        static final class DashPalette {
+            final int bg, card, line, tile, text, text2, muted, faint, accent, onAccent, track, chip;
+            final int good, goodBg, warn, warnBg, orange, orangeBg, dotOk, dotOff, switchOff, knobOff;
+            final int barTrack, barOk, barWarn, mdBar;
+            final int btnBg, btnBdr, btnTxt, otaBg, otaBdr, otaTxt, logBg, logBdr, logTxt;
+            final int saveBg, saveBdr, saveTxt, warnBoxBg, warnBoxBdr, warnBoxTxt, rstBg, rstBdr, rstTxt, infoText;
+            final int[] pwColors, stageColors;
+
+            DashPalette(
+                    int bg, int card, int line, int tile, int text, int text2, int muted, int faint,
+                    int accent, int onAccent, int track, int chip,
+                    int good, int goodBg, int warn, int warnBg, int orange, int orangeBg,
+                    int dotOk, int dotOff, int switchOff, int knobOff,
+                    int barTrack, int barOk, int barWarn, int mdBar,
+                    int btnBg, int btnBdr, int btnTxt, int otaBg, int otaBdr, int otaTxt,
+                    int logBg, int logBdr, int logTxt, int saveBg, int saveBdr, int saveTxt,
+                    int warnBoxBg, int warnBoxBdr, int warnBoxTxt, int rstBg, int rstBdr, int rstTxt, int infoText,
+                    int[] pwColors, int[] stageColors
+            ) {
+                this.bg = bg; this.card = card; this.line = line; this.tile = tile;
+                this.text = text; this.text2 = text2; this.muted = muted; this.faint = faint;
+                this.accent = accent; this.onAccent = onAccent; this.track = track; this.chip = chip;
+                this.good = good; this.goodBg = goodBg; this.warn = warn; this.warnBg = warnBg;
+                this.orange = orange; this.orangeBg = orangeBg; this.dotOk = dotOk; this.dotOff = dotOff;
+                this.switchOff = switchOff; this.knobOff = knobOff;
+                this.barTrack = barTrack; this.barOk = barOk; this.barWarn = barWarn; this.mdBar = mdBar;
+                this.btnBg = btnBg; this.btnBdr = btnBdr; this.btnTxt = btnTxt;
+                this.otaBg = otaBg; this.otaBdr = otaBdr; this.otaTxt = otaTxt;
+                this.logBg = logBg; this.logBdr = logBdr; this.logTxt = logTxt;
+                this.saveBg = saveBg; this.saveBdr = saveBdr; this.saveTxt = saveTxt;
+                this.warnBoxBg = warnBoxBg; this.warnBoxBdr = warnBoxBdr; this.warnBoxTxt = warnBoxTxt;
+                this.rstBg = rstBg; this.rstBdr = rstBdr; this.rstTxt = rstTxt; this.infoText = infoText;
+                this.pwColors = pwColors; this.stageColors = stageColors;
+            }
+        }
+
+        static final DashPalette DARK_PALETTE = new DashPalette(
+                C_BG, C_CARD, C_LINE, C_TILE, C_TEXT, C_TEXT2, C_MUTED, C_FAINT,
+                C_ACCENT, C_ON_ACCENT, C_TRACK, C_CHIP,
+                C_GOOD, C_GOOD_BG, C_WARN, C_WARN_BG, C_ORANGE, C_ORANGE_BG,
+                C_DOT_OK, C_DOT_OFF, C_SWITCH_OFF, C_KNOB_OFF,
+                C_LINE, 0xFF22C55E, 0xFFF59E0B, 0xFFE2E8F0,
+                0xFF111827, 0xFF475569, 0xFFE2E8F0, 0xFF0B1A24, 0xFF0284C7, 0xFFE0F2FE,
+                0xFF0B1A1A, 0xFF0D9488, 0xFFCCFBF1, 0xFF0B1A24, 0xFF0E7490, 0xFFCFFAFE,
+                0xFF2A1F06, 0xFF854D0E, 0xFFFDE68A, 0xFF1F1806, 0xFFD9A441, 0xFFFDE68A, 0xFFE2E8F0,
+                new int[]{0xFF38BDF8, 0xFFF59E0B, 0xFFA78BFA, 0xFF34D399},
+                new int[]{0xFF38BDF8, 0xFFA78BFA, 0xFFF59E0B, 0xFFF472B6}
+        );
+
+        static final DashPalette LIGHT_PALETTE = new DashPalette(
+                0xF8E2E6EE, 0xFFFFFFFF, 0xFFCBD2DF, 0xFFF1F4F9, 0xFF111318, 0xFF4C5363, 0xFF64748B, 0xFF64748B,
+                0xFF2563EB, 0xFFFFFFFF, 0xFFE6EBF3, 0xFFE6EBF3,
+                0xFF15803D, 0xFFDCFCE7, 0xFFB45309, 0xFFFEF3C7, 0xFFC2410C, 0xFFFFEDD5,
+                0xFF16A34A, 0xFF94A3B8, 0xFFCBD5E1, 0xFFFFFFFF,
+                0xFFDCE1EB, 0xFF16A34A, 0xFFD97706, 0xFF334155,
+                0xFFF1F5F9, 0xFFCBD5E1, 0xFF334155, 0xFFE0F2FE, 0xFF0284C7, 0xFF0369A1,
+                0xFFCCFBF1, 0xFF0D9488, 0xFF0F766E, 0xFFECFEFF, 0xFF0891B2, 0xFF155E75,
+                0xFFFEF3C7, 0xFFD97706, 0xFF78350F, 0xFFFEF3C7, 0xFFD97706, 0xFF92400E, 0xFF334155,
+                new int[]{0xFF2563EB, 0xFFD97706, 0xFF7C3AED, 0xFF16A34A},
+                new int[]{0xFF2563EB, 0xFF7C3AED, 0xFFD97706, 0xFFDB2777}
+        );
+
+        static DashPalette paletteFor(boolean light) {
+            return light ? LIGHT_PALETTE : DARK_PALETTE;
+        }
+
+        private static boolean activeLightTheme = false;
+        private static DashPalette activePalette = DARK_PALETTE;
+        private static boolean themeRebuildQueued = false;
 
         // ---- view registry (UI thread only; cleared on hide) ----
         private static final HashMap<String, Object> valueTvs = new HashMap<String, Object>();
@@ -8731,7 +9157,12 @@ public class TurzxMonitorMain {
         }
 
         static DashValues buildDashboardValues(TelemetrySnapshot s, DashboardStats p, long nowMs) {
+            return buildDashboardValues(s, p, nowMs, LampProbe.isLightTheme(LiveTuning.hudThemeMode));
+        }
+
+        static DashValues buildDashboardValues(TelemetrySnapshot s, DashboardStats p, long nowMs, boolean light) {
             DashValues v = new DashValues();
+            DashPalette pal = paletteFor(light);
             boolean ice = s.isIceMode(LiveTuning.powertrainMode);
 
             // ---------------- 차량: energy hero + six tiles ----------------
@@ -8741,7 +9172,7 @@ public class TurzxMonitorMain {
                 v.put("bat.big", s.fuelLevelPct >= 0 ? s.fuelLevelPct + "%" : "--%");
                 v.bar("bat", s.fuelLevelPct >= 0 ? s.fuelLevelPct / 100.0 : 0.0);
                 boolean low = s.lowFuelWarn || (s.fuelLevelPct >= 0 && s.fuelLevelPct < 15);
-                v.tone("bat", 0, low ? 0xFFF59E0B : 0xFF22C55E);
+                v.tone("bat", 0, low ? pal.barWarn : pal.barOk);
                 v.put("bat.range", isValidDteValue(s.iceDteKm) ? s.iceDteKm + " km" : "-- km");
                 v.put("bat.rangeSub", "주행 가능" + (s.lowFuelWarn ? " · 저연료 경고" : ""));
                 String v12 = s.auxBattVoltV > 0.0 ? d1(s.auxBattVoltV, true) + " V"
@@ -8774,7 +9205,7 @@ public class TurzxMonitorMain {
                 v.put("bat.title", "배터리");
                 v.put("bat.big", soc >= 0.0 ? d1(soc, true) + "%" : "--%");
                 v.bar("bat", soc >= 0.0 ? soc / 100.0 : 0.0);
-                v.tone("bat", 0, soc >= 0.0 && soc <= 20.0 ? 0xFFF59E0B : 0xFF22C55E);
+                v.tone("bat", 0, soc >= 0.0 && soc <= 20.0 ? pal.barWarn : pal.barOk);
                 v.put("bat.range", isValidDteValue(s.dteKm) ? s.dteKm + " km" : "-- km");
                 v.put("bat.rangeSub", "주행 가능" + (s.dteAirconOffDeltaKm > 0 ? " · 공조 끄면 +" + s.dteAirconOffDeltaKm : ""));
                 String temp = "--";
@@ -8817,20 +9248,20 @@ public class TurzxMonitorMain {
             String chg = s.fastCharging ? "급속 충전 중" : (s.stdCharging ? "완속 충전 중" : "충전 중");
             String gear = s.gearPos != null && !s.gearPos.isEmpty() ? s.gearPos + "단" : "기어 --";
             v.put("dr.gear", gear + (!ice && s.evReady ? " · READY" : "") + (chgOn ? " · " + chg : ""));
-            if (chgOn) v.tone("dr.gear", C_GOOD, C_GOOD_BG);
-            else v.tone("dr.gear", C_TEXT, C_CHIP);
+            if (chgOn) v.tone("dr.gear", pal.good, pal.goodBg);
+            else v.tone("dr.gear", pal.text, pal.chip);
             boolean pb = BodyProbe.parkingBrakeOn();
             v.put("dr.park", BodyProbe.activeParkSource() < 0 ? "주차브레이크 신호 없음" : (pb ? "주차브레이크 체결" : "주차브레이크 해제"));
-            if (pb) v.tone("dr.park", C_ORANGE, C_ORANGE_BG);
-            else v.tone("dr.park", C_TEXT2, C_CHIP);
+            if (pb) v.tone("dr.park", pal.orange, pal.orangeBg);
+            else v.tone("dr.park", pal.text2, pal.chip);
             if (!BodyProbe.hasDoorData()) {
                 v.put("dr.door", "문 신호 없음");
-                v.tone("dr.door", C_TEXT2, C_CHIP);
+                v.tone("dr.door", pal.text2, pal.chip);
             } else {
                 String open = BodyProbe.openText();
                 v.put("dr.door", "문 " + (open.isEmpty() ? "닫힘" : open + " 열림") + (BodyProbe.doorsLocked() ? " · 잠김" : " · 잠금 해제"));
-                if (open.isEmpty()) v.tone("dr.door", C_TEXT2, C_CHIP);
-                else v.tone("dr.door", C_ORANGE, C_ORANGE_BG);
+                if (open.isEmpty()) v.tone("dr.door", pal.text2, pal.chip);
+                else v.tone("dr.door", pal.orange, pal.orangeBg);
             }
             v.put("dr.line", s.carrotConnected
                     ? "콤마 연결 · " + Math.max(0, s.carrotSpeedKph) + " km/h · 크루즈 "
@@ -8883,18 +9314,18 @@ public class TurzxMonitorMain {
             boolean dirty = LiveTuning.differsFrom(config);
             v.put("ds.save", dirty ? "저장 안 된 변경이 있습니다 · [저장]을 눌러야 재시작 후에도 유지됩니다"
                     : "바꾼 값은 바로 적용되고, [저장]을 눌러야 재시작 후에도 유지됩니다");
-            v.tone("ds.save", dirty ? C_WARN : 0xFFCFFAFE, 0);
+            v.tone("ds.save", dirty ? pal.warn : pal.saveTxt, 0);
 
             // ---------------- 성능 ----------------
             v.put("pf.panel", p.usbConnected ? TurzxFrameRenderer.getActivePanelLabel() + " 연결됨" : "패널 미연결");
-            v.tone("pf.panel", p.usbConnected ? C_GOOD : C_MUTED, 0);
+            v.tone("pf.panel", p.usbConnected ? pal.good : pal.muted, 0);
             v.put("pf.fps", String.format(Locale.US, "%.1f", p.fps));
             v.put("pf.target", "/ 목표 " + p.targetFps + " FPS");
             String bn = describeBottleneck(p);
             v.put("pf.bn", bn);
-            if (bn.startsWith("목표")) v.tone("pf.bn", C_GOOD, C_GOOD_BG);
-            else if (bn.startsWith("병목")) v.tone("pf.bn", C_WARN, C_WARN_BG);
-            else v.tone("pf.bn", C_TEXT2, C_CHIP);
+            if (bn.startsWith("목표")) v.tone("pf.bn", pal.good, pal.goodBg);
+            else if (bn.startsWith("병목")) v.tone("pf.bn", pal.warn, pal.warnBg);
+            else v.tone("pf.bn", pal.text2, pal.chip);
             double[] st = {p.renderMs, p.encodeMs, p.txMs, p.ackMs};
             String[] sk = {"pf.r", "pf.e", "pf.t", "pf.a"};
             double budget = 1000.0 / Math.max(1, p.targetFps);
@@ -8918,25 +9349,25 @@ public class TurzxMonitorMain {
             // ---------------- 시스템 ----------------
             v.put("sy.usb.sub", cut(p.usbStatus, 40));
             v.put("sy.usb.st", p.usbConnected ? "연결" : "미연결");
-            v.tone("sy.usb.st", p.usbConnected ? C_GOOD : C_MUTED, 0);
-            v.tone("sy.usb.dot", 0, p.usbConnected ? C_DOT_OK : C_DOT_OFF);
+            v.tone("sy.usb.st", p.usbConnected ? pal.good : pal.muted, 0);
+            v.tone("sy.usb.dot", 0, p.usbConnected ? pal.dotOk : pal.dotOff);
             v.put("sy.comma.sub", s.carrotConnected && s.carrotIp != null && !s.carrotIp.isEmpty() ? s.carrotIp : "자동 검색 중");
             v.put("sy.comma.st", s.carrotConnected ? "연결" : "미연결");
-            v.tone("sy.comma.st", s.carrotConnected ? C_GOOD : C_MUTED, 0);
-            v.tone("sy.comma.dot", 0, s.carrotConnected ? C_DOT_OK : C_DOT_OFF);
+            v.tone("sy.comma.st", s.carrotConnected ? pal.good : pal.muted, 0);
+            v.tone("sy.comma.dot", 0, s.carrotConnected ? pal.dotOk : pal.dotOff);
             boolean tap = MicomTap.registered > 0;
             v.put("sy.micom.sub", MicomTap.shortText());
             v.put("sy.micom.st", tap ? "수신 중" : "대기");
-            v.tone("sy.micom.st", tap ? C_GOOD : C_MUTED, 0);
-            v.tone("sy.micom.dot", 0, tap ? C_DOT_OK : C_DOT_OFF);
+            v.tone("sy.micom.st", tap ? pal.good : pal.muted, 0);
+            v.tone("sy.micom.dot", 0, tap ? pal.dotOk : pal.dotOff);
             boolean key = p.hotkeyInfo != null && !p.hotkeyInfo.isEmpty();
             v.put("sy.key.sub", cut(p.hotkeyInfo, 40));
             v.put("sy.key.st", key ? "감시 중" : "없음");
-            v.tone("sy.key.st", key ? C_GOOD : C_MUTED, 0);
-            v.tone("sy.key.dot", 0, key ? C_DOT_OK : C_DOT_OFF);
+            v.tone("sy.key.st", key ? pal.good : pal.muted, 0);
+            v.tone("sy.key.dot", 0, key ? pal.dotOk : pal.dotOff);
             v.put("sy.ver", "v" + MONITOR_VERSION);
             v.put("sy.ota", cut(p.otaStatus, 26));
-            v.tone("sy.ota", p.otaStatus != null && p.otaStatus.contains("최신") ? C_GOOD : C_TEXT2, 0);
+            v.tone("sy.ota", p.otaStatus != null && p.otaStatus.contains("최신") ? pal.good : pal.text2, 0);
             String dump = DebugManager.getLastDumpPath();
             v.put("sy.log", dump == null || dump.isEmpty() ? "이번 실행에서는 아직 저장 안 함" : "마지막 저장: " + cut(dump, 48));
             v.put("sy.recent", cut(p.recentKeys, 64));
@@ -9085,10 +9516,13 @@ public class TurzxMonitorMain {
             try {
                 Ui u = new Ui(sysContext);
                 ui = u;
+                activeLightTheme = LampProbe.isLightTheme(LiveTuning.hudThemeMode);
+                activePalette = paletteFor(activeLightTheme);
+                themeRebuildQueued = false;
                 // Root: full screen, vertical
                 Object root = u.ll(true);
                 u.pad(root, 28, 18, 28, 14);
-                u.bg(root, u.gd(C_BG, 0f, 0, 0));
+                u.bg(root, u.gd(activePalette.bg, 0f, 0, 0));
                 buildDashboard(u, root);
                 Class<?> viewCls = u.viewCls;
                 Class<?> vgLpCls = u.vgLpCls;
@@ -9138,7 +9572,7 @@ public class TurzxMonitorMain {
             final Object ctx;
             final Class<?> viewCls, vgLpCls, llCls, llLpCls, tvCls, gdCls, drawableCls;
             final Constructor<?> llCtor, tvCtor, viewCtor, llLpCtor, llLpWCtor, gdCtor;
-            final Method setOrientation, setLlGravity, setPadding, setBg, addView, setMargins, setLayoutParams,
+            final Method setOrientation, setLlGravity, setPadding, setBg, addView, removeAllViews, setMargins, setLayoutParams,
                     setVisibility, setText, setTextSize, setTextColor, setTvGravity, setSingleLine, setIncludeFontPadding,
                     setLineSpacing, gdSetColor, gdSetRadius, gdSetStroke, setAlpha, setOnTouch;
             final Object boldFace, ellipsizeEnd;
@@ -9166,6 +9600,7 @@ public class TurzxMonitorMain {
                 setPadding = viewCls.getMethod("setPadding", int.class, int.class, int.class, int.class);
                 setBg = viewCls.getMethod("setBackgroundDrawable", drawableCls);
                 addView = vgCls.getMethod("addView", viewCls, vgLpCls);
+                removeAllViews = vgCls.getMethod("removeAllViews");
                 setMargins = llLpCls.getMethod("setMargins", int.class, int.class, int.class, int.class);
                 setLayoutParams = viewCls.getMethod("setLayoutParams", vgLpCls);
                 setVisibility = viewCls.getMethod("setVisibility", int.class);
@@ -9294,10 +9729,11 @@ public class TurzxMonitorMain {
         }
 
         private static Object card(Ui u, String title) throws Exception {
+            DashPalette pal = activePalette;
             Object c = u.ll(true);
             u.pad(c, 22, 16, 22, 16);
-            u.bg(c, u.gd(C_CARD, 18f, 2, C_LINE));
-            if (title != null) u.add(c, u.text(title, 20f, C_ACCENT, true), u.lp(-1, -2));
+            u.bg(c, u.gd(pal.card, 18f, 2, pal.line));
+            if (title != null) u.add(c, u.text(title, 20f, pal.accent, true), u.lp(-1, -2));
             return c;
         }
 
@@ -9307,18 +9743,18 @@ public class TurzxMonitorMain {
 
         private static void addDivider(Ui u, Object parent, int topMargin) throws Exception {
             Object d = u.view();
-            u.bg(d, u.gd(C_LINE, 0f, 0, 0));
+            u.bg(d, u.gd(activePalette.line, 0f, 0, 0));
             u.add(parent, d, u.m(u.lp(-1, 1), 0, topMargin, 0, 0));
         }
 
         private static Object label(Ui u, String s) throws Exception {
-            return u.text(s, 18f, C_TEXT2, false);
+            return u.text(s, 18f, activePalette.text2, false);
         }
 
         /** Horizontal bar: fill + rest children whose weights applyValues() sets from the 0..1 value. */
         private static Object bar(Ui u, String key, int height, int fillColor) throws Exception {
             Object track = u.ll(false);
-            u.bg(track, u.gd(C_LINE, height / 2f, 0, 0));
+            u.bg(track, u.gd(activePalette.barTrack, height / 2f, 0, 0));
             Object fill = u.view();
             Object fillGd = u.gd(fillColor, height / 2f, 0, 0);
             u.bg(fill, fillGd);
@@ -9330,8 +9766,9 @@ public class TurzxMonitorMain {
         }
 
         private static Object chip(Ui u, String key, float px) throws Exception {
-            Object tv = val(u, key, px, C_TEXT, false);
-            Object g = u.gd(C_CHIP, 40f, 0, 0);
+            DashPalette pal = activePalette;
+            Object tv = val(u, key, px, pal.text, false);
+            Object g = u.gd(pal.chip, 40f, 0, 0);
             u.bg(tv, g);
             u.pad(tv, 16, 7, 16, 7);
             toneViews.put(key, new Object[]{tv, g});
@@ -9340,7 +9777,7 @@ public class TurzxMonitorMain {
 
         private static Object dot(Ui u, String key) throws Exception {
             Object d = u.view();
-            Object g = u.gd(C_DOT_OFF, 7f, 0, 0);
+            Object g = u.gd(activePalette.dotOff, 7f, 0, 0);
             u.bg(d, g);
             toneViews.put(key, new Object[]{null, g});
             return d;
@@ -9365,12 +9802,13 @@ public class TurzxMonitorMain {
 
         /** One-of-N buttons for a tuning row; the selected one is filled with the accent colour. */
         private static Object segmented(Ui u, final int row, String[] labels, int[] values, float px) throws Exception {
+            DashPalette pal = activePalette;
             Object box = u.ll(false);
             u.pad(box, 5, 5, 5, 5);
-            u.bg(box, u.gd(C_TRACK, 12f, 0, 0));
+            u.bg(box, u.gd(pal.track, 12f, 0, 0));
             for (int i = 0; i < labels.length; i++) {
                 final int value = values[i];
-                Object tv = u.text(labels[i], px, C_TEXT2, false);
+                Object tv = u.text(labels[i], px, pal.text2, false);
                 u.setTvGravity.invoke(tv, 17);
                 Object g = u.gd(0x00000000, 9f, 0, 0);
                 u.bg(tv, g);
@@ -9388,12 +9826,13 @@ public class TurzxMonitorMain {
 
         /** On/off switch (track + knob) for a boolean tuning row. */
         private static Object switchView(Ui u, final int row) throws Exception {
+            DashPalette pal = activePalette;
             Object track = u.ll(false);
             u.pad(track, 4, 4, 4, 4);
-            Object trackGd = u.gd(C_SWITCH_OFF, 23f, 0, 0);
+            Object trackGd = u.gd(pal.switchOff, 23f, 0, 0);
             u.bg(track, trackGd);
             Object knob = u.view();
-            Object knobGd = u.gd(C_KNOB_OFF, 19f, 0, 0);
+            Object knobGd = u.gd(pal.knobOff, 19f, 0, 0);
             u.bg(knob, knobGd);
             u.add(track, knob, u.lp(38, 38));
             u.onTap(track, new Runnable() {
@@ -9410,7 +9849,7 @@ public class TurzxMonitorMain {
             addDivider(u, parent, 12);
             Object r = u.ll(false);
             u.gravity(r, 16);
-            u.add(r, u.text(title, 20f, C_TEXT, false), u.lpw(0, -2, 1f));
+            u.add(r, u.text(title, 20f, activePalette.text, false), u.lpw(0, -2, 1f));
             u.add(r, switchView(u, row), u.lp(84, 46));
             u.add(parent, r, u.m(u.lp(-1, -2), 0, 10, 0, 0));
         }
@@ -9421,24 +9860,26 @@ public class TurzxMonitorMain {
         }
 
         private static Object tile(Ui u, String key) throws Exception {
+            DashPalette pal = activePalette;
             Object t = u.ll(true);
             u.pad(t, 14, 10, 14, 10);
-            u.bg(t, u.gd(C_TILE, 12f, 0, 0));
-            Object l = val(u, key + ".l", 16f, C_MUTED, false);
+            u.bg(t, u.gd(pal.tile, 12f, 0, 0));
+            Object l = val(u, key + ".l", 16f, pal.muted, false);
             u.single(l);
             u.add(t, l, u.lp(-1, -2));
-            Object v = val(u, key + ".v", 27f, C_TEXT, true);
+            Object v = val(u, key + ".v", 27f, pal.text, true);
             u.single(v);
             u.add(t, v, u.lp(-1, -2));
             return t;
         }
 
         private static Object fixedTile(Ui u, String title, String key) throws Exception {
+            DashPalette pal = activePalette;
             Object t = u.ll(true);
             u.pad(t, 14, 10, 14, 10);
-            u.bg(t, u.gd(C_TILE, 12f, 0, 0));
-            u.add(t, u.text(title, 16f, C_MUTED, false), u.lp(-1, -2));
-            Object v = val(u, key, 26f, C_TEXT, true);
+            u.bg(t, u.gd(pal.tile, 12f, 0, 0));
+            u.add(t, u.text(title, 16f, pal.muted, false), u.lp(-1, -2));
+            Object v = val(u, key, 26f, pal.text, true);
             u.single(v);
             u.add(t, v, u.lp(-1, -2));
             return t;
@@ -9458,22 +9899,23 @@ public class TurzxMonitorMain {
 
         // ---- tabs ----
         private static Object buildVehicleTab(Ui u) throws Exception {
+            DashPalette pal = activePalette;
             Object row = u.ll(false);
 
             // battery / fuel hero
             Object hero = card(u, null);
-            u.add(hero, val(u, "bat.title", 20f, C_ACCENT, true), u.lp(-1, -2));
+            u.add(hero, val(u, "bat.title", 20f, pal.accent, true), u.lp(-1, -2));
             Object big = u.ll(false);
             u.gravity(big, 80); // BOTTOM
-            Object bigTv = val(u, "bat.big", 84f, C_TEXT, true);
+            Object bigTv = val(u, "bat.big", 84f, pal.text, true);
             u.setIncludeFontPadding.invoke(bigTv, false);
             u.add(big, bigTv, u.lp(-2, -2));
             Object rangeCol = u.ll(true);
-            u.add(rangeCol, val(u, "bat.range", 40f, C_TEXT, true), u.lp(-2, -2));
-            u.add(rangeCol, val(u, "bat.rangeSub", 17f, C_MUTED, false), u.lp(-2, -2));
+            u.add(rangeCol, val(u, "bat.range", 40f, pal.text, true), u.lp(-2, -2));
+            u.add(rangeCol, val(u, "bat.rangeSub", 17f, pal.muted, false), u.lp(-2, -2));
             u.add(big, rangeCol, u.m(u.lp(-2, -2), 20, 0, 0, 0));
             u.add(hero, big, u.m(u.lp(-1, -2), 0, 8, 0, 0));
-            u.add(hero, bar(u, "bat", 18, 0xFF22C55E), u.m(u.lp(-1, 18), 0, 14, 0, 0));
+            u.add(hero, bar(u, "bat", 18, pal.barOk), u.m(u.lp(-1, 18), 0, 14, 0, 0));
             addSpacer(u, hero, true);
             for (int r = 0; r < 2; r++) {
                 Object tr = u.ll(false);
@@ -9489,16 +9931,16 @@ public class TurzxMonitorMain {
             Object pw = card(u, null);
             Object pwHead = u.ll(false);
             u.gravity(pwHead, 16);
-            u.add(pwHead, val(u, "pw.title", 20f, C_ACCENT, true), u.lpw(0, -2, 1f));
-            u.add(pwHead, val(u, "pw.big", 34f, C_TEXT, true), u.lp(-2, -2));
+            u.add(pwHead, val(u, "pw.title", 20f, pal.accent, true), u.lpw(0, -2, 1f));
+            u.add(pwHead, val(u, "pw.big", 34f, pal.text, true), u.lp(-2, -2));
             u.add(pw, pwHead, u.lp(-1, -2));
-            int[] colors = {0xFF38BDF8, 0xFFF59E0B, 0xFFA78BFA, 0xFF34D399};
+            int[] colors = pal.pwColors;
             for (int i = 0; i < 4; i++) {
                 Object r = u.ll(false);
                 u.gravity(r, 16);
-                u.add(r, val(u, "pw" + i + ".l", 18f, C_TEXT2, false), u.lp(80, -2));
+                u.add(r, val(u, "pw" + i + ".l", 18f, pal.text2, false), u.lp(80, -2));
                 u.add(r, bar(u, "pw" + i, 12, colors[i]), u.lpw(0, 12, 1f));
-                Object vv = val(u, "pw" + i + ".v", 18f, C_TEXT, false);
+                Object vv = val(u, "pw" + i + ".v", 18f, pal.text, false);
                 u.setTvGravity.invoke(vv, 5);
                 u.add(r, vv, u.lp(100, -2));
                 u.add(pw, r, u.m(u.lp(-1, -2), 0, i == 0 ? 12 : 8, 0, 0));
@@ -9513,10 +9955,10 @@ public class TurzxMonitorMain {
             u.add(dr, chip(u, "dr.door", 19f), u.m(u.lp(-2, -2), 0, 10, 0, 0));
             addSpacer(u, dr, true);
             Object drBottom = u.ll(false);
-            Object line = val(u, "dr.line", 18f, C_TEXT2, false);
+            Object line = val(u, "dr.line", 18f, pal.text2, false);
             u.single(line);
             u.add(drBottom, line, u.lpw(0, -2, 1f));
-            u.add(drBottom, val(u, "dr.steer", 18f, C_MUTED, false), u.m(u.lp(-2, -2), 12, 0, 0, 0));
+            u.add(drBottom, val(u, "dr.steer", 18f, pal.muted, false), u.m(u.lp(-2, -2), 12, 0, 0, 0));
             u.add(dr, drBottom, u.lp(-1, -2));
             u.add(mid, dr, u.m(u.lpw(-1, 0, 1f), 0, 14, 0, 0));
             u.add(row, mid, u.m(u.lpw(0, -1, 1f), 14, 0, 0, 0));
@@ -9527,33 +9969,33 @@ public class TurzxMonitorMain {
             Object clRow = u.ll(false);
             u.gravity(clRow, 16);
             Object clCol = u.ll(true);
-            u.add(clCol, u.text("공조", 20f, C_ACCENT, true), u.lp(-1, -2));
-            Object clMode = val(u, "cl.mode", 18f, C_TEXT2, false);
+            u.add(clCol, u.text("공조", 20f, pal.accent, true), u.lp(-1, -2));
+            Object clMode = val(u, "cl.mode", 18f, pal.text2, false);
             u.single(clMode);
             u.add(clCol, clMode, u.lp(-1, -2));
-            u.add(clCol, val(u, "cl.temps", 17f, C_MUTED, false), u.lp(-1, -2));
+            u.add(clCol, val(u, "cl.temps", 17f, pal.muted, false), u.lp(-1, -2));
             u.add(clRow, clCol, u.lpw(0, -2, 1f));
-            u.add(clRow, val(u, "cl.big", 44f, C_TEXT, true), u.m(u.lp(-2, -2), 12, 0, 0, 0));
+            u.add(clRow, val(u, "cl.big", 44f, pal.text, true), u.m(u.lp(-2, -2), 12, 0, 0, 0));
             u.add(cl, clRow, u.lp(-1, -2));
             u.add(right, cl, u.lp(-1, -2));
 
             Object md = card(u, null);
             Object mdHead = u.ll(false);
-            u.add(mdHead, u.text("미디어", 20f, C_ACCENT, true), u.lpw(0, -2, 1f));
-            u.add(mdHead, val(u, "md.src", 17f, C_MUTED, false), u.lp(-2, -2));
+            u.add(mdHead, u.text("미디어", 20f, pal.accent, true), u.lpw(0, -2, 1f));
+            u.add(mdHead, val(u, "md.src", 17f, pal.muted, false), u.lp(-2, -2));
             u.add(md, mdHead, u.lp(-1, -2));
-            Object mdTitle = val(u, "md.title", 24f, C_TEXT, true);
+            Object mdTitle = val(u, "md.title", 24f, pal.text, true);
             u.single(mdTitle);
             u.add(md, mdTitle, u.m(u.lp(-1, -2), 0, 4, 0, 0));
-            Object mdSub = val(u, "md.sub", 18f, C_TEXT2, false);
+            Object mdSub = val(u, "md.sub", 18f, pal.text2, false);
             u.single(mdSub);
             u.add(md, mdSub, u.lp(-1, -2));
             addSpacer(u, md, true);
             Object prog = u.ll(false);
             u.gravity(prog, 16);
-            u.add(prog, val(u, "md.pos", 17f, C_MUTED, false), u.lp(-2, -2));
-            u.add(prog, bar(u, "md", 8, 0xFFE2E8F0), u.m(u.lpw(0, 8, 1f), 12, 0, 12, 0));
-            u.add(prog, val(u, "md.dur", 17f, C_MUTED, false), u.lp(-2, -2));
+            u.add(prog, val(u, "md.pos", 17f, pal.muted, false), u.lp(-2, -2));
+            u.add(prog, bar(u, "md", 8, pal.mdBar), u.m(u.lpw(0, 8, 1f), 12, 0, 12, 0));
+            u.add(prog, val(u, "md.dur", 17f, pal.muted, false), u.lp(-2, -2));
             u.add(md, prog, u.lp(-1, -2));
             u.add(right, md, u.m(u.lpw(-1, 0, 1f), 0, 14, 0, 0));
 
@@ -9561,15 +10003,15 @@ public class TurzxMonitorMain {
             Object tyRow = u.ll(false);
             u.gravity(tyRow, 16);
             Object tyTitle = u.ll(true);
-            u.add(tyTitle, u.text("타이어", 20f, C_ACCENT, true), u.lp(-2, -2));
-            u.add(tyTitle, u.text("psi", 15f, C_MUTED, false), u.lp(-2, -2));
+            u.add(tyTitle, u.text("타이어", 20f, pal.accent, true), u.lp(-2, -2));
+            u.add(tyTitle, u.text("psi", 15f, pal.muted, false), u.lp(-2, -2));
             u.add(tyRow, tyTitle, u.lp(100, -2));
             Object tyGrid = u.ll(true);
             String[][] keys = {{"ty.fl", "ty.fr"}, {"ty.rl", "ty.rr"}};
             for (String[] kr : keys) {
                 Object gr = u.ll(false);
                 for (String k : kr) {
-                    Object tv = val(u, k, 26f, C_TEXT, true);
+                    Object tv = val(u, k, 26f, pal.text, true);
                     u.setTvGravity.invoke(tv, 17);
                     u.add(gr, tv, u.lpw(0, -2, 1f));
                 }
@@ -9583,13 +10025,16 @@ public class TurzxMonitorMain {
         }
 
         private static Object buildDisplayTab(Ui u) throws Exception {
+            DashPalette pal = activePalette;
             Object col = u.ll(true);
             Object row = u.ll(false);
 
             Object g1 = card(u, "화면");
-            addLabeled(u, g1, "디자인", segmented(u, 7, new String[]{"테슬라", "클래식"}, new int[]{1, 0}, 20f), 12);
+            addLabeled(u, g1, "디자인", segmented(u, 7, new String[]{"테슬라", "클래식"}, new int[]{1, 0}, 20f), 10);
             addLabeled(u, g1, "차종 모드", segmented(u, 9, new String[]{"자동", "전기차", "내연차"},
-                    new int[]{POWERTRAIN_AUTO, POWERTRAIN_EV, POWERTRAIN_ICE}, 20f), 12);
+                    new int[]{POWERTRAIN_AUTO, POWERTRAIN_EV, POWERTRAIN_ICE}, 20f), 10);
+            addLabeled(u, g1, "화면 테마", segmented(u, 10, new String[]{"자동", "다크", "라이트"},
+                    new int[]{THEME_AUTO, THEME_DARK, THEME_LIGHT}, 20f), 10);
             addSwitchRow(u, g1, "화면 180° 회전", 8);
             addSwitchRow(u, g1, "ADAS 도로 표시", 3);
             u.add(row, g1, u.lpw(0, -1, 1f));
@@ -9597,8 +10042,8 @@ public class TurzxMonitorMain {
             Object g2 = card(u, "화질 · 속도");
             Object q = u.ll(false);
             u.gravity(q, 16);
-            u.add(q, u.text("JPEG 품질", 20f, C_TEXT, false), u.lpw(0, -2, 1f));
-            Object minus = button(u, "－", 26f, 0xFF111827, 0xFF475569, C_TEXT, false, new Runnable() {
+            u.add(q, u.text("JPEG 품질", 20f, pal.text, false), u.lpw(0, -2, 1f));
+            Object minus = button(u, "－", 26f, pal.btnBg, pal.btnBdr, pal.text, false, new Runnable() {
                 @Override
                 public void run() {
                     LiveTuning.adjust(0, -1);
@@ -9607,10 +10052,10 @@ public class TurzxMonitorMain {
             });
             u.pad(minus, 0, 0, 0, 0);
             u.add(q, minus, u.lp(64, 52));
-            Object qv = val(u, "ds.q", 30f, C_TEXT, true);
+            Object qv = val(u, "ds.q", 30f, pal.text, true);
             u.setTvGravity.invoke(qv, 17);
             u.add(q, qv, u.lp(84, -2));
-            Object plus = button(u, "＋", 26f, 0xFF111827, 0xFF475569, C_TEXT, false, new Runnable() {
+            Object plus = button(u, "＋", 26f, pal.btnBg, pal.btnBdr, pal.text, false, new Runnable() {
                 @Override
                 public void run() {
                     LiveTuning.adjust(0, +1);
@@ -9631,8 +10076,8 @@ public class TurzxMonitorMain {
             Object g3 = card(u, null);
             Object g3Head = u.ll(false);
             u.gravity(g3Head, 80);
-            u.add(g3Head, u.text("고급", 20f, C_ACCENT, true), u.lpw(0, -2, 1f));
-            u.add(g3Head, u.text("보통은 그대로 두세요", 16f, C_MUTED, false), u.lp(-2, -2));
+            u.add(g3Head, u.text("고급", 20f, pal.accent, true), u.lpw(0, -2, 1f));
+            u.add(g3Head, u.text("보통은 그대로 두세요", 16f, pal.muted, false), u.lp(-2, -2));
             u.add(g3, g3Head, u.lp(-1, -2));
             String[] panelLabels = new String[LiveTuning.PANEL_FPS_STEPS.length];
             for (int i = 0; i < panelLabels.length; i++) {
@@ -9643,10 +10088,10 @@ public class TurzxMonitorMain {
             // v1.5.13: always visible - the parallel pipeline keeps two of the four cores busy
             Object warn = u.ll(false);
             u.pad(warn, 12, 8, 12, 8);
-            u.bg(warn, u.gd(0xFF2A1F06, 10f, 1, 0xFF854D0E));
-            u.add(warn, u.text("⚠", 18f, C_WARN, true), u.lp(-2, -2));
+            u.bg(warn, u.gd(pal.warnBoxBg, 10f, 1, pal.warnBoxBdr));
+            u.add(warn, u.text("⚠", 18f, pal.warn, true), u.lp(-2, -2));
             Object warnTv = u.text("병렬은 CPU 코어를 2개 써서 헤드유닛 전체(내비·음악·터치)가 느려질 수 있습니다",
-                    16f, 0xFFFDE68A, false);
+                    16f, pal.warnBoxTxt, false);
             u.setLineSpacing.invoke(warnTv, 0f, 1.15f);
             u.add(warn, warnTv, u.m(u.lpw(0, -2, 1f), 8, 0, 0, 0));
             u.add(g3, warn, u.m(u.lp(-1, -2), 0, 8, 0, 0));
@@ -9658,11 +10103,11 @@ public class TurzxMonitorMain {
             Object save = u.ll(false);
             u.gravity(save, 16);
             u.pad(save, 20, 0, 8, 0);
-            u.bg(save, u.gd(0xFF0B1A24, 16f, 2, 0xFF0E7490));
-            Object saveTv = toned(u, "ds.save", 19f, 0xFFCFFAFE, false);
+            u.bg(save, u.gd(pal.saveBg, 16f, 2, pal.saveBdr));
+            Object saveTv = toned(u, "ds.save", 19f, pal.saveTxt, false);
             u.single(saveTv);
             u.add(save, saveTv, u.lpw(0, -2, 1f));
-            u.add(save, button(u, "저장된 값으로 되돌리기", 19f, 0xFF111827, 0xFF475569, 0xFFE2E8F0, false, new Runnable() {
+            u.add(save, button(u, "저장된 값으로 되돌리기", 19f, pal.btnBg, pal.btnBdr, pal.btnTxt, false, new Runnable() {
                 @Override
                 public void run() {
                     LiveTuning.loadFrom(config);
@@ -9685,34 +10130,35 @@ public class TurzxMonitorMain {
         }
 
         private static Object buildPerfTab(Ui u) throws Exception {
+            DashPalette pal = activePalette;
             Object row = u.ll(false);
 
             Object pl = card(u, null);
             Object head = u.ll(false);
             u.gravity(head, 16);
-            u.add(head, u.text("USB 패널 · 프레임 파이프라인", 20f, C_ACCENT, true), u.lpw(0, -2, 1f));
-            u.add(head, toned(u, "pf.panel", 18f, C_GOOD, false), u.lp(-2, -2));
+            u.add(head, u.text("USB 패널 · 프레임 파이프라인", 20f, pal.accent, true), u.lpw(0, -2, 1f));
+            u.add(head, toned(u, "pf.panel", 18f, pal.good, false), u.lp(-2, -2));
             u.add(pl, head, u.lp(-1, -2));
             Object big = u.ll(false);
             u.gravity(big, 80);
-            Object fps = val(u, "pf.fps", 84f, C_TEXT, true);
+            Object fps = val(u, "pf.fps", 84f, pal.text, true);
             u.setIncludeFontPadding.invoke(fps, false);
             u.add(big, fps, u.lp(-2, -2));
-            u.add(big, val(u, "pf.target", 26f, C_MUTED, false), u.m(u.lp(-2, -2), 14, 0, 0, 6));
+            u.add(big, val(u, "pf.target", 26f, pal.muted, false), u.m(u.lp(-2, -2), 14, 0, 0, 6));
             addSpacer(u, big, false);
             u.add(big, chip(u, "pf.bn", 20f), u.m(u.lp(-2, -2), 0, 0, 0, 8));
             u.add(pl, big, u.m(u.lp(-1, -2), 0, 10, 0, 0));
-            u.add(pl, u.text("프레임 1장당 시간 (ms) · 렌더와 인코딩은 동시에, 전송과 응답은 이어서", 17f, C_MUTED, false),
+            u.add(pl, u.text("프레임 1장당 시간 (ms) · 렌더와 인코딩은 동시에, 전송과 응답은 이어서", 17f, pal.muted, false),
                     u.m(u.lp(-1, -2), 0, 14, 0, 0));
             String[] names = {"렌더", "인코딩", "전송", "패널 응답"};
             String[] keys = {"pf.r", "pf.e", "pf.t", "pf.a"};
-            int[] colors = {0xFF38BDF8, 0xFFA78BFA, 0xFFF59E0B, 0xFFF472B6};
+            int[] colors = pal.stageColors;
             for (int i = 0; i < names.length; i++) {
                 Object r = u.ll(false);
                 u.gravity(r, 16);
-                u.add(r, u.text(names[i], 19f, C_TEXT2, false), u.lp(110, -2));
+                u.add(r, u.text(names[i], 19f, pal.text2, false), u.lp(110, -2));
                 u.add(r, bar(u, keys[i], 16, colors[i]), u.lpw(0, 16, 1f));
-                Object vv = val(u, keys[i] + ".v", 19f, C_TEXT, false);
+                Object vv = val(u, keys[i] + ".v", 19f, pal.text, false);
                 u.setTvGravity.invoke(vv, 5);
                 u.add(r, vv, u.lp(90, -2));
                 u.add(pl, r, u.m(u.lp(-1, -2), 0, 8, 0, 0));
@@ -9724,7 +10170,7 @@ public class TurzxMonitorMain {
                 u.add(tiles, fixedTile(u, tl[i][0], tl[i][1]), u.m(u.lpw(0, -2, 1f), i > 0 ? 10 : 0, 0, 0, 0));
             }
             u.add(pl, tiles, u.m(u.lp(-1, -2), 0, 12, 0, 0));
-            Object foot = val(u, "pf.foot", 16f, C_MUTED, false);
+            Object foot = val(u, "pf.foot", 16f, pal.muted, false);
             u.single(foot);
             u.add(pl, foot, u.m(u.lp(-1, -2), 0, 10, 0, 0));
             u.add(row, pl, u.lpw(0, -1, 1.3f));
@@ -9733,8 +10179,8 @@ public class TurzxMonitorMain {
             Object bc = card(u, null);
             Object bHead = u.ll(false);
             u.gravity(bHead, 16);
-            u.add(bHead, u.text("FPS 측정", 20f, C_ACCENT, true), u.lpw(0, -2, 1f));
-            u.add(bHead, button(u, "▶ 측정 시작", 19f, C_ACCENT, 0, C_ON_ACCENT, true, new Runnable() {
+            u.add(bHead, u.text("FPS 측정", 20f, pal.accent, true), u.lpw(0, -2, 1f));
+            u.add(bHead, button(u, "▶ 측정 시작", 19f, pal.accent, 0, pal.onAccent, true, new Runnable() {
                 @Override
                 public void run() {
                     FpsBench.restart(LiveTuning.label(), System.currentTimeMillis());
@@ -9742,7 +10188,7 @@ public class TurzxMonitorMain {
                 }
             }), u.lp(-2, 50));
             u.add(bc, bHead, u.lp(-1, -2));
-            Object bench = val(u, "pf.bench", 18f, C_TEXT2, false);
+            Object bench = val(u, "pf.bench", 18f, pal.text2, false);
             u.setLineSpacing.invoke(bench, 0f, 1.1f);
             u.add(bc, bench, u.m(u.lp(-1, -2), 0, 10, 0, 0));
             u.add(right, bc, u.lpw(-1, 0, 1f));
@@ -9751,10 +10197,10 @@ public class TurzxMonitorMain {
             Object rRow = u.ll(false);
             u.gravity(rRow, 16);
             Object rCol = u.ll(true);
-            u.add(rCol, u.text("패널 RST 테스트", 20f, C_ACCENT, true), u.lp(-1, -2));
-            u.add(rCol, val(u, "pf.rst", 17f, C_MUTED, false), u.lp(-1, -2));
+            u.add(rCol, u.text("패널 RST 테스트", 20f, pal.accent, true), u.lp(-1, -2));
+            u.add(rCol, val(u, "pf.rst", 17f, pal.muted, false), u.lp(-1, -2));
             u.add(rRow, rCol, u.lpw(0, -2, 1f));
-            u.add(rRow, button(u, "테스트 실행", 19f, 0xFF1F1806, 0xFFD9A441, 0xFFFDE68A, false, new Runnable() {
+            u.add(rRow, button(u, "테스트 실행", 19f, pal.rstBg, pal.rstBdr, pal.rstTxt, false, new Runnable() {
                 @Override
                 public void run() {
                     // v1.4.4: panel JPEG restart-marker (DRI/RST) support test, A/B/C 6s each on the panel
@@ -9769,28 +10215,31 @@ public class TurzxMonitorMain {
         }
 
         private static void addStatusRow(Ui u, Object parent, String title, String key, boolean divider) throws Exception {
+            DashPalette pal = activePalette;
             Object r = u.ll(false);
             u.gravity(r, 16);
             u.add(r, dot(u, key + ".dot"), u.lp(14, 14));
             Object c = u.ll(true);
-            u.add(c, u.text(title, 20f, C_TEXT, false), u.lp(-1, -2));
-            Object sub = val(u, key + ".sub", 16f, C_MUTED, false);
+            u.add(c, u.text(title, 20f, pal.text, false), u.lp(-1, -2));
+            Object sub = val(u, key + ".sub", 16f, pal.muted, false);
             u.single(sub);
             u.add(c, sub, u.lp(-1, -2));
             u.add(r, c, u.m(u.lpw(0, -2, 1f), 14, 0, 12, 0));
-            u.add(r, toned(u, key + ".st", 18f, C_TEXT2, false), u.lp(-2, -2));
+            u.add(r, toned(u, key + ".st", 18f, pal.text2, false), u.lp(-2, -2));
             u.add(parent, r, u.m(u.lp(-1, -2), 0, 12, 0, 12));
             if (divider) addDivider(u, parent, 0);
         }
 
         private static void addInfo(Ui u, Object parent, String title, String key, int topMargin) throws Exception {
-            u.add(parent, u.text(title, 17f, C_MUTED, false), u.m(u.lp(-1, -2), 0, topMargin, 0, 0));
-            Object tv = val(u, key, 19f, 0xFFE2E8F0, false);
+            DashPalette pal = activePalette;
+            u.add(parent, u.text(title, 17f, pal.muted, false), u.m(u.lp(-1, -2), 0, topMargin, 0, 0));
+            Object tv = val(u, key, 19f, pal.infoText, false);
             u.setLineSpacing.invoke(tv, 0f, 1.08f);
             u.add(parent, tv, u.m(u.lp(-1, -2), 0, 2, 0, 0));
         }
 
         private static Object buildSystemTab(Ui u) throws Exception {
+            DashPalette pal = activePalette;
             Object row = u.ll(false);
 
             Object conn = card(u, "연결 상태");
@@ -9804,19 +10253,19 @@ public class TurzxMonitorMain {
             Object up = card(u, "업데이트");
             Object verRow = u.ll(false);
             u.gravity(verRow, 80);
-            u.add(verRow, val(u, "sy.ver", 44f, C_TEXT, true), u.lp(-2, -2));
-            u.add(verRow, toned(u, "sy.ota", 18f, C_TEXT2, false), u.m(u.lpw(0, -2, 1f), 14, 0, 0, 8));
+            u.add(verRow, val(u, "sy.ver", 44f, pal.text, true), u.lp(-2, -2));
+            u.add(verRow, toned(u, "sy.ota", 18f, pal.text2, false), u.m(u.lpw(0, -2, 1f), 14, 0, 0, 8));
             u.add(up, verRow, u.m(u.lp(-1, -2), 0, 6, 0, 0));
-            u.add(up, u.text("GitHub에서 새 버전을 확인합니다 · 위의 [업데이트]로 바로 확인", 17f, C_MUTED, false),
+            u.add(up, u.text("GitHub에서 새 버전을 확인합니다 · 위의 [업데이트]로 바로 확인", 17f, pal.muted, false),
                     u.m(u.lp(-1, -2), 0, 4, 0, 0));
             addSpacer(u, up, true);
             addSwitchRow(u, up, "자동 업데이트", ROW_AUTO_UPDATE);
             u.add(mid, up, u.lpw(-1, 0, 1f));
             Object lg = card(u, "로그");
-            Object logTv = val(u, "sy.log", 17f, C_TEXT2, false);
+            Object logTv = val(u, "sy.log", 17f, pal.text2, false);
             u.single(logTv);
             u.add(lg, logTv, u.m(u.lp(-1, -2), 0, 6, 0, 0));
-            u.add(lg, u.text("USB 메모리를 꽂고 위의 [로그 저장]을 누르세요", 17f, C_MUTED, false), u.lp(-1, -2));
+            u.add(lg, u.text("USB 메모리를 꽂고 위의 [로그 저장]을 누르세요", 17f, pal.muted, false), u.lp(-1, -2));
             u.add(mid, lg, u.m(u.lp(-1, -2), 0, 14, 0, 0));
             u.add(row, mid, u.m(u.lpw(0, -1, 1f), 14, 0, 0, 0));
 
@@ -9831,11 +10280,12 @@ public class TurzxMonitorMain {
         }
 
         private static Object buildHeader(Ui u) throws Exception {
+            DashPalette pal = activePalette;
             Object header = u.ll(false);
             u.gravity(header, 16);
             Object titleCol = u.ll(true);
-            u.add(titleCol, u.text("TURZX HUD", 30f, C_TEXT, true), u.lp(-2, -2));
-            Object sub = u.text("", 17f, C_MUTED, false);
+            u.add(titleCol, u.text("TURZX HUD", 30f, pal.text, true), u.lp(-2, -2));
+            Object sub = u.text("", 17f, pal.muted, false);
             u.single(sub);
             u.add(titleCol, sub, u.lp(-1, -2));
             subtitleTv = sub;
@@ -9844,10 +10294,10 @@ public class TurzxMonitorMain {
 
             Object tabs = u.ll(false);
             u.pad(tabs, 6, 6, 6, 6);
-            u.bg(tabs, u.gd(C_CARD, 16f, 2, C_LINE));
+            u.bg(tabs, u.gd(pal.card, 16f, 2, pal.line));
             for (int i = 0; i < TAB_TITLES.length; i++) {
                 final int t = i;
-                Object tb = u.text(TAB_TITLES[i], 22f, C_TEXT2, false);
+                Object tb = u.text(TAB_TITLES[i], 22f, pal.text2, false);
                 u.setTvGravity.invoke(tb, 17);
                 Object g = u.gd(0x00000000, 11f, 0, 0);
                 u.bg(tb, g);
@@ -9863,19 +10313,19 @@ public class TurzxMonitorMain {
             }
             u.add(header, tabs, u.m(u.lpw(0, -2, 1f), 16, 0, 24, 0));
 
-            u.add(header, button(u, "업데이트", 20f, 0xFF0B1A24, 0xFF0284C7, 0xFFE0F2FE, false, new Runnable() {
+            u.add(header, button(u, "업데이트", 20f, pal.otaBg, pal.otaBdr, pal.otaTxt, false, new Runnable() {
                 @Override
                 public void run() {
                     OtaUpdateManager.triggerManualOta(installDir, false);
                 }
             }), u.lp(-2, 56));
-            u.add(header, button(u, "로그 저장", 20f, 0xFF0B1A1A, 0xFF0D9488, 0xFFCCFBF1, false, new Runnable() {
+            u.add(header, button(u, "로그 저장", 20f, pal.logBg, pal.logBdr, pal.logTxt, false, new Runnable() {
                 @Override
                 public void run() {
                     DebugManager.triggerAsyncDump(installDir);
                 }
             }), u.m(u.lp(-2, 56), 10, 0, 0, 0));
-            Object close = button(u, "✖", 24f, 0xFF111827, 0xFF475569, 0xFFE2E8F0, false, new Runnable() {
+            Object close = button(u, "✖", 24f, pal.btnBg, pal.btnBdr, pal.btnTxt, false, new Runnable() {
                 @Override
                 public void run() {
                     setEnabledAndShow(false);
@@ -9905,7 +10355,7 @@ public class TurzxMonitorMain {
                 u.add(pages, tabPages[i], u.lp(-1, -1));
             }
             u.add(root, pages, u.m(u.lpw(-1, 0, 1f), 0, 14, 0, 0));
-            Object foot = u.text("MAP 버튼 3초: 열기/닫기  ·  후진(R)·후방카메라·화면 꺼짐 시 자동 숨김", 17f, C_FAINT, false);
+            Object foot = u.text("MAP 버튼 3초: 열기/닫기  ·  후진(R)·후방카메라·화면 꺼짐 시 자동 숨김", 17f, activePalette.faint, false);
             u.add(root, foot, u.m(u.lp(-2, -2), 4, 8, 0, 0));
             applyTabState();
         }
@@ -9920,13 +10370,14 @@ public class TurzxMonitorMain {
         private static void applyTabState() {
             Ui u = ui;
             if (u == null) return;
+            DashPalette pal = activePalette;
             int cur = currentTab;
             for (int i = 0; i < TAB_TITLES.length; i++) {
                 try {
                     if (tabPages[i] != null) u.setVisibility.invoke(tabPages[i], i == cur ? 0 : 8);
-                    if (tabButtonGds[i] != null) u.gdSetColor.invoke(tabButtonGds[i], i == cur ? C_ACCENT : 0x00000000);
+                    if (tabButtonGds[i] != null) u.gdSetColor.invoke(tabButtonGds[i], i == cur ? pal.accent : 0x00000000);
                     if (tabButtons[i] != null) {
-                        u.setTextColor.invoke(tabButtons[i], i == cur ? C_ON_ACCENT : C_TEXT2);
+                        u.setTextColor.invoke(tabButtons[i], i == cur ? pal.onAccent : pal.text2);
                         u.viewCls.getMethod("invalidate").invoke(tabButtons[i]);
                     }
                 } catch (Throwable ignored) {
@@ -9957,6 +10408,7 @@ public class TurzxMonitorMain {
         private static void applyValues(DashValues v) throws Exception {
             Ui u = ui;
             if (u == null) return;
+            DashPalette pal = activePalette;
             for (Map.Entry<String, Object> e : valueTvs.entrySet()) {
                 String t = v.text.get(e.getKey());
                 if (t == null) continue;
@@ -10000,22 +10452,41 @@ public class TurzxMonitorMain {
                 boolean sel = tuningValue(((Integer) s[2]).intValue()) == ((Integer) s[3]).intValue();
                 if (s[4] != null && ((Boolean) s[4]).booleanValue() == sel) continue;
                 s[4] = Boolean.valueOf(sel);
-                u.gdSetColor.invoke(s[1], sel ? C_ACCENT : 0x00000000);
-                u.setTextColor.invoke(s[0], sel ? C_ON_ACCENT : C_TEXT2);
+                u.gdSetColor.invoke(s[1], sel ? pal.accent : 0x00000000);
+                u.setTextColor.invoke(s[0], sel ? pal.onAccent : pal.text2);
                 u.viewCls.getMethod("invalidate").invoke(s[0]);
             }
             for (Object[] s : switchViews) {
                 boolean on = tuningValue(((Integer) s[3]).intValue()) != 0;
                 if (s[4] != null && ((Boolean) s[4]).booleanValue() == on) continue;
                 s[4] = Boolean.valueOf(on);
-                u.gdSetColor.invoke(s[1], on ? C_ACCENT : C_SWITCH_OFF);
-                u.gdSetColor.invoke(s[2], on ? C_ON_ACCENT : C_KNOB_OFF);
+                u.gdSetColor.invoke(s[1], on ? pal.accent : pal.switchOff);
+                u.gdSetColor.invoke(s[2], on ? pal.onAccent : pal.knobOff);
                 u.gravity(s[0], on ? 21 : 19); // RIGHT|CENTER_VERTICAL : LEFT|CENTER_VERTICAL
                 u.viewCls.getMethod("invalidate").invoke(s[0]);
             }
         }
 
+        private static void rebuildDashboardForThemeOnUiThread() {
+            themeRebuildQueued = false;
+            if (!wantVisible || rootView == null || ui == null) return;
+            boolean light = LampProbe.isLightTheme(LiveTuning.hudThemeMode);
+            if (light == activeLightTheme) return;
+            try {
+                activeLightTheme = light;
+                activePalette = paletteFor(light);
+                ui.removeAllViews.invoke(rootView);
+                ui.bg(rootView, ui.gd(activePalette.bg, 0f, 0, 0));
+                buildDashboard(ui, rootView);
+                DebugManager.logEvent("OVERLAY", "Dashboard theme switched to " + (light ? "light" : "dark"));
+                refreshOnUiThread();
+            } catch (Throwable t) {
+                DebugManager.logError("OVERLAY", "rebuildDashboardForThemeOnUiThread", t);
+            }
+        }
+
         private static void hideOnUiThread() {
+            themeRebuildQueued = false;
             Object h = uiHandler;
             if (h != null) {
                 try {
@@ -10084,6 +10555,16 @@ public class TurzxMonitorMain {
                     DebugManager.logEvent("OVERLAY", show ? "Dashboard visible again" : ("Dashboard auto-hidden: " + hiddenWhy));
                 }
                 if (show) {
+                    boolean wantLight = LampProbe.isLightTheme(LiveTuning.hudThemeMode);
+                    if (wantLight != activeLightTheme && !themeRebuildQueued) {
+                        themeRebuildQueued = true;
+                        postToUi(new Runnable() {
+                            @Override
+                            public void run() {
+                                rebuildDashboardForThemeOnUiThread();
+                            }
+                        });
+                    }
                     long now = System.currentTimeMillis();
                     String extra = "";
                     if (now < bannerUntilMs && bannerMsg != null && !bannerMsg.isEmpty()) {
@@ -10098,7 +10579,8 @@ public class TurzxMonitorMain {
                     lastSubtitle = lastSub[0];
 
                     FpsBench.tick(now);
-                    applyValues(buildDashboardValues(snap != null ? snap : new TelemetrySnapshot(), collectDashboardStats(), now));
+                    applyValues(buildDashboardValues(snap != null ? snap : new TelemetrySnapshot(),
+                            collectDashboardStats(), now, activeLightTheme));
                 }
             } catch (Throwable t) {
                 if (!refreshErrorLogged) { // once per open: a broken refresh would otherwise fail silently every 0.5s
@@ -10227,7 +10709,8 @@ public class TurzxMonitorMain {
         static String dashboardText(long nowMs) {
             double[] v = last;
             String head = "전조등 " + (headLampsOn() ? "ON" : "OFF") + " (" + headSource() + ")"
-                    + (bcmLampText.isEmpty() ? "" : " · BCM " + bcmLampText);
+                    + (bcmLampText.isEmpty() ? "" : " · BCM " + bcmLampText)
+                    + " · 테마 " + (isLightTheme(LiveTuning.hudThemeMode) ? "라이트" : "다크");
             String brake;
             if (commaFresh(nowMs)) {
                 brake = "제동등 " + (commaBrake ? "ON" : "OFF") + " (콤마" + (commaHold ? " · 오토홀드" : "") + ")";
@@ -10274,16 +10757,23 @@ public class TurzxMonitorMain {
             return commaBrake;
         }
 
-        // ---- v1.5.3: head-unit illumination (tail / head lamps on -> screens dim) ----
+        // ---- v1.5.3 / v1.5.15: head-unit illumination & day/night theme ----
+        // Verified from Gen5W services.odex / automotive-service.odex / DisplaySettings.odex:
+        //   ILLUMINATE_ON  (VideoSetupService/SystemService true)  -> UiModeManager.setNightMode(1=NO)  = DAY/Light (lamps OFF)
+        //   ILLUMINATE_OFF (VideoSetupService/SystemService false) -> UiModeManager.setNightMode(2=YES) = NIGHT/Dark (lamps ON)
         static final String ILLUM_ON = "com.hkmc.intent.action.SYSTEM_STATE_ILLUMINATE_ON";
         static final String ILLUM_OFF = "com.hkmc.intent.action.SYSTEM_STATE_ILLUMINATE_OFF";
         /**
-         * Illumination (tail lamps on -> screens dim): -1 unknown, 0 off, 1 on. Sources (system dump, v1.5.6):
-         * SystemService.onIlluminationStatus(status > 0) broadcasts ILLUMINATE_ON/OFF, and ISystemService
-         * (com.hkmc.micom.system).getAvTailStatus() returns the current state (polled: the broadcast only fires on change).
+         * Illumination: -1 unknown, 0 = ILLUMINATE_OFF (night/dimming/lamps ON), 1 = ILLUMINATE_ON (day/bright/lamps OFF).
+         * Sources: SystemService ILLUMINATE_ON/OFF broadcasts, IVideoSetupService.getIlluminateStatus(),
+         * and ISystemService.getAvTailStatus().
          */
         private static volatile int illum = -1;
         private static volatile String illumSrc = "";
+        /** Headunit UI night mode from IUiModeManager: -1 unknown, 0 day/light (NO=1), 1 night/dark (YES=2). */
+        private static volatile int uiNightMode = -1;
+        private static volatile int uiNightRaw = -1;
+        private static volatile boolean videoSetupSeen = false;
         /**
          * Head lamp state from the BCM lamp packet: IBCMListener.onLampStatusChanged(a, b, c, d) carries the micom lamp
          * bytes (BCMService.callOnLampStatus); BCMManager splits them into external/internal tail, head, front/rear fog
@@ -10330,6 +10820,12 @@ public class TurzxMonitorMain {
         private static Class<?> bcmEpbFor = null;
         private static Class<?> sysResolvedFor = null;
         private static long lastSysPollMs = 0L;
+        private static Method mVideoIllum = null;
+        private static Class<?> videoResolvedFor = null;
+        private static long lastVideoPollMs = 0L;
+        private static Method mUiGetNight = null, mUiGetNightAuto = null;
+        private static Class<?> uiResolvedFor = null;
+        private static long lastUiModePollMs = 0L;
 
         /** Telemetry thread: ISystemService getAvTailStatus() / getParkingBrakeStatus() (synchronous, cached by SystemService). */
         static void pollSystem(Object sys, long nowMs) {
@@ -10345,7 +10841,7 @@ public class TurzxMonitorMain {
                         + " getEPBStatus=" + (mSysEpb != null));
             }
             try {
-                if (mAvTail != null) {
+                if (!videoSetupSeen && mAvTail != null) {
                     Object r = mAvTail.invoke(sys);
                     if (r instanceof Boolean) setIllum(((Boolean) r).booleanValue() ? 1 : 0, "미등");
                 }
@@ -10365,6 +10861,86 @@ public class TurzxMonitorMain {
                 }
             } catch (Throwable ignored) {
             }
+        }
+
+        /** Telemetry thread: IVideoSetupService.getIlluminateStatus() (reflects 2-way light sensor + auto dimming). */
+        static void pollVideoSetup(Object vs, long nowMs) {
+            if (vs == null || nowMs - lastVideoPollMs < 500L) return;
+            lastVideoPollMs = nowMs;
+            Class<?> sc = vs.getClass();
+            if (videoResolvedFor != sc) {
+                try { mVideoIllum = sc.getMethod("getIlluminateStatus"); } catch (Throwable t) { mVideoIllum = null; }
+                videoResolvedFor = sc;
+                DebugManager.logEvent("LAMP", "IVideoSetupService getIlluminateStatus=" + (mVideoIllum != null));
+            }
+            try {
+                if (mVideoIllum != null) {
+                    Object r = mVideoIllum.invoke(vs);
+                    if (r instanceof Boolean) {
+                        videoSetupSeen = true;
+                        setIllum(((Boolean) r).booleanValue() ? 1 : 0, "조도");
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        /** Telemetry thread: Android UiModeManager.getNightMode() / getNightModeAuto() (0=AUTO, 1=NO/Light, 2=YES/Dark). */
+        static void pollUiMode(Object um, long nowMs) {
+            if (um == null || nowMs - lastUiModePollMs < 500L) return;
+            lastUiModePollMs = nowMs;
+            Class<?> sc = um.getClass();
+            if (uiResolvedFor != sc) {
+                try { mUiGetNight = sc.getMethod("getNightMode"); } catch (Throwable t) { mUiGetNight = null; }
+                try { mUiGetNightAuto = sc.getMethod("getNightModeAuto"); } catch (Throwable t) { mUiGetNightAuto = null; }
+                uiResolvedFor = sc;
+                DebugManager.logEvent("LAMP", "IUiModeManager getNightMode=" + (mUiGetNight != null)
+                        + " getNightModeAuto=" + (mUiGetNightAuto != null));
+            }
+            try {
+                if (mUiGetNight != null) {
+                    Object r = mUiGetNight.invoke(um);
+                    if (r instanceof Number) {
+                        int raw = ((Number) r).intValue();
+                        int night = -1;
+                        if (raw == 1) night = 0;       // MODE_NIGHT_NO (Light)
+                        else if (raw == 2) night = 1;  // MODE_NIGHT_YES (Dark)
+                        else if (raw == 0 && mUiGetNightAuto != null) {
+                            Object ra = mUiGetNightAuto.invoke(um);
+                            if (ra instanceof Number) {
+                                int a = ((Number) ra).intValue();
+                                if (a == 1) night = 0;
+                                else if (a == 2) night = 1;
+                            }
+                        }
+                        if (night != uiNightMode || raw != uiNightRaw) {
+                            DebugManager.logEvent("LAMP", "UiMode "
+                                    + (night == 0 ? "LIGHT" : (night == 1 ? "DARK" : "UNKNOWN"))
+                                    + " (raw=" + raw + ")");
+                            uiNightMode = night;
+                            uiNightRaw = raw;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        static void setUiNightForTest(int night, int raw) {
+            uiNightMode = night;
+            uiNightRaw = raw;
+        }
+
+        static int getUiNightMode() {
+            return uiNightMode;
+        }
+
+        static int getUiNightRaw() {
+            return uiNightRaw;
+        }
+
+        static int getIllumRaw() {
+            return illum;
         }
 
         /** Telemetry thread: every lamp / illumination getter of IBCMService (no-arg, or one int arg 0..3), ~1 Hz. */
@@ -10431,14 +11007,36 @@ public class TurzxMonitorMain {
 
         /**
          * Head lamps on? The BCM lamp packet's head byte when one has arrived (low or high beam), otherwise the
-         * illumination state (tail lamps / dimming). getAFLS11/CGW5/CGWCP6_HeadLampStatus are CAN lamp fault/diagnostic
-         * signals passed through tm_hscan (they read 3 regardless), so they are not used.
+         * Gen5W illumination state: ILLUMINATE_OFF (0, dimming/night) = head lamps ON, ILLUMINATE_ON (1, day/bright) = OFF.
+         * getAFLS11/CGW5/CGWCP6_HeadLampStatus are CAN lamp fault/diagnostic signals passed through tm_hscan, so ignored.
          */
         static boolean headLampsOn() {
             int h = bcmHead;
             if (h > 0 || (bcmHeadLive && h == 0)) return h > 0;
+            if (illum >= 0) return illum == 0;
+            return false;
+        }
+
+        /** Resolved HUD light/dark theme for HUD rendering: true = Light Mode, false = Dark Mode. */
+        static boolean isLightTheme(int themeMode) {
+            if (themeMode == THEME_LIGHT) return true;
+            if (themeMode == THEME_DARK) return false;
+            if (uiNightMode == 0) return true;
             if (illum >= 0) return illum == 1;
             return false;
+        }
+
+        static String themeSource() {
+            if (LiveTuning.hudThemeMode == THEME_LIGHT) return "고정(라이트)";
+            if (LiveTuning.hudThemeMode == THEME_DARK) return "고정(다크)";
+            if (uiNightMode == 0) return "헤드유닛(라이트)";
+            if (illum >= 0) {
+                return (illum == 1)
+                        ? (videoSetupSeen ? "조도(라이트)" : "미등(라이트)")
+                        : (videoSetupSeen ? "조도(다크)" : "미등(다크)");
+            }
+            if (uiNightMode == 1) return "헤드유닛(다크)";
+            return "기본(다크)";
         }
 
         /** High beam: only the BCM lamp packet knows it (head byte 2 = LAMP_HEAD_HIGH). */
@@ -10474,6 +11072,9 @@ public class TurzxMonitorMain {
             lastLoggedCommaBrake = false;
             illum = -1;
             illumSrc = "";
+            uiNightMode = -1;
+            uiNightRaw = -1;
+            videoSetupSeen = false;
             bcmHead = -1;
             bcmHeadLive = false;
             bcmLampText = "";
@@ -10778,7 +11379,7 @@ public class TurzxMonitorMain {
         static final int[] TARGET_FPS_STEPS = new int[]{5, 8, 10, 12, 15, 20, 25};
         static final int[] PANEL_FPS_STEPS = new int[]{0, 10, 15, 20, 25, 30};
         static final int[] POLL_MS_STEPS = new int[]{100, 150, 200, 300, 500, 1000};
-        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기", "부분 인코딩", "렌더 방식", "디자인", "화면 회전", "차종 모드"};
+        static final String[] ROW_LABELS = new String[]{"JPEG 품질", "목표 FPS", "패널 FPS (0x0F)", "ADAS 도로", "수집 주기", "부분 인코딩", "렌더 방식", "디자인", "화면 회전", "차종 모드", "화면 테마"};
 
         static volatile int jpegQuality = 75;
         static volatile int targetFps = 15;
@@ -10794,6 +11395,8 @@ public class TurzxMonitorMain {
         static volatile boolean rotate180 = false;
         /** v1.5.13: 0=auto, 1=EV, 2=ICE. */
         static volatile int powertrainMode = POWERTRAIN_AUTO;
+        /** v1.5.15: 0=auto, 1=dark, 2=light. */
+        static volatile int hudThemeMode = THEME_AUTO;
         /** Set when panelFps changed: the sender thread pushes CMD 0x0F to the connected panel. */
         static volatile boolean panelFpsDirty = false;
 
@@ -10809,6 +11412,8 @@ public class TurzxMonitorMain {
             rotate180 = c.usbRotation == 90;
             powertrainMode = (c.powertrainMode == POWERTRAIN_EV || c.powertrainMode == POWERTRAIN_ICE)
                     ? c.powertrainMode : POWERTRAIN_AUTO;
+            hudThemeMode = (c.hudThemeMode == THEME_DARK || c.hudThemeMode == THEME_LIGHT)
+                    ? c.hudThemeMode : THEME_AUTO;
         }
 
         static void saveTo(MonitorConfig c) {
@@ -10822,6 +11427,7 @@ public class TurzxMonitorMain {
             c.hudDesignTesla = teslaDesign;
             c.usbRotation = rotate180 ? 90 : 270;
             c.powertrainMode = powertrainMode;
+            c.hudThemeMode = hudThemeMode;
         }
 
         /** Portrait rotation handed to the encoder (270 = normal, 90 = picture turned 180 degrees). */
@@ -10863,21 +11469,26 @@ public class TurzxMonitorMain {
                     return teslaDesign ? "신규" : "기존";
                 case 8:
                     return rotate180 ? "180°" : "기본";
-                default:
+                case 9:
                     return powertrainMode == POWERTRAIN_EV ? "EV" : (powertrainMode == POWERTRAIN_ICE ? "내연차" : "자동");
+                default:
+                    return hudThemeMode == THEME_DARK ? "다크" : (hudThemeMode == THEME_LIGHT ? "라이트" : "자동");
             }
         }
 
         static String label() {
             String ptSfx = powertrainMode == POWERTRAIN_EV ? " · EV"
                     : (powertrainMode == POWERTRAIN_ICE ? " · 내연차" : "");
+            String thSfx = hudThemeMode == THEME_DARK ? " · 다크"
+                    : (hudThemeMode == THEME_LIGHT ? " · 라이트" : "");
             return "q" + jpegQuality + " · " + targetFps + "fps · 패널" + (panelFps > 0 ? String.valueOf(panelFps) : "끔")
                     + " · 도로" + (roadEnabled ? "ON" : "OFF") + " · 수집" + pollMs
                     + " · 부분" + (incrementalEncode ? "ON" : "OFF")
                     + " · " + (parallelPipeline ? "멀티코어" : "싱글코어")
                     + " · " + (teslaDesign ? "신규" : "기존")
                     + (rotate180 ? " · 180°" : "")
-                    + ptSfx;
+                    + ptSfx
+                    + thSfx;
         }
 
         /** Panel [－]/[＋] handler: applies immediately and restarts the measurement for the new combination. */
@@ -10915,14 +11526,17 @@ public class TurzxMonitorMain {
                 case 8:
                     rotate180 = !rotate180;
                     break;
-                default:
+                case 9:
                     powertrainMode = (powertrainMode + (dir >= 0 ? 1 : 2)) % 3;
+                    break;
+                default:
+                    hudThemeMode = (hudThemeMode + (dir >= 0 ? 1 : 2)) % 3;
                     break;
             }
             FpsBench.restart(label(), System.currentTimeMillis());
         }
 
-        /** Row value as the dashboard controls compare it (booleans 1/0, powertrain 0/1/2). */
+        /** Row value as the dashboard controls compare it (booleans 1/0, powertrain/theme 0/1/2). */
         static int currentValue(int row) {
             switch (row) {
                 case 0:
@@ -10943,8 +11557,10 @@ public class TurzxMonitorMain {
                     return teslaDesign ? 1 : 0;
                 case 8:
                     return rotate180 ? 1 : 0;
-                default:
+                case 9:
                     return powertrainMode;
+                default:
+                    return hudThemeMode;
             }
         }
 
@@ -10983,8 +11599,11 @@ public class TurzxMonitorMain {
                 case 8:
                     rotate180 = value != 0;
                     break;
-                default:
+                case 9:
                     powertrainMode = (value == POWERTRAIN_EV || value == POWERTRAIN_ICE) ? value : POWERTRAIN_AUTO;
+                    break;
+                default:
+                    hudThemeMode = (value == THEME_DARK || value == THEME_LIGHT) ? value : THEME_AUTO;
                     break;
             }
             FpsBench.restart(label(), System.currentTimeMillis());
@@ -10993,6 +11612,7 @@ public class TurzxMonitorMain {
         /** true when a running value differs from what monitor.conf holds (same normalisation as loadFrom). */
         static boolean differsFrom(MonitorConfig c) {
             int pt = (c.powertrainMode == POWERTRAIN_EV || c.powertrainMode == POWERTRAIN_ICE) ? c.powertrainMode : POWERTRAIN_AUTO;
+            int th = (c.hudThemeMode == THEME_DARK || c.hudThemeMode == THEME_LIGHT) ? c.hudThemeMode : THEME_AUTO;
             return jpegQuality != Math.max(50, Math.min(95, c.usbJpegQuality))
                     || targetFps != Math.max(2, Math.min(25, c.usbFps))
                     || panelFps != Math.max(0, Math.min(60, c.usbPanelFps))
@@ -11002,7 +11622,8 @@ public class TurzxMonitorMain {
                     || parallelPipeline != c.renderParallel
                     || teslaDesign != c.hudDesignTesla
                     || rotate180 != (c.usbRotation == 90)
-                    || powertrainMode != pt;
+                    || powertrainMode != pt
+                    || hudThemeMode != th;
         }
     }
 
@@ -11788,6 +12409,7 @@ public class TurzxMonitorMain {
                         .append(", render_parallel=").append(cfg.renderParallel)
                         .append(", hud_design=").append(cfg.hudDesignTesla ? "tesla" : "classic")
                         .append(", powertrain_mode=").append(cfg.powertrainMode == POWERTRAIN_EV ? "ev" : (cfg.powertrainMode == POWERTRAIN_ICE ? "ice" : "auto"))
+                        .append(", hud_theme=").append(cfg.hudThemeMode == THEME_DARK ? "dark" : (cfg.hudThemeMode == THEME_LIGHT ? "light" : "auto"))
                         .append(", telemetry_poll_ms=").append(cfg.telemetryPollMs)
                         .append(", comma_ip=").append(cfg.commaIp)
                         .append(", auto_update=").append(cfg.autoUpdate)
@@ -11821,6 +12443,12 @@ public class TurzxMonitorMain {
             sb.append("Recent Keys     : ").append(HotkeyWatcher.getRecentKeysText()).append("\n");
             sb.append("Live Tuning     : ").append(LiveTuning.label()).append("\n");
             sb.append("HUD Design      : ").append(LiveTuning.teslaDesign ? "tesla" : "classic")
+                    .append(" | theme=").append(LampProbe.isLightTheme(LiveTuning.hudThemeMode) ? "light" : "dark")
+                    .append(" (cfg=").append(LiveTuning.valueText(10))
+                    .append(", src=").append(LampProbe.themeSource())
+                    .append(", uiNight=").append(LampProbe.getUiNightMode())
+                    .append("/raw=").append(LampProbe.getUiNightRaw())
+                    .append(", illum=").append(LampProbe.getIllumRaw()).append(")")
                     .append(" | powertrain=").append(snap != null ? snap.powertrainLabel(LiveTuning.powertrainMode) : "ev")
                     .append(" (cfg=").append(LiveTuning.valueText(9))
                     .append(", engType=").append(snap != null ? snap.engineType : -1)
@@ -12714,6 +13342,252 @@ public class TurzxMonitorMain {
             }
             if (body.length > maxBytes) return null;
             return body;
+        }
+    }
+
+    // =========================================================================
+    // 4b. HMG-API APP-MENU SHORTCUT AUTO-REGISTRATION (OTA & DAEMON BOOT SYNC)
+    // =========================================================================
+    static final class HmgApiShortcutSync {
+        static final String MOD_ID = "hkg-turzxmonitor";
+        static final String SHORTCUT_PKG = "com.hkg.turzxmonitor.app";
+        private static final String MOD_ROOT = "/data/hmgapi/mods/" + MOD_ID;
+        private static final String LOG_PATH = RAMDISK_TMP_DIR + "/hkg_turzxmonitor_hmgapi.log";
+        private static final String STAGE_ROOT = RAMDISK_TMP_DIR + "/hkg_turzx_mod_stage";
+        static final String[] ASSET_NAMES = new String[]{
+                "hmgapi_mod.json", "hmgapi_open_ui.sh", "hmgapi_shortcut.apk",
+                "hmgapi_icon.png", "hmgapi_icon_night.png",
+                "hmgapi_icon_disabled.png", "hmgapi_icon_disabled_night.png"
+        };
+        static final String[] MOD_REL_PATHS = new String[]{
+                "mod.json", "bin/open-ui.sh", "HkgTurzxShortcut.apk",
+                "icon.png", "icon_night.png", "icon_disabled.png", "icon_disabled_night.png"
+        };
+
+        private static byte[][] loadBundledAssets() {
+            byte[][] out = new byte[ASSET_NAMES.length][];
+            for (int i = 0; i < ASSET_NAMES.length; i++) {
+                byte[] b = TurzxFrameRenderer.readJarAssetBytesPublic(ASSET_NAMES[i]);
+                if (b == null || b.length == 0) return null;
+                out[i] = b;
+            }
+            return out;
+        }
+
+        private static boolean hasLine(File f, String needle, boolean exactMatch) {
+            if (f == null || !f.isFile()) return false;
+            BufferedReader br = null;
+            try {
+                br = new BufferedReader(new InputStreamReader(new FileInputStream(f), UTF8));
+                String line;
+                while ((line = br.readLine()) != null) {
+                    String t = line.trim();
+                    if (exactMatch ? t.equals(needle) : t.startsWith(needle)) {
+                        return true;
+                    }
+                }
+            } catch (Throwable ignored) {
+            } finally {
+                if (br != null) {
+                    try {
+                        br.close();
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            return false;
+        }
+
+        /** Fast pure-Java check: true iff HMG-API mod files, signatures, and runtime registrations match bundled assets. */
+        static boolean isModUpToDate(File modDir, File appsTxt, File servicesTxt, File packagesList, byte[][] bundled) {
+            if (modDir == null || !modDir.isDirectory() || bundled == null || bundled.length != MOD_REL_PATHS.length) {
+                return false;
+            }
+            if (!new File(modDir, "META-HMGAPI/signature").isFile()
+                    || !new File(modDir, "META-HMGAPI/manifest.json").isFile()) {
+                return false;
+            }
+            for (int i = 0; i < MOD_REL_PATHS.length; i++) {
+                if (bundled[i] == null || bundled[i].length == 0) return false;
+                File f = new File(modDir, MOD_REL_PATHS[i]);
+                if (!f.isFile()) return false;
+                String expectedSha = sha256Hex(bundled[i]);
+                String actualSha = sha256File(f);
+                if (expectedSha.isEmpty() || !expectedSha.equalsIgnoreCase(actualSha)) {
+                    return false;
+                }
+            }
+            if (new File(modDir, ".disabled").isFile()) {
+                return true;
+            }
+            if (!hasLine(appsTxt, SHORTCUT_PKG + " " + MOD_ID, true)) return false;
+            if (!hasLine(servicesTxt, MOD_ID + " open-ui ", false)) return false;
+            if (packagesList != null && packagesList.isFile() && !hasLine(packagesList, SHORTCUT_PKG + " ", false)) {
+                return false;
+            }
+            return true;
+        }
+
+        private static void writeModTree(File dstDir, byte[][] bundled) throws Exception {
+            for (int i = 0; i < MOD_REL_PATHS.length; i++) {
+                File out = new File(dstDir, MOD_REL_PATHS[i]);
+                writeBytesNoSync(out, bundled[i]);
+                out.setReadable(true, false);
+                if (MOD_REL_PATHS[i].endsWith(".sh")) {
+                    out.setExecutable(true, false);
+                }
+            }
+        }
+
+        private static void deleteTree(File f) {
+            if (f == null || !f.exists()) return;
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (int i = 0; i < children.length; i++) {
+                    deleteTree(children[i]);
+                }
+            }
+            f.delete();
+        }
+
+        private static void waitForBootCompleted(long maxWaitMs) {
+            long deadline = System.currentTimeMillis() + maxWaitMs;
+            while (System.currentTimeMillis() < deadline) {
+                Process p = null;
+                BufferedReader br = null;
+                try {
+                    p = Runtime.getRuntime().exec(new String[]{"/system/bin/getprop", "sys.boot_completed"});
+                    br = new BufferedReader(new InputStreamReader(p.getInputStream(), UTF8));
+                    String line = br.readLine();
+                    try {
+                        p.waitFor();
+                    } catch (InterruptedException ignored) {
+                    }
+                    if (line != null && "1".equals(line.trim())) {
+                        return;
+                    }
+                } catch (Throwable ignored) {
+                } finally {
+                    if (br != null) {
+                        try {
+                            br.close();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    if (p != null) p.destroy();
+                }
+                try {
+                    Thread.sleep(2000L);
+                } catch (InterruptedException ignored) {
+                    return;
+                }
+            }
+        }
+
+        private static String buildSyncScript(String stageModPath) {
+            return "#!/system/bin/sh\n"
+                    + "export PATH=/data/nemesis/bin:/sbin:/vendor/bin:/system/sbin:/system/bin:/system/xbin\n"
+                    + "export LD_LIBRARY_PATH=/vendor/lib:/system/lib\n"
+                    + "export ANDROID_ROOT=/system\n"
+                    + "export ANDROID_DATA=/data\n"
+                    + "if [ -z \"$BOOTCLASSPATH\" ]; then\n"
+                    + "    export BOOTCLASSPATH=/system/framework/core.jar:/system/framework/conscrypt.jar:/system/framework/okhttp.jar:/system/framework/core-junit.jar:/system/framework/bouncycastle.jar:/system/framework/ext.jar:/system/framework/framework.jar:/system/framework/framework2.jar:/system/framework/telephony-common.jar:/system/framework/voip-common.jar:/system/framework/mms-common.jar:/system/framework/android.policy.jar:/system/framework/services.jar:/system/framework/apache-xml.jar:/system/framework/webviewchromium.jar:/system/framework/automotive.jar\n"
+                    + "fi\n"
+                    + "HMG_LOG=\"" + LOG_PATH + "\"\n"
+                    + "MOD_KEY_DIR=\"/data/hmgapi/local-keys\"\n"
+                    + "MOD_KEY=\"$MOD_KEY_DIR/" + MOD_ID + ".key\"\n"
+                    + "STAGE_MOD=\"" + stageModPath + "\"\n"
+                    + "echo \"=== hkg.turzxmonitor HMG-API OTA sync $(date 2>/dev/null) ===\" >> \"$HMG_LOG\" 2>/dev/null\n"
+                    + "if [ -x /system/bin/hmgapid ]; then\n"
+                    + "    /system/bin/hmgapid ping >/dev/null 2>&1 || /system/bin/hmgapid daemon </dev/null >>\"$HMG_LOG\" 2>&1 &\n"
+                    + "fi\n"
+                    + "mkdir -p \"$MOD_KEY_DIR\" 2>/dev/null\n"
+                    + "chmod 700 \"$MOD_KEY_DIR\" 2>/dev/null\n"
+                    + "if [ ! -s \"$MOD_KEY\" ]; then\n"
+                    + "    CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Signing keygen \"$MOD_KEY\" >>\"$HMG_LOG\" 2>&1\n"
+                    + "fi\n"
+                    + "CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Signing sign \"$STAGE_MOD\" \"$MOD_KEY\" >>\"$HMG_LOG\" 2>&1 || exit 2\n"
+                    + "case \"$(pm path " + SHORTCUT_PKG + " 2>/dev/null)\" in\n"
+                    + "    package:*)\n"
+                    + "        pm uninstall " + SHORTCUT_PKG + " >>\"$HMG_LOG\" 2>&1\n"
+                    + "        ;;\n"
+                    + "esac\n"
+                    + "if ! CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Engine install \"$STAGE_MOD\" --from-nemesis --force >>\"$HMG_LOG\" 2>&1; then\n"
+                    + "    CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Engine remove " + MOD_ID + " --from-nemesis >>\"$HMG_LOG\" 2>&1\n"
+                    + "    CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Engine install \"$STAGE_MOD\" --from-nemesis --force >>\"$HMG_LOG\" 2>&1 || exit 3\n"
+                    + "fi\n"
+                    + "if [ -x /system/bin/hmgapid ]; then\n"
+                    + "    /system/bin/hmgapid engine apply >>\"$HMG_LOG\" 2>&1 || exit 4\n"
+                    + "else\n"
+                    + "    CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Engine apps >>\"$HMG_LOG\" 2>&1\n"
+                    + "    CLASSPATH=/system/framework/hmgapi-hook.jar /system/bin/app_process /system/bin hmgapi.engine.Engine publish-state >>\"$HMG_LOG\" 2>&1\n"
+                    + "fi\n"
+                    + "exit 0\n";
+        }
+
+        static void startAsync(final String installDir) {
+            Thread t = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        if (!new File("/system/framework/hmgapi-hook.jar").isFile()
+                                || !new File("/data/hmgapi").isDirectory()) {
+                            return;
+                        }
+                        byte[][] bundled = loadBundledAssets();
+                        if (bundled == null) {
+                            DebugManager.logEvent("HMGAPI", "Skipped shortcut sync (missing bundled JAR assets)");
+                            return;
+                        }
+                        File modDir = new File(MOD_ROOT);
+                        File appsTxt = new File("/data/hmgapi/state/apps.txt");
+                        File servicesTxt = new File("/data/hmgapi/state/services.txt");
+                        File packagesList = new File("/data/system/packages.list");
+                        File installModDir = new File(installDir, "hmgapi_mod");
+                        if (isModUpToDate(modDir, appsTxt, servicesTxt, packagesList, bundled)) {
+                            if (!new File(installModDir, "HkgTurzxShortcut.apk").isFile()) {
+                                try {
+                                    writeModTree(installModDir, bundled);
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                            return;
+                        }
+
+                        waitForBootCompleted(30000L);
+                        try {
+                            writeModTree(installModDir, bundled);
+                        } catch (Throwable ignored) {
+                        }
+
+                        File stageRoot = new File(STAGE_ROOT);
+                        File stageMod = new File(stageRoot, MOD_ID);
+                        deleteTree(stageRoot);
+                        try {
+                            writeModTree(stageMod, bundled);
+                            File scriptFile = new File(stageRoot, "sync.sh");
+                            writeBytesNoSync(scriptFile, buildSyncScript(stageMod.getAbsolutePath()).getBytes(UTF8));
+                            scriptFile.setExecutable(true, false);
+
+                            Process p = Runtime.getRuntime().exec(new String[]{"/system/bin/sh", scriptFile.getAbsolutePath()});
+                            int rc = p.waitFor();
+                            boolean ok = (rc == 0) && isModUpToDate(modDir, appsTxt, servicesTxt, packagesList, bundled);
+                            DebugManager.logEvent("HMGAPI", "OTA shortcut sync rc=" + rc + " synced=" + ok
+                                    + " (see " + LOG_PATH + ")");
+                            if (ok && TurzxOverlayController.isDashboardVisible()) {
+                                TurzxOverlayController.showBannerMessage("✅ 앱 목록 바로가기(TURZX 모니터) 등록 완료 · 재부팅 후 표시", 6000L);
+                            }
+                        } finally {
+                            deleteTree(stageRoot);
+                        }
+                    } catch (Throwable t) {
+                        DebugManager.logError("HMGAPI", "sync", t);
+                    }
+                }
+            }, "TurzxHmgApiSync");
+            t.setDaemon(true);
+            t.setPriority(Thread.MIN_PRIORITY);
+            t.start();
         }
     }
 
@@ -13656,6 +14530,8 @@ public class TurzxMonitorMain {
         StringBuilder sb = new StringBuilder(1280);
         sb.append("{\"ok\":true,\"version\":\"").append(MONITOR_VERSION).append("\"");
         sb.append(",\"powertrain\":\"").append(ev.powertrainLabel(LiveTuning.powertrainMode)).append("\"");
+        sb.append(",\"theme\":\"").append(LampProbe.isLightTheme(LiveTuning.hudThemeMode) ? "light" : "dark").append("\"");
+        sb.append(",\"themeMode\":\"").append(LiveTuning.hudThemeMode == THEME_DARK ? "dark" : (LiveTuning.hudThemeMode == THEME_LIGHT ? "light" : "auto")).append("\"");
         sb.append(String.format(Locale.US, ",\"soc\":%.1f,\"bmsSoc\":%.1f,\"soh\":%.1f,\"remainKwh\":%.2f",
                 ev.getEffectiveSocPct(), ev.bmsSocPct, ev.sohPct, ev.remainEnergyKwh));
         sb.append(String.format(Locale.US, ",\"dteKm\":%d,\"dteOffDeltaKm\":%d,\"avgEcon\":%.1f",
@@ -15384,6 +16260,11 @@ public class TurzxMonitorMain {
                     else if ("ice".equalsIgnoreCase(v) || "2".equals(v)) cfg.powertrainMode = POWERTRAIN_ICE;
                     else cfg.powertrainMode = POWERTRAIN_AUTO;
                 }
+                else if ("hud_theme".equals(k)) {
+                    if ("dark".equalsIgnoreCase(v) || "1".equals(v)) cfg.hudThemeMode = THEME_DARK;
+                    else if ("light".equalsIgnoreCase(v) || "2".equals(v)) cfg.hudThemeMode = THEME_LIGHT;
+                    else cfg.hudThemeMode = THEME_AUTO;
+                }
                 else if ("telemetry_poll_ms".equals(k)) cfg.telemetryPollMs = Math.max(50, Math.min(2000, parseIntSafe(v, 100)));
                 else if ("comma_ip".equals(k)) cfg.commaIp = v;
                 else if ("auto_update".equals(k)) cfg.autoUpdate = !"0".equals(v) && !"false".equalsIgnoreCase(v);
@@ -15435,6 +16316,7 @@ public class TurzxMonitorMain {
                     + "render_parallel=" + (cfg.renderParallel ? 1 : 0) + "\n"
                     + "hud_design=" + (cfg.hudDesignTesla ? "tesla" : "classic") + "\n"
                     + "powertrain_mode=" + (cfg.powertrainMode == POWERTRAIN_EV ? "ev" : (cfg.powertrainMode == POWERTRAIN_ICE ? "ice" : "auto")) + "\n"
+                    + "hud_theme=" + (cfg.hudThemeMode == THEME_DARK ? "dark" : (cfg.hudThemeMode == THEME_LIGHT ? "light" : "auto")) + "\n"
                     + "telemetry_poll_ms=" + cfg.telemetryPollMs + "\n"
                     + "comma_ip=" + (cfg.commaIp != null ? cfg.commaIp : "") + "\n"
                     + "auto_update=" + (cfg.autoUpdate ? 1 : 0) + "\n"
@@ -16769,7 +17651,7 @@ public class TurzxMonitorMain {
             assertTrue(!LampProbe.update(lv, 1500L) && LampProbe.pressureLive(), "lamp: light pressure -> live, below pressed");
             lv[LampProbe.IDX_CYL] = 15.3;
             assertTrue(LampProbe.update(lv, 1750L) && LampProbe.pressure() > 15.0, "lamp: pedal press logged");
-            assertTrue(LampProbe.dashboardText(1750L).equals("전조등 OFF (신호 없음)\n제동등 브레이크압 · 압력 15.3"),
+            assertTrue(LampProbe.dashboardText(1750L).equals("전조등 OFF (신호 없음) · 테마 다크\n제동등 브레이크압 · 압력 15.3"),
                     "lamp: dashboard " + LampProbe.dashboardText(1750L));
             lv[1] = 0;
             assertTrue(LampProbe.update(lv, 2000L), "lamp: head status change logged");
@@ -16783,12 +17665,18 @@ public class TurzxMonitorMain {
             assertTrue(LampProbe.commaFresh(5500L) && !LampProbe.commaFresh(7000L) && LampProbe.commaBrake(), "lamp: comma freshness");
             assertTrue(LampProbe.dashboardText(5500L).endsWith("제동등 ON (콤마)"), "lamp: comma dashboard " + LampProbe.dashboardText(5500L));
             assertTrue(!LampProbe.headLampsOn(), "head: unknown -> off");
-            assertTrue(LampProbe.onIlluminateAction(LampProbe.ILLUM_ON) && LampProbe.headLampsOn(), "head: broadcast on");
-            assertTrue(LampProbe.onIlluminateAction(LampProbe.ILLUM_OFF) && !LampProbe.headLampsOn()
-                    && "방송".equals(LampProbe.headSource()), "head: broadcast off");
+            assertTrue(LampProbe.onIlluminateAction(LampProbe.ILLUM_OFF) && LampProbe.headLampsOn()
+                    && !LampProbe.isLightTheme(THEME_AUTO), "head: broadcast ILLUM_OFF -> lamps ON / Dark mode");
+            assertTrue(LampProbe.onIlluminateAction(LampProbe.ILLUM_ON) && !LampProbe.headLampsOn()
+                    && LampProbe.isLightTheme(THEME_AUTO) && "방송".equals(LampProbe.headSource()),
+                    "head: broadcast ILLUM_ON -> lamps OFF / Light mode");
             assertTrue(!LampProbe.onIlluminateAction("com.hkmc.audio.btaudio.widgetupdate"), "head: other actions pass through");
             LampProbe.setIllum(1, "미등");
-            assertTrue(LampProbe.headLampsOn() && !LampProbe.highBeamOn() && "미등".equals(LampProbe.headSource()), "head: tail status");
+            assertTrue(!LampProbe.headLampsOn() && LampProbe.isLightTheme(THEME_AUTO)
+                    && "미등".equals(LampProbe.headSource()), "head: tail status on (day) -> lamps OFF / Light mode");
+            LampProbe.setIllum(0, "미등");
+            assertTrue(LampProbe.headLampsOn() && !LampProbe.highBeamOn() && "미등".equals(LampProbe.headSource())
+                    && !LampProbe.isLightTheme(THEME_AUTO), "head: tail status off (night) -> lamps ON / Dark mode");
             // BCM lamp packet: b = head (0 off / 1 low / 2 high) wins over the illumination
             LampProbe.onBcmLamp(0, 0, 0, 0);
             assertTrue(LampProbe.headLampsOn() && "미등".equals(LampProbe.headSource()), "head: start-up BCM 0 does not override the tail lamps");
@@ -16885,8 +17773,9 @@ public class TurzxMonitorMain {
             assertTrue(LiveTuning.rotate180, "rotate: roundtrip");
             rcf.delete();
             LiveTuning.loadFrom(new MonitorConfig());
-            assertTrue(LiveTuning.ROW_LABELS.length == 10 && "화면 회전".equals(LiveTuning.ROW_LABELS[8])
-                    && "차종 모드".equals(LiveTuning.ROW_LABELS[9]), "rotate/pt: row labels");
+            assertTrue(LiveTuning.ROW_LABELS.length == 11 && "화면 회전".equals(LiveTuning.ROW_LABELS[8])
+                    && "차종 모드".equals(LiveTuning.ROW_LABELS[9]) && "화면 테마".equals(LiveTuning.ROW_LABELS[10]),
+                    "rotate/pt/theme: row labels");
             // v1.5.4: Navdy car sprites + radarState neighbour leads
             byte[] nmRaw = TurzxFrameRenderer.readJarAssetBytesPublic("navdy_meta.txt");
             TurzxFrameRenderer.TeslaHud.NavMeta nm = TurzxFrameRenderer.TeslaHud.parseNavMeta(nmRaw != null ? new String(nmRaw, UTF8) : null);
@@ -17122,10 +18011,189 @@ public class TurzxMonitorMain {
                     && "90°C".equals(iceVals.t("m2.v")), "ice dashboard values: " + iceVals.text);
             String iceJson = formatTelemetryJson(ka4);
             assertTrue(iceJson.contains("\"powertrain\":\"ice\"") && iceJson.contains("\"rpm\":1950")
-                    && iceJson.contains("\"fuelPct\":42"), "ice json: " + iceJson);
+                    && iceJson.contains("\"fuelPct\":42") && iceJson.contains("\"theme\":\"")
+                    && iceJson.contains("\"themeMode\":\""), "ice json: " + iceJson);
+
+            // v1.5.15: Gen5W Dark/Light Mode resolution + config/LiveTuning + TeslaHud Light LUT
+            LampProbe.resetForTest();
+            assertTrue(!LampProbe.isLightTheme(THEME_AUTO) && !LampProbe.isLightTheme(THEME_DARK)
+                    && LampProbe.isLightTheme(THEME_LIGHT), "theme: unknown auto=dark, overrides work");
+            LampProbe.setIllum(1, "조도");
+            assertTrue(LampProbe.isLightTheme(THEME_AUTO) && !LampProbe.headLampsOn(), "theme: illum=1 -> Light & lamps OFF");
+            LampProbe.setIllum(0, "조도");
+            assertTrue(!LampProbe.isLightTheme(THEME_AUTO) && LampProbe.headLampsOn(), "theme: illum=0 -> Dark & lamps ON");
+            LampProbe.setUiNightForTest(0, 1);
+            assertTrue(LampProbe.isLightTheme(THEME_AUTO), "theme: uiNight=0 (MODE_NIGHT_NO) -> Light even if illum=0");
+            LampProbe.setUiNightForTest(1, 2);
+            LampProbe.setIllum(1, "조도");
+            assertTrue(LampProbe.isLightTheme(THEME_AUTO), "theme: USE_NIGHT_ONLY (uiNight=1 + illum=1) -> Light");
+            LampProbe.setIllum(0, "조도");
+            assertTrue(!LampProbe.isLightTheme(THEME_AUTO), "theme: night (uiNight=1 + illum=0) -> Dark");
+            assertTrue(!LampProbe.isLightTheme(THEME_DARK) && LampProbe.isLightTheme(THEME_LIGHT), "theme: manual overrides win");
+            LampProbe.resetForTest();
+
+            MonitorConfig thCfg = new MonitorConfig();
+            assertTrue(thCfg.hudThemeMode == THEME_AUTO, "theme cfg: default auto");
+            File thFile = File.createTempFile("turzx_cfg_theme", ".conf");
+            thFile.deleteOnExit();
+            thFile.delete();
+            thCfg.hudThemeMode = THEME_LIGHT;
+            saveMonitorConfig(thFile, thCfg);
+            assertTrue(loadMonitorConfig(thFile).hudThemeMode == THEME_LIGHT, "theme cfg: light roundtrip");
+            thCfg.hudThemeMode = THEME_DARK;
+            thFile.delete();
+            saveMonitorConfig(thFile, thCfg);
+            assertTrue(loadMonitorConfig(thFile).hudThemeMode == THEME_DARK, "theme cfg: dark roundtrip");
+            thFile.delete();
+
             LiveTuning.loadFrom(new MonitorConfig());
+            assertTrue(LiveTuning.hudThemeMode == THEME_AUTO && "자동".equals(LiveTuning.valueText(10)), "theme tuning: default auto");
+            LiveTuning.adjust(10, +1);
+            assertTrue(LiveTuning.hudThemeMode == THEME_DARK && "다크".equals(LiveTuning.valueText(10))
+                    && LiveTuning.label().endsWith(" · 다크"), "theme tuning: auto -> dark");
+            LiveTuning.adjust(10, +1);
+            assertTrue(LiveTuning.hudThemeMode == THEME_LIGHT && "라이트".equals(LiveTuning.valueText(10))
+                    && LiveTuning.label().endsWith(" · 라이트"), "theme tuning: dark -> light");
+            LiveTuning.adjust(10, +1);
+            assertTrue(LiveTuning.hudThemeMode == THEME_AUTO && "자동".equals(LiveTuning.valueText(10)), "theme tuning: wraps to auto");
+            LiveTuning.select(10, THEME_LIGHT);
+            assertTrue(LiveTuning.hudThemeMode == THEME_LIGHT && LiveTuning.differsFrom(new MonitorConfig()),
+                    "theme tuning: select applies & differs");
+            LiveTuning.select(9, POWERTRAIN_EV);
+            assertTrue(LiveTuning.powertrainMode == POWERTRAIN_EV && LiveTuning.hudThemeMode == THEME_LIGHT,
+                    "theme tuning: row 9 & 10 stay independent");
+
+            assertTrue(TurzxFrameRenderer.TeslaHud.themeColor(0xFFF5F5F7, false) == 0xFFF5F5F7
+                    && TurzxFrameRenderer.TeslaHud.themeColor(0xFFF5F5F7, true) == 0xFF111318
+                    && TurzxFrameRenderer.TeslaHud.themeColor(0xFF8E9099, true) == 0xFF4C5363
+                    && TurzxFrameRenderer.TeslaHud.themeColor(0xFF5A5D64, true) == 0xFF70788A
+                    && TurzxFrameRenderer.TeslaHud.themeColor(0xFF6E95FF, true) == 0xFF1D54D6
+                    && TurzxFrameRenderer.TeslaHud.themeColor(0xFF3DD68C, true) == 0xFF16A34A
+                    && TurzxFrameRenderer.TeslaHud.themeColor(0xFF111111, true) == 0xFF111111, "themeColor: palette mappings");
+
+            // Light LUT pixel transform checks on 1920x462 EV layout
+            final int tw = 1920, th = 462;
+            int[] basePx = new int[tw * th];
+            int pCanvas = 0 * tw + 0;              // (0,0) outer #000000 -> #E2E6EE
+            int pCard = 30 * tw + 780;             // (780,30) EV card #17181B -> #FFFFFF
+            int pTile = 240 * tw + 794;            // (794,240) sub-tile #202226 -> #F1F4F9
+            int pTrack = 170 * tw + 800;           // (800,170) track #2A2C31 -> #DCE1EB
+            int pArt = 100 * tw + 1320;            // (1320,100) inside R:art #5A3E8C -> preserved
+            int pViz = 100 * tw + 400;             // (400,100) inside R:viz #17181C -> light gradient
+            basePx[pCanvas] = 0xFF000000;
+            basePx[pCard] = 0xFF17181B;
+            basePx[pTile] = 0xFF202226;
+            basePx[pTrack] = 0xFF2A2C31;
+            basePx[pArt] = 0xFF5A3E8C;
+            basePx[pViz] = 0xFF17181C;
+            TurzxFrameRenderer.TeslaHud.remapLightPixels(basePx, tw, th, false, lay92Ev);
+            assertTrue(basePx[pCanvas] == 0xFFE2E6EE, "lut: canvas -> #E2E6EE got 0x" + Integer.toHexString(basePx[pCanvas]));
+            assertTrue(basePx[pCard] == 0xFFFFFFFF, "lut: card -> #FFFFFF got 0x" + Integer.toHexString(basePx[pCard]));
+            assertTrue(basePx[pTile] == 0xFFF1F4F9, "lut: tile -> #F1F4F9 got 0x" + Integer.toHexString(basePx[pTile]));
+            assertTrue(basePx[pTrack] == 0xFFDCE1EB, "lut: track -> #DCE1EB got 0x" + Integer.toHexString(basePx[pTrack]));
+            assertTrue(basePx[pArt] == 0xFF5A3E8C, "lut: album art preserved");
+            int vzR = (basePx[pViz] >> 16) & 0xFF;
+            assertTrue(vzR >= 216 && vzR <= 245, "lut: viz light gradient r=" + vzR);
+
+            int[] actPx = new int[tw * th];
+            int pAcFill = 410 * tw + 760;          // inside R:chip_ac #0B1329 -> #DBE7FF
+            int pHeatIcon = 410 * tw + 1000;       // inside R:chip_heat #FF9A5C -> #C44408
+            actPx[pAcFill] = 0xFF0B1329;
+            actPx[pHeatIcon] = 0xFFFF9A5C;
+            TurzxFrameRenderer.TeslaHud.remapLightPixels(actPx, tw, th, true, lay92Ev);
+            assertTrue(actPx[pAcFill] == 0xFFDBE7FF, "lut: active chip_ac -> #DBE7FF got 0x" + Integer.toHexString(actPx[pAcFill]));
+            assertTrue(actPx[pHeatIcon] == 0xFFC44408, "lut: active chip_heat icon -> #C44408 got 0x" + Integer.toHexString(actPx[pHeatIcon]));
+
+            TurzxOverlayController.DashPalette dkPal = TurzxOverlayController.paletteFor(false);
+            TurzxOverlayController.DashPalette ltPal = TurzxOverlayController.paletteFor(true);
+            assertTrue(dkPal.bg != ltPal.bg && dkPal.card != ltPal.card && dkPal.text != ltPal.text
+                    && dkPal.accent != ltPal.accent && dkPal.saveTxt != ltPal.saveTxt
+                    && ltPal.card == 0xFFFFFFFF && ltPal.text == 0xFF111318 && ltPal.accent == 0xFF2563EB,
+                    "dashboard palette: distinct dark & light palettes");
+            LiveTuning.loadFrom(new MonitorConfig());
+            TurzxOverlayController.DashboardStats dashStats = new TurzxOverlayController.DashboardStats();
+            dashStats.usbConnected = true;
+            dashStats.targetFps = 15;
+            dashStats.fps = 14.8;
+            dashStats.renderMs = 10.0;
+            dashStats.txMs = 20.0;
+            TelemetrySnapshot dashSnap = new TelemetrySnapshot();
+            dashSnap.displaySocPct = 75.0;
+            TurzxOverlayController.DashValues dvDark = TurzxOverlayController.buildDashboardValues(dashSnap, dashStats, 1000L, false);
+            TurzxOverlayController.DashValues dvLight = TurzxOverlayController.buildDashboardValues(dashSnap, dashStats, 1000L, true);
+            assertTrue(dvDark.tone.get("dr.gear")[1] == dkPal.chip && dvLight.tone.get("dr.gear")[1] == ltPal.chip
+                    && dvDark.tone.get("ds.save")[0] == dkPal.saveTxt && dvLight.tone.get("ds.save")[0] == ltPal.saveTxt
+                    && dvDark.tone.get("sy.usb.st")[0] == dkPal.good && dvLight.tone.get("sy.usb.st")[0] == ltPal.good
+                    && dvDark.tone.get("pf.bn")[1] == dkPal.goodBg && dvLight.tone.get("pf.bn")[1] == ltPal.goodBg
+                    && dvDark.tone.get("bat")[1] == dkPal.barOk && dvLight.tone.get("bat")[1] == ltPal.barOk,
+                    "dashboard values: dark vs light palette tones");
         } catch (Exception e) {
             throw new RuntimeException("v1.5.0 Tesla HUD self-test failed", e);
+        }
+
+        // v1.5.15: Bundled HMG-API launcher shortcut assets + OTA auto-registration state checks
+        try {
+            byte[][] bundled = new byte[HmgApiShortcutSync.ASSET_NAMES.length][];
+            for (int i = 0; i < bundled.length; i++) {
+                bundled[i] = TurzxFrameRenderer.readJarAssetBytesPublic(HmgApiShortcutSync.ASSET_NAMES[i]);
+                assertTrue(bundled[i] != null && bundled[i].length > 8,
+                        "hmgapi: missing asset " + HmgApiShortcutSync.ASSET_NAMES[i]);
+            }
+            String modJsonStr = new String(bundled[0], UTF8);
+            assertTrue(modJsonStr.contains("\"hkg-turzxmonitor\"") && modJsonStr.contains("\"" + MONITOR_VERSION + "\""),
+                    "hmgapi: mod.json carries id and version");
+            String openUiStr = new String(bundled[1], UTF8);
+            assertTrue(openUiStr.startsWith("#!/system/bin/sh") && openUiStr.contains("launch.sh show"),
+                    "hmgapi: open-ui.sh header & target");
+            assertTrue(bundled[2][0] == 'P' && bundled[2][1] == 'K' && bundled[2][2] == 3 && bundled[2][3] == 4,
+                    "hmgapi: shortcut APK ZIP magic");
+            for (int i = 3; i < 7; i++) {
+                assertTrue((bundled[i][0] & 0xFF) == 0x89 && bundled[i][1] == 'P' && bundled[i][2] == 'N' && bundled[i][3] == 'G',
+                        "hmgapi: PNG magic on " + HmgApiShortcutSync.ASSET_NAMES[i]);
+            }
+
+            File tmpHmg = File.createTempFile("turzx_hmgapi_test", "");
+            tmpHmg.delete();
+            tmpHmg.mkdirs();
+            File modDir = new File(tmpHmg, "mod");
+            File appsTxt = new File(tmpHmg, "apps.txt");
+            File servicesTxt = new File(tmpHmg, "services.txt");
+            File pkgList = new File(tmpHmg, "packages.list");
+            try {
+                assertTrue(!HmgApiShortcutSync.isModUpToDate(modDir, appsTxt, servicesTxt, pkgList, bundled),
+                        "hmgapi: absent modDir needs sync");
+
+                for (int i = 0; i < HmgApiShortcutSync.MOD_REL_PATHS.length; i++) {
+                    writeBytesNoSync(new File(modDir, HmgApiShortcutSync.MOD_REL_PATHS[i]), bundled[i]);
+                }
+                writeBytesNoSync(new File(modDir, "META-HMGAPI/manifest.json"), "{}\n".getBytes(UTF8));
+                writeBytesNoSync(new File(modDir, "META-HMGAPI/signature"), "sig\n".getBytes(UTF8));
+                writeBytesNoSync(appsTxt, "com.hkg.turzxmonitor.app hkg-turzxmonitor\n".getBytes(UTF8));
+                writeBytesNoSync(servicesTxt, "hkg-turzxmonitor open-ui root manual no script bin/open-ui.sh -\n".getBytes(UTF8));
+                writeBytesNoSync(pkgList, "com.hkg.turzxmonitor.app 10207 0 /data/data/com.hkg.turzxmonitor.app default none\n".getBytes(UTF8));
+
+                assertTrue(HmgApiShortcutSync.isModUpToDate(modDir, appsTxt, servicesTxt, pkgList, bundled),
+                        "hmgapi: matching files & state up-to-date");
+
+                writeBytesNoSync(pkgList, "com.other.app 10001 0 /data/data/com.other.app default none\n".getBytes(UTF8));
+                assertTrue(!HmgApiShortcutSync.isModUpToDate(modDir, appsTxt, servicesTxt, pkgList, bundled),
+                        "hmgapi: uninstalled shortcut APK triggers sync");
+
+                writeBytesNoSync(pkgList, "com.hkg.turzxmonitor.app 10207 0 /data/data/com.hkg.turzxmonitor.app default none\n".getBytes(UTF8));
+                writeBytesNoSync(new File(modDir, "HkgTurzxShortcut.apk"), new byte[]{1, 2, 3, 4});
+                assertTrue(!HmgApiShortcutSync.isModUpToDate(modDir, appsTxt, servicesTxt, pkgList, bundled),
+                        "hmgapi: mismatched APK hash triggers sync");
+
+                writeBytesNoSync(new File(modDir, "HkgTurzxShortcut.apk"), bundled[2]);
+                writeBytesNoSync(appsTxt, new byte[0]);
+                writeBytesNoSync(new File(modDir, ".disabled"), new byte[0]);
+                assertTrue(HmgApiShortcutSync.isModUpToDate(modDir, appsTxt, servicesTxt, pkgList, bundled),
+                        "hmgapi: disabled mod with matching files stays disabled");
+            } finally {
+                HmgApiShortcutSync.deleteTree(tmpHmg);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("v1.5.15 HMG-API OTA shortcut self-test failed", e);
         }
 
         System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + Chromium 1:1 HUD Assets + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");

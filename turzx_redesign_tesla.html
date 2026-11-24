@@ -28,6 +28,23 @@
     --num: 'Public Sans', 'Noto Sans KR', sans-serif;
     --kr: 'Noto Sans KR', 'Public Sans', 'Malgun Gothic', sans-serif;
   }
+  .lcd[data-theme="light"] {
+    --bg: #E2E6EE;
+    --card: #FFFFFF;
+    --card-hi: #F1F4F9;
+    --track: #DCE1EB;
+    --txt: #111318;
+    --txt2: #4C5363;
+    --txt3: #70788A;
+    --off: #AEB6C6;
+    --blue: #2563EB;
+    --blue-hi: #1D54D6;
+    --cool: #2563EB;
+    --heat: #D9530A;
+    --green: #16A34A;
+    --amber: #D97706;
+    --red: #DC2626;
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { background: #0B0B0C; }
   body { color: var(--txt); font-family: var(--kr); min-height: 100vh; }
@@ -59,7 +76,7 @@
   .note code { font-family: var(--num); font-size: 12px; color: #D7DCE5; background: #1A1C21; padding: 1px 5px; border-radius: 4px; }
 
   /* ===== Panel ===== */
-  .lcd { position: absolute; left: 0; top: 0; width: 960px; background: var(--bg); transform-origin: 0 0; overflow: hidden; }
+  .lcd { position: absolute; left: 0; top: 0; width: 960px; background: var(--bg); color: var(--txt); transform-origin: 0 0; overflow: hidden; }
   .lcd[data-m="92"] { height: 231px; }
   .lcd[data-m="123"] { height: 360px; }
   .num { font-family: var(--num); font-variant-numeric: tabular-nums; letter-spacing: -0.015em; }
@@ -68,6 +85,29 @@
 
   /* --- Driving visualisation (with speed, limits and turn-by-turn) --- */
   .viz { background: linear-gradient(180deg, #24262B 0%, #17181C 45%, #101114 100%); }
+  .lcd[data-theme="light"] .viz { background: linear-gradient(180deg, #D8DFE9 0%, #E6EBF2 45%, #F1F4F8 100%); }
+  .lcd[data-theme="light"] .tbt,
+  .lcd[data-theme="light"] .vtpms { background: rgba(255, 255, 255, 0.92); border-color: #CBD2DF; }
+  .lcd[data-theme="light"] .tt i { filter: grayscale(1) brightness(0.65) contrast(0.5); opacity: 0.4; }
+  .lcd[data-theme="light"] .tt i.on { filter: none; opacity: 1; }
+  .lcd[data-theme="light"] .vtpms svg rect[fill="#5A5D64"] { fill: #70788A; }
+  .lcd[data-theme="light"] .bar .sep { background: #CDD3DF; }
+  .lcd[data-theme="light"] .cl-air .env { border-left-color: #CDD3DF; }
+  .lcd[data-theme="light"] .pillbar .tick,
+  .lcd[data-theme="light"] .rpm-bar .rtick { background: #FFFFFF99; }
+  .lcd[data-theme="light"] .pwr-bar .zero { background: #334155; }
+  .lcd[data-theme="light"] .chip,
+  .lcd[data-theme="light"] .state.auto { background: #F4F6FA; border-color: #CDD3DF; }
+  .lcd[data-theme="light"] .chip.on,
+  .lcd[data-theme="light"] .state.auto.on { background: #DBE7FF; border-color: #3B76F6; color: #14306E; }
+  .lcd[data-theme="light"] .chip.on.heat { background: #FFE7D4; border-color: #E8722A; color: #C44408; }
+  .lcd[data-theme="light"] .state.heat { background: #FFE7D4; }
+  .lcd[data-theme="light"] .state.cool { background: #DBE7FF; }
+  .lcd[data-theme="light"] .fanlv .bars i { background: #C2C9D6; }
+  .lcd[data-theme="light"] .fanlv .bars i.on { background: var(--blue-hi); }
+  .lcd[data-theme="light"] .cl-air .seat circle[fill="#8E9099"] { fill: #484F5F; }
+  .lcd[data-theme="light"] .cl-air .seat path[stroke="#8E9099"] { stroke: #484F5F; }
+  .lcd[data-theme="light"] .cl-air .seat path[stroke="#4A4D55"] { stroke: #8A93A6; }
   .viz canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   .vleft { position: absolute; left: 14px; top: 10px; display: flex; flex-direction: column; gap: var(--vleft-gap); }
   .vspeed { display: flex; align-items: flex-start; gap: 9px; }
@@ -242,6 +282,9 @@
     <div class="ctl">패널
       <div class="seg" id="segModel"><button data-v="both" class="on">둘 다</button><button data-v="92">9.2"</button><button data-v="123">12.3"</button></div>
     </div>
+    <div class="ctl">테마
+      <div class="seg" id="segTheme"><button data-v="dark" class="on">다크</button><button data-v="light">라이트</button></div>
+    </div>
     <div class="ctl">상황
       <div class="seg" id="segScene"><button data-v="drive" class="on">주행</button><button data-v="regen">회생·근접</button><button data-v="park">정차·경고</button><button data-v="reverse">후진</button></div>
     </div>
@@ -399,9 +442,9 @@
     highBeam: '<svg viewBox="0 0 32 32" fill="none" stroke="#4C8DFF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M17 7c6 0 11 4 11 9s-5 9-11 9c-1.6 0-2.4-4-2.4-9S15.4 7 17 7z"/><path d="M11 10.5H4M11 14.5H4M11 18.5H4M11 22.5H4"/></svg>',
     pbrake: '<svg viewBox="0 0 32 32" fill="none" stroke="#FF4D4D" stroke-width="2.3" stroke-linecap="round"><circle cx="16" cy="16" r="8.6"/><path d="M6.2 9.2a12 12 0 0 0 0 13.6M25.8 9.2a12 12 0 0 1 0 13.6"/><path d="M13.6 20.5v-9h3.4a2.6 2.6 0 0 1 0 5.2h-3.4" stroke-linejoin="round"/></svg>',
     mil: '<svg viewBox="0 0 32 32" fill="none" stroke="#F5A623" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 8.5h8M15 8.5V12"/><path d="M4.5 14v8M4.5 18H8"/><path d="M8 13.5l2.5-1.5h7.5l2 2.5h4.2l1.8 2v4.5l-1.8 2H20l-2 2H10.5l-2.5-2z"/><path d="M27.5 15.5v6"/></svg>',
-    wheel: (on) => `<svg viewBox="0 0 24 24" fill="none" stroke="${on ? "#6E95FF" : "#5A5D64"}" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.2"/><path d="M3.5 10.5h6.3M14.2 10.5h6.3M12 14.2V21"/></svg>`,
-    right: '<svg viewBox="0 0 32 32" fill="none" stroke="#F5F5F7" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 28V17a5 5 0 0 1 5-5h11"/><path d="M21 6l6 6-6 6"/></svg>',
-    left: '<svg viewBox="0 0 32 32" fill="none" stroke="#F5F5F7" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 28V17a5 5 0 0 0-5-5H6"/><path d="M11 6l-6 6 6 6"/></svg>',
+    wheel: (on) => `<svg viewBox="0 0 24 24" fill="none" stroke="${themeMode === "light" ? (on ? "#1D54D6" : "#70788A") : (on ? "#6E95FF" : "#5A5D64")}" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.2"/><path d="M3.5 10.5h6.3M14.2 10.5h6.3M12 14.2V21"/></svg>`,
+    right: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 28V17a5 5 0 0 1 5-5h11"/><path d="M21 6l6 6-6 6"/></svg>',
+    left: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 28V17a5 5 0 0 0-5-5H6"/><path d="M11 6l-6 6 6 6"/></svg>',
     none: '<svg viewBox="0 0 32 32" fill="none" stroke="#5A5D64" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M16 29s9-8.5 9-15a9 9 0 0 0-18 0c0 6.5 9 15 9 15z"/><circle cx="16" cy="14" r="3"/></svg>',
     carTop: '<svg viewBox="0 0 30 66" fill="none"><rect x="5" y="2" width="20" height="62" rx="9" stroke="#8E9099" stroke-width="1.6"/><path d="M8 17h14l-2 9H10z" fill="#2A2C31"/><path d="M9 46h12l-1 7H10z" fill="#2A2C31"/><rect x="1.5" y="11" width="3" height="10" rx="1.5" fill="#5A5D64"/><rect x="25.5" y="11" width="3" height="10" rx="1.5" fill="#5A5D64"/><rect x="1.5" y="45" width="3" height="10" rx="1.5" fill="#5A5D64"/><rect x="25.5" y="45" width="3" height="10" rx="1.5" fill="#5A5D64"/></svg>',
     prev: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>',
@@ -551,6 +594,7 @@
   const fmtDur = (min) => min >= 60 ? [`${Math.floor(min / 60)}:${String(min % 60).padStart(2, "0")}`, ""] : [String(min), "분"];
 
   let ptMode = "ev";      // "ev" | "ice"
+  let themeMode = "dark"; // "dark" | "light"
   let rpmSigMode = "ok";  // "ok" | "off"
   let milMode = "scene";  // "scene" | "off" | "on"
 
@@ -564,6 +608,7 @@
     const $ = (k) => lcd.querySelector(`[data-k="${k}"]`);
     const set = (k, v) => { const el = $(k); if (el) el.textContent = v; };
     const isIce = ptMode === "ice";
+    lcd.dataset.theme = themeMode;
 
     // Visualisation overlays: speed, limits, turn-by-turn
     Array.from($("prnd").children).forEach((el) => el.classList.toggle("on", el.textContent === s.gear));
@@ -708,7 +753,11 @@
     // Only the AUTO state is tagged next to the set temperature (heating / cooling show in the number colour)
     st.textContent = "AUTO";
     st.className = "state auto" + (h.on && h.auto ? " on" : "");
-    const arrow = (k, on) => { const el = $(k); el.setAttribute("stroke", on ? "#6E95FF" : "#34363C"); };
+    const arrow = (k, on) => {
+      const el = $(k);
+      const isL = themeMode === "light";
+      el.setAttribute("stroke", isL ? (on ? "#1D54D6" : "#AEB6C6") : (on ? "#6E95FF" : "#34363C"));
+    };
     arrow("airFace", h.on && h.air.face);
     arrow("airFoot", h.on && h.air.foot);
     set("fanNum", h.on ? h.fan : "-");
@@ -1102,25 +1151,35 @@
     const cx = W * (wide ? 0.535 : 0.55), cy = H * (wide ? 0.60 : 0.54);
     const X = (z) => cx + z * ppm, Y = (x) => cy + x * ppm;
 
+    const isLight = themeMode === "light";
     // floor
-    const floor = ctx.createRadialGradient(cx, cy, 0, cx, cy, W * 0.5);
-    floor.addColorStop(0, "rgba(255,255,255,0.07)");
-    floor.addColorStop(1, "rgba(255,255,255,0)");
-    ctx.fillStyle = floor;
-    ctx.fillRect(0, 0, W, H);
+    if (!isLight) {
+      const floor = ctx.createRadialGradient(cx, cy, 0, cx, cy, W * 0.5);
+      floor.addColorStop(0, "rgba(255,255,255,0.07)");
+      floor.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = floor;
+      ctx.fillRect(0, 0, W, H);
+    }
 
     // headlamp beams on the floor (low beam pattern, ~5 m)
     if (L.head) {
       ctx.save();
-      ctx.globalCompositeOperation = "lighter";
+      ctx.globalCompositeOperation = isLight ? "source-over" : "lighter";
       for (const side of [-1, 1]) {
         const x0 = X(2.2), y0 = Y(side * 0.62);
         const reach = 4.0 * ppm, spread = 0.42;
         const g = ctx.createRadialGradient(x0, y0, 0, x0, y0, reach);
-        g.addColorStop(0, "rgba(215,232,255,0.55)");
-        g.addColorStop(0.3, "rgba(215,232,255,0.24)");
-        g.addColorStop(0.7, "rgba(215,232,255,0.07)");
-        g.addColorStop(1, "rgba(215,232,255,0)");
+        if (isLight) {
+          g.addColorStop(0, "rgba(59,130,246,0.26)");
+          g.addColorStop(0.3, "rgba(59,130,246,0.13)");
+          g.addColorStop(0.7, "rgba(59,130,246,0.04)");
+          g.addColorStop(1, "rgba(59,130,246,0)");
+        } else {
+          g.addColorStop(0, "rgba(215,232,255,0.55)");
+          g.addColorStop(0.3, "rgba(215,232,255,0.24)");
+          g.addColorStop(0.7, "rgba(215,232,255,0.07)");
+          g.addColorStop(1, "rgba(215,232,255,0)");
+        }
         ctx.fillStyle = g;
         ctx.beginPath();
         ctx.moveTo(x0, y0);
@@ -1142,14 +1201,16 @@
     // tail / brake glow behind the car
     if (L.head || L.brake) {
       ctx.save();
-      ctx.globalCompositeOperation = "lighter";
+      ctx.globalCompositeOperation = isLight ? "source-over" : "lighter";
+      const tRgb = isLight ? "220,38,38" : "255,25,45";
+      const tCoreRgb = isLight ? "225,29,72" : "255,60,80";
       for (const side of [-1, 1]) {
         const x0 = X(-2.3), y0 = Y(side * 0.66);
         if (L.brake) {
-          glowAt(ctx, x0, y0, 1.25 * ppm, "255,25,45", 0.55);
-          glowAt(ctx, x0, y0, 0.45 * ppm, "255,60,80", 0.8);
+          glowAt(ctx, x0, y0, 1.25 * ppm, tRgb, isLight ? 0.36 : 0.55);
+          glowAt(ctx, x0, y0, 0.45 * ppm, tCoreRgb, isLight ? 0.52 : 0.8);
         } else {
-          glowAt(ctx, x0, y0, 0.8 * ppm, "255,30,50", 0.28);
+          glowAt(ctx, x0, y0, 0.8 * ppm, tRgb, isLight ? 0.22 : 0.28);
         }
       }
       ctx.restore();
@@ -1165,7 +1226,7 @@
       ctx.strokeStyle = `rgba(${OPEN_RGB},0.55)`;
       ctx.lineWidth = 0.2 * ppm;
       ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(ex, ey); ctx.stroke();
-      ctx.strokeStyle = "#D9DDE3";
+      ctx.strokeStyle = isLight ? "#BAC3D1" : "#D9DDE3";
       ctx.lineWidth = 0.1 * ppm;
       ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(ex, ey); ctx.stroke();
       // door window (upper half) as a darker inner line
@@ -1181,11 +1242,12 @@
 
     drawPdw(ctx, pdwOf(s || {}), (x, z) => [X(z), Y(x)], ["front", "rear"]);
     // car body (tinted like the driving view's ego car), rotated so the front points right
-    const body = navTinted(TOP.src, TINT.ego);
+    const topTint = isLight ? TINT_LIGHT.ego : TINT.ego;
+    const body = navTinted(TOP.src, topTint);
     const k = ppm / TOP.ppm;
     const shadow = () => {
       ctx.save();
-      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      ctx.fillStyle = isLight ? "rgba(0,0,0,0.34)" : "rgba(0,0,0,0.5)";
       ctx.filter = `blur(${0.12 * ppm}px)`;
       roundRectPath(ctx, X(-2.38), Y(-1.0), 4.76 * ppm, 2.0 * ppm, 0.3 * ppm);
       ctx.fill();
@@ -1197,18 +1259,18 @@
       ctx.translate(cx, cy);
       ctx.rotate(Math.PI / 2);
       ctx.drawImage(body, -TOP.cx * k, -TOP.cy * k, body.width * k, body.height * k);
-      ctx.globalCompositeOperation = "lighter";
-      const head = L.head ? lampLayer(TOP.head, "225,238,255") : null;
+      ctx.globalCompositeOperation = isLight ? "source-over" : "lighter";
+      const head = L.head ? lampLayer(TOP.head, isLight ? "37,99,235" : "225,238,255") : null;
       if (head) { ctx.drawImage(head, -TOP.cx * k, -TOP.cy * k, body.width * k, body.height * k); }
-      const tail = (L.head || L.brake) ? lampLayer(TOP.tail, "255,38,56") : null;
+      const tail = (L.head || L.brake) ? lampLayer(TOP.tail, isLight ? "225,29,72" : "255,38,56") : null;
       if (tail) {
-        ctx.globalAlpha = L.brake ? 1 : 0.65;
+        ctx.globalAlpha = L.brake ? 1 : (isLight ? 0.78 : 0.65);
         ctx.drawImage(tail, -TOP.cx * k, -TOP.cy * k, body.width * k, body.height * k);
       }
       ctx.restore();
     }
     // side mirrors
-    ctx.fillStyle = "#C9CDD4";
+    ctx.fillStyle = isLight ? "#9AA3B2" : "#C9CDD4";
     for (const side of [-1, 1]) {
       ctx.save();
       roundRectPath(ctx, X(1.02), Y(side * 0.93) + (side < 0 ? -0.2 * ppm : 0), 0.16 * ppm, 0.2 * ppm, 0.05 * ppm);
@@ -1230,7 +1292,7 @@
       ctx.fillStyle = `rgba(${OPEN_RGB},0.35)`;
       roundRectPath(ctx, X(-2.95), Y(-0.78), 0.8 * ppm, 1.56 * ppm, 0.12 * ppm);
       ctx.fill();
-      ctx.fillStyle = "#D9DDE3";
+      ctx.fillStyle = isLight ? "#BAC3D1" : "#D9DDE3";
       roundRectPath(ctx, X(-2.88), Y(-0.72), 0.62 * ppm, 1.44 * ppm, 0.1 * ppm);
       ctx.fill();
       ctx.fillStyle = "rgba(40,44,52,0.85)";
@@ -1282,6 +1344,7 @@
   // at ~15 m the front must look smaller than the rear and the roof shows; an orthographic sprite looks pasted on
   const NAVDY_EGO = { src: "sprites_ego/ego_persp.png", lamp: "sprites_ego/ego_persp_lamp.png", w: 200, h: 177, ax: 100.0, ay: 194.0, ppm: 100 };
   const TINT = { ego: ["236,239,244", 1.12], lead: ["214,219,227", 1.08], other: ["150,156,166", 0.92] };
+  const TINT_LIGHT = { ego: ["210,218,232", 0.88], lead: ["168,178,194", 0.82], other: ["132,142,158", 0.72] };
   /** Sprite for yaw index i from the set whose pitch is closest to the real viewing elevation (deg). */
   function navSprite(i, elevDeg) {
     let set = NAVDY_SETS[0];
@@ -1322,15 +1385,16 @@
     return (navCache[key] = c);
   }
   /** Lamp mask (white + alpha) coloured red. */
-  function navLamp(path) {
-    const key = path + "|lamp";
+  function navLamp(path, rgb) {
+    const col = rgb || "255,38,56";
+    const key = path + "|lamp|" + col;
     if (navCache[key]) return navCache[key];
     const img = navImg(path);
     if (!img) return null;
     const c = document.createElement("canvas");
     c.width = img.naturalWidth; c.height = img.naturalHeight;
     const g = c.getContext("2d");
-    g.fillStyle = "rgb(255,38,56)";
+    g.fillStyle = `rgb(${col})`;
     g.fillRect(0, 0, c.width, c.height);
     g.globalCompositeOperation = "destination-in";
     g.drawImage(img, 0, 0);
@@ -1360,15 +1424,16 @@
     ctx.translate(x + w / 2, bottom - h * 0.04);
     ctx.scale(1, 0.18);
     const sh = ctx.createRadialGradient(0, 0, 0, 0, 0, w * 0.56);
-    sh.addColorStop(0, "rgba(0,0,0,0.55)");
+    const isLight = themeMode === "light";
+    sh.addColorStop(0, isLight ? "rgba(0,0,0,0.36)" : "rgba(0,0,0,0.55)");
     sh.addColorStop(1, "rgba(0,0,0,0)");
     ctx.fillStyle = sh;
     ctx.fillRect(-w * 0.6, -w * 0.6, w * 1.2, w * 1.2);
     ctx.restore();
     ctx.drawImage(body, x, y, w, h);
-    const lm = lamp > 0 ? navLamp(spr.lamp) : null;
+    const lm = lamp > 0 ? navLamp(spr.lamp, isLight ? "225,29,72" : "255,38,56") : null;
     if (lm) {
-      ctx.globalCompositeOperation = "lighter";
+      ctx.globalCompositeOperation = isLight ? "source-over" : "lighter";
       if (lamp >= 2) {
         ctx.filter = `blur(${Math.max(1.5, w * 0.035)}px)`;
         ctx.globalAlpha = alpha;
@@ -1378,7 +1443,7 @@
         ctx.drawImage(lm, x, y, w, h);
         ctx.drawImage(lm, x, y, w, h);
       } else {
-        ctx.globalAlpha = alpha * 0.6;
+        ctx.globalAlpha = alpha * (isLight ? 0.75 : 0.6);
         ctx.drawImage(lm, x, y, w, h);
       }
     }
@@ -1435,24 +1500,27 @@
     };
 
     // 3.6 m lanes: ego lane (+-1.8, bright), neighbour lanes up to +-5.4 (dashed), road edges at +-9.0
+    const isLight = themeMode === "light";
     const roadFill = ctx.createLinearGradient(0, V(NEAR + 120), 0, H);
-    roadFill.addColorStop(0, "rgba(255,255,255,0)");
-    roadFill.addColorStop(0.35, "rgba(255,255,255,0.02)");
-    roadFill.addColorStop(1, "rgba(255,255,255,0.035)");
+    roadFill.addColorStop(0, isLight ? "rgba(51,65,85,0)" : "rgba(255,255,255,0)");
+    roadFill.addColorStop(0.35, isLight ? "rgba(51,65,85,0.045)" : "rgba(255,255,255,0.02)");
+    roadFill.addColorStop(1, isLight ? "rgba(51,65,85,0.085)" : "rgba(255,255,255,0.035)");
     band(-9.0, 9.0, 0, 999, roadFill);
-    line(-9.0, 0.06, "160,164,172", 0.5, false);
-    line(9.0, 0.06, "160,164,172", 0.5, false);
-    line(-5.4, 0.055, "230,232,236", 0.55, true);
-    line(5.4, 0.055, "230,232,236", 0.55, true);
-    line(-1.8, 0.07, "245,245,247", 0.9, false);
-    line(1.8, 0.07, "245,245,247", 0.9, false);
+    line(-9.0, 0.06, isLight ? "148,156,170" : "160,164,172", isLight ? 0.52 : 0.5, false);
+    line(9.0, 0.06, isLight ? "148,156,170" : "160,164,172", isLight ? 0.52 : 0.5, false);
+    line(-5.4, 0.055, isLight ? "100,110,128" : "230,232,236", isLight ? 0.6 : 0.55, true);
+    line(5.4, 0.055, isLight ? "100,110,128" : "230,232,236", isLight ? 0.6 : 0.55, true);
+    line(-1.8, 0.07, isLight ? "68,78,96" : "245,245,247", isLight ? 0.85 : 0.9, false);
+    line(1.8, 0.07, isLight ? "68,78,96" : "245,245,247", isLight ? 0.85 : 0.9, false);
 
     const leadX = s.lead > 0 ? camX(s.lead) : 0;
     const crit = s.lead > 0 && s.lead <= 12, close = s.lead > 0 && s.lead <= 18;
     if (s.gear === "D" || s.gear === "R") {
       const end = leadX > 0 ? leadX - 1.5 : NEAR + 70;
-      const rgb = crit ? "227,25,55" : (close ? "245,166,35" : (s.cruise > 0 ? "62,106,225" : "200,205,215"));
-      const a0 = s.cruise > 0 || close ? 0.55 : 0.18;
+      const rgb = isLight
+        ? (crit ? "220,38,38" : (close ? "217,119,6" : (s.cruise > 0 ? "37,99,235" : "71,85,105")))
+        : (crit ? "227,25,55" : (close ? "245,166,35" : (s.cruise > 0 ? "62,106,225" : "200,205,215")));
+      const a0 = isLight ? (s.cruise > 0 || close ? 0.62 : 0.24) : (s.cruise > 0 || close ? 0.55 : 0.18);
       const gr = ctx.createLinearGradient(0, H, 0, V(end));
       gr.addColorStop(0, `rgba(${rgb},${a0})`);
       gr.addColorStop(1, `rgba(${rgb},0)`);
@@ -1466,6 +1534,7 @@
     if (leadX > 0) cars.push({ x: leadX, y: s.leadY || 0, brake: !!s.leadBrake, lead: true });
     cars.sort((a, b) => b.x - a.x);
     let leadTag = null;
+    const tintPal = isLight ? TINT_LIGHT : TINT;
     for (const c of cars) {
       const [gx, gy] = P(c.x, c.y);
       const elev = Math.atan2(camH, c.x) * 180 / Math.PI;
@@ -1473,14 +1542,14 @@
       const scale = (kx / c.x) / NAVDY_CAR_PPM;
       const alpha = Math.max(0.35, Math.min(1, 1.3 - (c.x - egoD) / 90));
       const lamp = c.brake ? 2 : (night ? 1 : 0);
-      const top = drawNavdy(ctx, spr, gx, gy, scale, c.lead ? TINT.lead : TINT.other, lamp, alpha);
+      const top = drawNavdy(ctx, spr, gx, gy, scale, c.lead ? tintPal.lead : tintPal.other, lamp, alpha);
       if (c.lead) leadTag = [gx, gy - top];
     }
     if (leadTag) {
       ctx.font = `600 ${Math.round(W / 30)}px "Public Sans", sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "bottom";
-      ctx.fillStyle = crit ? "#FF4D63" : (close ? "#F5A623" : "#C9CBD1");
+      ctx.fillStyle = isLight ? (crit ? "#DC2626" : (close ? "#D97706" : "#334155")) : (crit ? "#FF4D63" : (close ? "#F5A623" : "#C9CBD1"));
       ctx.fillText(`${Math.round(s.lead)} m`, leadTag[0], leadTag[1] - W / 120);
     }
 
@@ -1490,7 +1559,7 @@
     const egoLamp = L.brake ? 2 : (L.head ? 1 : 0);
     const [egoU, egoGy] = P(egoD, 0);
     window.__cam = { egoD: +egoD.toFixed(2), camH: +camH.toFixed(2), focal: Math.round(kx), near: +NEAR.toFixed(2) };
-    if (!drawNavdy(ctx, NAVDY_EGO, egoU, egoGy, egoScale, TINT.ego, egoLamp, 1)) {
+    if (!drawNavdy(ctx, NAVDY_EGO, egoU, egoGy, egoScale, tintPal.ego, egoLamp, 1)) {
       MODEL_NIRO_IMG.fallback = MODEL_NIRO;
       MODEL_NIRO_IMG.src = MODEL_NIRO_IMG.variants[L.brake ? "brake" : (L.head ? "tail" : "off")];
       drawCar(ctx, "ego", MODEL_NIRO_IMG, NIRO_EGO, u0, H * 0.985, Math.min(W * 0.165, H * 0.27));
@@ -1501,6 +1570,7 @@
   const params = new URLSearchParams(location.search);
   const shot = params.get("shot");
   if (params.get("pt") === "ev" || params.get("pt") === "ice") ptMode = params.get("pt");
+  if (params.get("theme") === "dark" || params.get("theme") === "light") themeMode = params.get("theme");
   if (params.get("rpm") === "ok" || params.get("rpm") === "off") rpmSigMode = params.get("rpm");
   if (params.get("mil")) milMode = params.get("mil");
   if (params.get("lamp")) lampMode = params.get("lamp");
@@ -1695,6 +1765,7 @@
       seg.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === v));
     };
     setSeg("segPt", ptMode);
+    setSeg("segTheme", themeMode);
     setSeg("segRpmSig", rpmSigMode);
     setSeg("segScene", scene);
     setSeg("segLamp", lampMode);
@@ -1741,6 +1812,7 @@
     });
   }
   bindSeg("segPt", (v) => { ptMode = v; syncToolbarUi(); draw(); });
+  bindSeg("segTheme", (v) => { themeMode = v; draw(); });
   bindSeg("segRpmSig", (v) => { rpmSigMode = v; draw(); });
   bindSeg("segModel", (v) => {
     document.getElementById("fig92").hidden = v === "123";

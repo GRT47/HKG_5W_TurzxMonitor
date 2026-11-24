@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.hkg.turzxmonitor.app"
-    android:versionCode="10513"
-    android:versionName="1.5.13">
+    android:versionCode="10515"
+    android:versionName="1.5.15">
 
     <uses-sdk android:minSdkVersion="19" android:targetSdkVersion="19" />
 

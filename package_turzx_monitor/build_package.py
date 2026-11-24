@@ -31,7 +31,7 @@ PKG_STAGE_DIR = BUILD_DIR / "pkg_stage"
 USB_ROOT_DIR = BUILD_DIR / "usb_root"
 
 OUTER_ZIP_PATH = REPO_ROOT / "HKG_5W_TurzxMonitor_USB.zip"
-MONITOR_VERSION = "1.5.14"
+MONITOR_VERSION = "1.5.15"
 
 PUBLIC_SANS_FONTS = {
     "PublicSans-Bold.ttf": "https://fonts.gstatic.com/s/publicsans/v21/ijwGs572Xtc6ZYQws9YVwllKVG8qX1oyOymu8Z65ww.ttf",
@@ -246,6 +246,62 @@ def render_turzx_tile_icon_png(
     )
 
 
+TILE_ICON_PALETTES = {
+    "icon.png": {
+        "bg_top": (28, 42, 66),
+        "bg_bot": (14, 22, 38),
+        "border_col": (56, 189, 248),
+        "bezel_col": (94, 234, 212),
+        "screen_bg": (11, 18, 32),
+        "arc_col": (56, 189, 248),
+        "accent_col": (52, 211, 153),
+        "needle_col": (248, 250, 252),
+        "bar1_col": (52, 211, 153),
+        "bar2_col": (56, 189, 248),
+        "bar3_col": (251, 191, 36),
+    },
+    "icon_night.png": {
+        "bg_top": (14, 24, 42),
+        "bg_bot": (8, 13, 24),
+        "border_col": (20, 184, 166),
+        "bezel_col": (45, 212, 191),
+        "screen_bg": (7, 12, 22),
+        "arc_col": (56, 189, 248),
+        "accent_col": (52, 211, 153),
+        "needle_col": (241, 245, 249),
+        "bar1_col": (52, 211, 153),
+        "bar2_col": (56, 189, 248),
+        "bar3_col": (245, 158, 11),
+    },
+    "icon_disabled.png": {
+        "bg_top": (105, 114, 128),
+        "bg_bot": (78, 86, 98),
+        "border_col": (148, 163, 184),
+        "bezel_col": (180, 188, 198),
+        "screen_bg": (60, 68, 80),
+        "arc_col": (180, 188, 198),
+        "accent_col": (200, 208, 216),
+        "needle_col": (226, 232, 240),
+        "bar1_col": (180, 188, 198),
+        "bar2_col": (190, 198, 208),
+        "bar3_col": (170, 178, 188),
+    },
+    "icon_disabled_night.png": {
+        "bg_top": (34, 40, 50),
+        "bg_bot": (22, 26, 34),
+        "border_col": (71, 85, 105),
+        "bezel_col": (100, 116, 139),
+        "screen_bg": (20, 25, 34),
+        "arc_col": (100, 116, 139),
+        "accent_col": (120, 135, 155),
+        "needle_col": (148, 163, 184),
+        "bar1_col": (100, 116, 139),
+        "bar2_col": (110, 126, 149),
+        "bar3_col": (95, 110, 132),
+    },
+}
+
+
 def build_shortcut_apk(javac: str, d8: str) -> Path:
     """Compile & v1-sign HkgTurzxShortcut.apk (API 19 DEX 035 trampoline activity)."""
     android_jar = find_android_jar()
@@ -300,19 +356,7 @@ def build_shortcut_apk(javac: str, d8: str) -> Path:
     shortcut_res_drawable = shortcut_res_dir / "drawable"
     shortcut_res_drawable.mkdir(parents=True, exist_ok=True)
     (shortcut_res_drawable / "ic_launcher.png").write_bytes(
-        render_turzx_tile_icon_png(
-            bg_top=(28, 42, 66),
-            bg_bot=(14, 22, 38),
-            border_col=(56, 189, 248),
-            bezel_col=(94, 234, 212),
-            screen_bg=(11, 18, 32),
-            arc_col=(56, 189, 248),
-            accent_col=(52, 211, 153),
-            needle_col=(248, 250, 252),
-            bar1_col=(52, 211, 153),
-            bar2_col=(56, 189, 248),
-            bar3_col=(251, 191, 36),
-        )
+        render_turzx_tile_icon_png(**TILE_ICON_PALETTES["icon.png"])
     )
 
     unsigned_apk = BUILD_DIR / "HkgTurzxShortcut-unsigned.apk"
@@ -808,6 +852,15 @@ def optimize_png_assets(assets_dir: Path) -> None:
     print(f"PNG assets optimized (lossless): {before} -> {after} bytes")
 
 
+def stage_hmgapi_assets(assets_dir: Path, shortcut_apk: Path) -> None:
+    """Copy HMG-API launcher mod files into jar assets so OTA upgrades also register the shortcut."""
+    shutil.copy2(BASE_DIR / "hmgapi_mod" / "mod.json", assets_dir / "hmgapi_mod.json")
+    shutil.copy2(BASE_DIR / "hmgapi_mod" / "bin" / "open-ui.sh", assets_dir / "hmgapi_open_ui.sh")
+    shutil.copy2(shortcut_apk, assets_dir / "hmgapi_shortcut.apk")
+    for icon_name, palette in TILE_ICON_PALETTES.items():
+        (assets_dir / f"hmgapi_{icon_name}").write_bytes(render_turzx_tile_icon_png(**palette))
+
+
 def reuse_assets_from_ota(assets_dir: Path) -> None:
     """TURZX_REUSE_OTA_ASSETS=1: take PNG layers + fonts from the current ota/turzxmonitor.b64 jar
     instead of re-rendering them with Chromium (for build hosts without Edge/Chrome)."""
@@ -817,8 +870,14 @@ def reuse_assets_from_ota(assets_dir: Path) -> None:
 
     with zipfile.ZipFile(io.BytesIO(jar_bytes)) as zf:
         for name in zf.namelist():
-            if name.startswith("assets/") and not name.endswith("/") and not name.endswith(".so"):
-                (assets_dir / Path(name).name).write_bytes(zf.read(name))
+            fname = Path(name).name
+            if (
+                name.startswith("assets/")
+                and not name.endswith("/")
+                and not name.endswith(".so")
+                and not fname.startswith("hmgapi_")
+            ):
+                (assets_dir / fname).write_bytes(zf.read(name))
 
 
 def build() -> None:
@@ -866,6 +925,15 @@ def build() -> None:
         raise RuntimeError(f"Tesla HUD assets missing in {tesla_dir} ({len(tesla_files)} files)")
     for f in tesla_files:
         shutil.copy2(f, ASSETS_DIR / f.name)
+
+    javac = find_javac()
+    java = find_java()
+    d8 = find_d8()
+
+    # 1e-2. Build HMG-API launcher shortcut APK + tile PNGs and embed into jar assets (for OTA sync)
+    shortcut_apk = build_shortcut_apk(javac, d8)
+    stage_hmgapi_assets(ASSETS_DIR, shortcut_apk)
+
     # 1f. Lossless PNG recompression (keeps the OTA jar under the legacy 4MB download cap)
     optimize_png_assets(ASSETS_DIR)
     classes_assets_dir = CLASSES_DIR / "assets"
@@ -875,9 +943,6 @@ def build() -> None:
             shutil.copy2(asset_file, classes_assets_dir / asset_file.name)
 
     # 2. Compile TurzxMonitorMain.java + compile-time stubs (Java 8 target -> Android API 19 DEX)
-    javac = find_javac()
-    java = find_java()
-    d8 = find_d8()
     java_src = BASE_DIR / "src_java" / "com" / "hkg" / "turzxmonitor" / "TurzxMonitorMain.java"
     stub_srcs = [str(p) for p in sorted((BASE_DIR / "src_stubs").rglob("*.java"))]
 
@@ -978,71 +1043,12 @@ def build() -> None:
         shutil.copy2(html_src, stage_html)
         normalize_lf(stage_html)
 
-    # 5b. Build & stage HMG-API companion shortcut APK + 99x99 tile PNG icons
-    shortcut_apk = build_shortcut_apk(javac, d8)
+    # 5b. Stage HMG-API companion shortcut APK + finalized 99x99 tile PNG icons (identical to jar assets)
     stage_mod_dir = PKG_STAGE_DIR / "hmgapi_mod"
     stage_mod_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(shortcut_apk, stage_mod_dir / "HkgTurzxShortcut.apk")
-    (stage_mod_dir / "icon.png").write_bytes(
-        render_turzx_tile_icon_png(
-            bg_top=(28, 42, 66),
-            bg_bot=(14, 22, 38),
-            border_col=(56, 189, 248),
-            bezel_col=(94, 234, 212),
-            screen_bg=(11, 18, 32),
-            arc_col=(56, 189, 248),
-            accent_col=(52, 211, 153),
-            needle_col=(248, 250, 252),
-            bar1_col=(52, 211, 153),
-            bar2_col=(56, 189, 248),
-            bar3_col=(251, 191, 36),
-        )
-    )
-    (stage_mod_dir / "icon_night.png").write_bytes(
-        render_turzx_tile_icon_png(
-            bg_top=(14, 24, 42),
-            bg_bot=(8, 13, 24),
-            border_col=(20, 184, 166),
-            bezel_col=(45, 212, 191),
-            screen_bg=(7, 12, 22),
-            arc_col=(56, 189, 248),
-            accent_col=(52, 211, 153),
-            needle_col=(241, 245, 249),
-            bar1_col=(52, 211, 153),
-            bar2_col=(56, 189, 248),
-            bar3_col=(245, 158, 11),
-        )
-    )
-    (stage_mod_dir / "icon_disabled.png").write_bytes(
-        render_turzx_tile_icon_png(
-            bg_top=(105, 114, 128),
-            bg_bot=(78, 86, 98),
-            border_col=(148, 163, 184),
-            bezel_col=(180, 188, 198),
-            screen_bg=(60, 68, 80),
-            arc_col=(180, 188, 198),
-            accent_col=(200, 208, 216),
-            needle_col=(226, 232, 240),
-            bar1_col=(180, 188, 198),
-            bar2_col=(190, 198, 208),
-            bar3_col=(170, 178, 188),
-        )
-    )
-    (stage_mod_dir / "icon_disabled_night.png").write_bytes(
-        render_turzx_tile_icon_png(
-            bg_top=(34, 40, 50),
-            bg_bot=(22, 26, 34),
-            border_col=(71, 85, 105),
-            bezel_col=(100, 116, 139),
-            screen_bg=(20, 25, 34),
-            arc_col=(100, 116, 139),
-            accent_col=(120, 135, 155),
-            needle_col=(148, 163, 184),
-            bar1_col=(100, 116, 139),
-            bar2_col=(110, 126, 149),
-            bar3_col=(95, 110, 132),
-        )
-    )
+    shutil.copy2(ASSETS_DIR / "hmgapi_shortcut.apk", stage_mod_dir / "HkgTurzxShortcut.apk")
+    for icon_name in TILE_ICON_PALETTES:
+        shutil.copy2(ASSETS_DIR / f"hmgapi_{icon_name}", stage_mod_dir / icon_name)
 
     # 6. Build inner NEMESIS package zip (packages/hkg.turzxmonitor.zip)
     inner_zip_path = USB_ROOT_DIR / "packages" / "hkg.turzxmonitor.zip"
