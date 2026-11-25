@@ -300,6 +300,9 @@
     <div class="ctl">주차센서
       <div class="seg" id="segPdw"><button data-v="scene" class="on">장면값</button><button data-v="off">끔</button><button data-v="rear">뒤 근접</button><button data-v="front">앞 근접</button><button data-v="all">전체 단계</button></div>
     </div>
+    <div class="ctl">회전안내
+      <div class="seg" id="segTbt"><button data-v="scene" class="on">장면값</button><button data-v="straight">직진</button><button data-v="left">좌회전</button><button data-v="right">우회전</button><button data-v="uturn">유턴</button><button data-v="roundabout">회전</button><button data-v="tollgate">TG</button><button data-v="arrive">도착</button></div>
+    </div>
     <div class="ctl">애니메이션
       <div class="seg" id="segAnim"><button data-v="on" class="on">켜기</button><button data-v="off">끄기</button></div>
     </div>
@@ -438,13 +441,20 @@
   };
 
   const ICON = {
-    lowBeam: '<svg viewBox="0 0 32 32" fill="none" stroke="#3DDC84" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M17 7c6 0 11 4 11 9s-5 9-11 9c-1.6 0-2.4-4-2.4-9S15.4 7 17 7z"/><path d="M11 10.5l-7 2.2M11 15l-7 2.2M11 19.5l-7 2.2"/></svg>',
-    highBeam: '<svg viewBox="0 0 32 32" fill="none" stroke="#4C8DFF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M17 7c6 0 11 4 11 9s-5 9-11 9c-1.6 0-2.4-4-2.4-9S15.4 7 17 7z"/><path d="M11 10.5H4M11 14.5H4M11 18.5H4M11 22.5H4"/></svg>',
     pbrake: '<svg viewBox="0 0 32 32" fill="none" stroke="#FF4D4D" stroke-width="2.3" stroke-linecap="round"><circle cx="16" cy="16" r="8.6"/><path d="M6.2 9.2a12 12 0 0 0 0 13.6M25.8 9.2a12 12 0 0 1 0 13.6"/><path d="M13.6 20.5v-9h3.4a2.6 2.6 0 0 1 0 5.2h-3.4" stroke-linejoin="round"/></svg>',
     mil: '<svg viewBox="0 0 32 32" fill="none" stroke="#F5A623" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 8.5h8M15 8.5V12"/><path d="M4.5 14v8M4.5 18H8"/><path d="M8 13.5l2.5-1.5h7.5l2 2.5h4.2l1.8 2v4.5l-1.8 2H20l-2 2H10.5l-2.5-2z"/><path d="M27.5 15.5v6"/></svg>',
     wheel: (on) => `<svg viewBox="0 0 24 24" fill="none" stroke="${themeMode === "light" ? (on ? "#1D54D6" : "#70788A") : (on ? "#6E95FF" : "#5A5D64")}" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.2"/><path d="M3.5 10.5h6.3M14.2 10.5h6.3M12 14.2V21"/></svg>`,
-    right: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 28V17a5 5 0 0 1 5-5h11"/><path d="M21 6l6 6-6 6"/></svg>',
-    left: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 28V17a5 5 0 0 0-5-5H6"/><path d="M11 6l-6 6 6 6"/></svg>',
+    straight: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 28V6"/><path d="M10.5 11.5L16 6l5.5 5.5"/></svg>',
+    right: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 28V16a3 3 0 0 1 3-3h11"/><path d="M21 7.5L26.5 13 21 18.5"/></svg>',
+    left: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 28V16a3 3 0 0 0-3-3H6"/><path d="M11 7.5L5.5 13 11 18.5"/></svg>',
+    slightRight: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 28V17.5L25 6.5"/><path d="M17.5 6.2L25 6.5 24.4 14"/></svg>',
+    slightLeft: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 28V17.5L7 6.5"/><path d="M14.5 6.2L7 6.5 7.6 14"/></svg>',
+    sharpRight: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 28V9l15.5 12"/><path d="M18.2 22.8L25.5 21 24.2 13.8"/></svg>',
+    sharpLeft: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 28V9L6.5 21"/><path d="M13.8 22.8L6.5 21 7.8 13.8"/></svg>',
+    uturn: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 27V12.5a5.5 5.5 0 0 0-11 0v9.5"/><path d="M5.5 17.5L10.5 22.5 15.5 17.5"/></svg>',
+    roundabout: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"><path d="M16 28v-6.5"/><path d="M11.8 20A6.4 6.4 0 1 1 22 12.2"/><path d="M17.2 7.8L22.5 12.4 25.5 6.6"/></svg>',
+    tollgate: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 24l4-14h14l4 14M4 17h24M16 27V7"/><path d="M12 10.5L16 6.5l4 4"/></svg>',
+    arrive: '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="16" cy="16" r="9.5"/><circle cx="16" cy="16" r="3.6" fill="currentColor"/></svg>',
     none: '<svg viewBox="0 0 32 32" fill="none" stroke="#5A5D64" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M16 29s9-8.5 9-15a9 9 0 0 0-18 0c0 6.5 9 15 9 15z"/><circle cx="16" cy="14" r="3"/></svg>',
     carTop: '<svg viewBox="0 0 30 66" fill="none"><rect x="5" y="2" width="20" height="62" rx="9" stroke="#8E9099" stroke-width="1.6"/><path d="M8 17h14l-2 9H10z" fill="#2A2C31"/><path d="M9 46h12l-1 7H10z" fill="#2A2C31"/><rect x="1.5" y="11" width="3" height="10" rx="1.5" fill="#5A5D64"/><rect x="25.5" y="11" width="3" height="10" rx="1.5" fill="#5A5D64"/><rect x="1.5" y="45" width="3" height="10" rx="1.5" fill="#5A5D64"/><rect x="25.5" y="45" width="3" height="10" rx="1.5" fill="#5A5D64"/></svg>',
     prev: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>',
@@ -487,7 +497,7 @@
           <div class="vspeed">
             <div class="prnd" data-k="prnd"><span>P</span><span>R</span><span>N</span><span>D</span></div>
             <div class="speed"><span class="num" data-k="speed"></span><span class="u">km/h</span></div>
-            <div class="tt" aria-label="경고등"><i data-k="ttHead" title="전조등">${ICON.lowBeam}</i><i data-k="ttHigh" title="상향등">${ICON.highBeam}</i><i data-k="ttPbrake" title="주차 브레이크">${ICON.pbrake}</i><i data-k="ttMil" title="엔진 경고등(MIL)">${ICON.mil}</i></div>
+            <div class="tt" aria-label="경고등"><i data-k="ttPbrake" title="주차 브레이크">${ICON.pbrake}</i><i data-k="ttMil" title="엔진 경고등(MIL)">${ICON.mil}</i></div>
           </div>
           <div class="limits">
             <div class="limit" data-k="limBox"><span class="num" data-k="limit"></span></div>
@@ -616,23 +626,22 @@
     // Camera event -> red-ring limit of the camera; no event -> blue-ring limit of the current road
     const camera = s.sdi.mode !== "none" && s.sdi.limit > 0;
     const shownLimit = camera ? s.sdi.limit : (s.sdi.road || 0);
-    const TL = lampsOf(s);
-    $("ttHead").classList.toggle("on", !!TL.head);
-    $("ttHigh").classList.toggle("on", !!TL.high);
     $("ttPbrake").classList.toggle("on", !!s.pbrake);
     $("ttMil").hidden = !isIce;
     $("ttMil").classList.toggle("on", isIce && milOf(s));
     $("limBox").style.display = shownLimit > 0 ? "grid" : "none";
     $("limBox").classList.toggle("road", !camera);
     set("limit", shownLimit);
-    $("apIcon").innerHTML = ICON.wheel(s.cruise > 0);
+    const cruiseOn = s.cruise > 0 && s.gear === "D";
+    $("apIcon").innerHTML = ICON.wheel(cruiseOn);
     // Steering angle shown only visually: the wheel turns like the real one (openpilot: + = left = counter-clockwise)
     $("apIcon").style.transform = `rotate(${(-s.steer).toFixed(1)}deg)`;
-    $("apBox").classList.toggle("off", !(s.cruise > 0));
-    set("cruise", s.cruise > 0 ? s.cruise : "");
+    $("apBox").classList.toggle("off", !cruiseOn);
+    set("cruise", cruiseOn ? s.cruise : "");
     $("sect").innerHTML = s.sdi.mode === "section" ? `구간단속 <b>${s.sdi.dist}</b> · 평균 <b>${s.sdi.avg}</b>`
       : (s.sdi.mode === "traffic" ? `과속카메라 <b>${s.sdi.dist}</b>` : "");
-    $("turn").innerHTML = ICON[s.tbt.turn] || ICON.none;
+    const turnKey = (typeof tbtMode !== "undefined" && tbtMode !== "scene") ? tbtMode : s.tbt.turn;
+    $("turn").innerHTML = ICON[turnKey] || ICON.straight;
     // No destination (no turn-by-turn distance) -> hide the TBT card entirely
     $("tbtBox").style.display = s.tbt.dist ? "flex" : "none";
     set("navDist", s.tbt.dist);
@@ -1574,6 +1583,7 @@
   if (params.get("rpm") === "ok" || params.get("rpm") === "off") rpmSigMode = params.get("rpm");
   if (params.get("mil")) milMode = params.get("mil");
   if (params.get("lamp")) lampMode = params.get("lamp");
+  let tbtMode = params.get("tbt") || "scene";
   if (params.get("pdw")) pdwMode = params.get("pdw");
   if (params.get("door")) doorMode = params.get("door");
 
@@ -1734,8 +1744,8 @@
     out.push(["S:tbtDist", D(parseFloat(getComputedStyle(nd).fontSize))].join("\t"));
     out.push(["S:tpms", D(parseFloat(getComputedStyle(tp).fontSize))].join("\t"));
     // telltales: gap between the speed number's right edge and the first icon (icons are re-placed per frame)
-    const spdEl = lcd.querySelector('[data-k="speed"]'), tt0 = lcd.querySelector('[data-k="ttHead"]');
-    out.push(["S:ttGap", D(tt0.getBoundingClientRect().left - spdEl.getBoundingClientRect().right)].join("\t"));
+    const spdEl = lcd.querySelector('[data-k="speed"]'), tt0 = lcd.querySelector('[data-k="ttPbrake"]');
+    if (tt0) out.push(["S:ttGap", D(tt0.getBoundingClientRect().left - spdEl.getBoundingClientRect().right)].join("\t"));
     return out.join("\n");
   };
 
@@ -1772,6 +1782,7 @@
     setSeg("segMil", milMode);
     setSeg("segDoor", doorMode);
     setSeg("segPdw", pdwMode);
+    setSeg("segTbt", tbtMode);
     setSeg("segAnim", animate ? "on" : "off");
     const isIce = ptMode === "ice";
     document.getElementById("ctlRpmSig").hidden = !isIce;
@@ -1825,6 +1836,7 @@
   bindSeg("segMil", (v) => { milMode = v; draw(); });
   bindSeg("segDoor", (v) => { doorMode = v; draw(); });
   bindSeg("segPdw", (v) => { pdwMode = v; draw(); });
+  bindSeg("segTbt", (v) => { tbtMode = v; draw(); });
   if (shot) {
     document.body.classList.add("shot");
     document.getElementById("fig92").hidden = shot !== "92";

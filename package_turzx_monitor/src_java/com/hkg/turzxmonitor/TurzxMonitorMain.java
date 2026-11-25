@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.15";
+    public static final String MONITOR_VERSION = "1.5.16";
     // v1.5.14: 4MB -> 12MB. Clients <= 1.5.13 still stop at 4MB, so build_package.py keeps the b64 below that.
     static final int OTA_JAR_B64_MAX_BYTES = 12 * 1024 * 1024;
     public static final int POWERTRAIN_AUTO = 0;
@@ -307,13 +307,41 @@ public class TurzxMonitorMain {
         public int carrotSpeedKph = 0;
         public int carrotCruiseKph = 0;
         public boolean carrotActive = false;
+        public boolean carrotEnabledKnown = false;
+        public boolean carrotSelfdriveSeen = false;
+        public boolean carrotLatActive = false;
+        public boolean carrotLongActive = false;
+        public boolean carrotCarControlSeen = false;
+        public int carrotCruiseRaw = 0;
         public int carrotSdiType = -1;        // >= 0: active camera (Red circle), < 0: normal limit (Blue circle)
         public int carrotSdiSpeedLimit = 0;   // km/h (0 = none/unknown)
         public int carrotSdiDistM = 0;
         public int carrotTbtDistM = 0;
         public int carrotTbtDistNextM = 0;
+        public int carrotTbtTurnType = -1;    // raw TMAP nTBTTurnType (-1 = unset)
+        public int carrotTbtTurnInfo = -1;    // raw xTurnInfo 0..8 (-1 = unset)
+        public long carrotTbtTurnTypeMs = 0L; // update timestamp for nTBTTurnType
+        public long carrotTbtTurnInfoMs = 0L; // update timestamp for xTurnInfo
+        public String carrotTbtAtcType = "";  // raw atcType string (e.g. "turn", "fork", "uturn", "roundabout")
         public String carrotTbtRoad = "";
         public String carrotIp = "";
+
+        /** Cruise speed target is shown only when cruise is actively engaged in Drive/unspecified gear. */
+        public boolean isCruiseEngaged() {
+            if (!carrotConnected) return false;
+            String g = gearPos != null ? gearPos.trim().toUpperCase(Locale.US) : "";
+            if ("P".equals(g) || "R".equals(g) || "N".equals(g)) return false;
+            return carrotActive && carrotCruiseKph > 0;
+        }
+
+        /** Steering wheel indicator is lit while cruise OR lateral-only MADS steering is active. */
+        public boolean isSteeringEngaged() {
+            if (!carrotConnected) return false;
+            String g = gearPos != null ? gearPos.trim().toUpperCase(Locale.US) : "";
+            if ("P".equals(g) || "R".equals(g) || "N".equals(g)) return false;
+            if (carrotCarControlSeen) return carrotLatActive || carrotActive;
+            return carrotActive;
+        }
         public float leadDistM = 0.0f;
         public float leadRelVelKph = 0.0f;
         public float leadYRightM = 0.0f;      // v1.5.4 radarState leadOne yRel (openpilot: left +) as right-positive metres
@@ -3811,13 +3839,14 @@ public class TurzxMonitorMain {
                 float leadX = hasLead ? camX(egoD, s.leadDistM) : 0f;
                 boolean crit = hasLead && s.leadDistM <= 12f, close = hasLead && s.leadDistM <= 18f;
                 if ("D".equals(gear) || "R".equals(gear)) {
+                    boolean apPath = s.isCruiseEngaged() || s.isSteeringEngaged();
                     float end = hasLead ? leadX - 1.5f : near + 70f;
                     int rgb = lightTheme
-                            ? (crit ? 0xDC2626 : (close ? 0xD97706 : (s.carrotCruiseKph > 0 ? 0x2563EB : 0x475569)))
-                            : (crit ? 0xE31937 : (close ? 0xF5A623 : (s.carrotCruiseKph > 0 ? 0x3E6AE1 : 0xC8CDD7)));
+                            ? (crit ? 0xDC2626 : (close ? 0xD97706 : (apPath ? 0x2563EB : 0x475569)))
+                            : (crit ? 0xE31937 : (close ? 0xF5A623 : (apPath ? 0x3E6AE1 : 0xC8CDD7)));
                     int a0 = lightTheme
-                            ? ((s.carrotCruiseKph > 0 || close) ? 160 : 60)
-                            : ((s.carrotCruiseKph > 0 || close) ? 140 : 46);
+                            ? ((apPath || close) ? 160 : 60)
+                            : ((apPath || close) ? 140 : 46);
                     mPReset.invoke(path);
                     boolean first = true;
                     for (int i = 0; i < xs.length && xs[i] <= end; i++) {
@@ -3931,23 +3960,249 @@ public class TurzxMonitorMain {
                 return f.x + speedTextWidth + (gap != null ? gap.floatValue() : 12f);
             }
 
-            private static void drawTelltales(Object c, String speedText, boolean head, boolean high, boolean pbrake,
+            static String[] telltaleKinds(boolean iceMode) {
+                return iceMode ? new String[]{"pbrake", "mil"} : new String[]{"pbrake"};
+            }
+
+            /** Draw active telltales beside speed: parking brake (+ MIL on ICE). Headlight/high-beam removed in v1.5.16. */
+            private static void drawTelltales(Object c, String speedText, boolean pbrake,
                                               boolean iceMode, boolean milOn) throws Exception {
                 float[] r0 = L.rect("ttHead"), r1 = L.rect("ttHigh"), r2 = L.rect("ttPbrake"), r3 = L.rect("ttMil");
                 Field f = L.fields.get("speed");
                 if (r0 == null || r1 == null || r2 == null || f == null || pIcon == null) return;
                 float x0 = telltaleX(L, measure(fit(speedText, f.size, f.bold, f.maxW), f.size, f.bold));
-                float[] r3Fallback = r3 != null ? r3 : new float[]{r2[0] + (r2[0] - r1[0]), r2[1], r2[2], r2[3]};
-                float[][] rs = {r0, r1, r2, r3Fallback};
-                boolean[] on = {head, high, pbrake, milOn};
+                float step = r1[0] - r0[0];
+                if (step <= 0f) step = r2[2] * 1.25f;
+                int[] ids = iceMode ? new int[]{2, 3} : new int[]{2};
+                boolean[] on = {pbrake, milOn};
                 int[] col = lightTheme
-                        ? new int[]{0xFF16A34A, 0xFF2563EB, 0xFFDC2626, 0xFFD97706}
-                        : new int[]{TT_HEAD, TT_HIGH, TT_PBRAKE, TT_MIL};
+                        ? new int[]{0xFFDC2626, 0xFFD97706}
+                        : new int[]{TT_PBRAKE, TT_MIL};
                 int offCol = lightTheme ? 0xFFB6BECC : TT_OFF;
-                int count = iceMode ? 4 : 3;
-                for (int i = 0; i < count; i++) {
-                    float x = x0 + (rs[i][0] - r0[0]);
-                    drawTelltaleIcon(c, i, x, rs[i][1], rs[i][2], on[i] ? col[i] : offCol);
+                for (int i = 0; i < ids.length; i++) {
+                    drawTelltaleIcon(c, ids[i], x0 + i * step, r0[1], r2[2], on[i] ? col[i] : offCol);
+                }
+            }
+
+            static final int TBT_STRAIGHT = 0;
+            static final int TBT_LEFT = 1;
+            static final int TBT_RIGHT = 2;
+            static final int TBT_SLIGHT_LEFT = 3;
+            static final int TBT_SLIGHT_RIGHT = 4;
+            static final int TBT_SHARP_LEFT = 5;
+            static final int TBT_SHARP_RIGHT = 6;
+            static final int TBT_UTURN = 7;
+            static final int TBT_ROUNDABOUT = 8;
+            static final int TBT_TOLLGATE = 9;
+            static final int TBT_ARRIVE = 10;
+
+            /** Map TMAP nTBTTurnType using upstream carrot_serv.py:352-400 table (-1 = unknown). */
+            static int mapTurnTypeKind(int tt) {
+                switch (tt) {
+                    case 12: return TBT_LEFT;
+                    case 13: return TBT_RIGHT;
+                    case 16:
+                    case 18: return TBT_SHARP_LEFT;
+                    case 19: return TBT_SHARP_RIGHT;
+                    case 7: case 17: case 44: case 75: case 76:
+                    case 102: case 105: case 112: case 115: case 118: return TBT_SLIGHT_LEFT;
+                    case 6: case 43: case 73: case 74:
+                    case 101: case 103: case 104: case 106: case 111: case 114: case 117:
+                    case 123: case 124: return TBT_SLIGHT_RIGHT;
+                    case 14: return TBT_UTURN;
+                    case 119: case 120: case 121:
+                    case 131: case 132: case 133: case 134: case 135: case 136:
+                    case 137: case 138: case 139: case 140: case 141: case 142: return TBT_ROUNDABOUT;
+                    case 153: case 154: case 249: return TBT_TOLLGATE;
+                    case 201: return TBT_ARRIVE;
+                    case 11: case 51: case 52: case 53: case 54: case 55: return TBT_STRAIGHT;
+                    default: return -1;
+                }
+            }
+
+            /** Map CarrotPilot carrotMan.xTurnInfo 0..8 to TBT icon kind (-1 = unknown). */
+            static int mapTurnInfoKind(int ti) {
+                switch (ti) {
+                    case 1: return TBT_LEFT;
+                    case 2: return TBT_RIGHT;
+                    case 3: return TBT_SLIGHT_LEFT;
+                    case 4: return TBT_SLIGHT_RIGHT;
+                    case 5: return TBT_ROUNDABOUT;
+                    case 6: return TBT_TOLLGATE;
+                    case 7: return TBT_UTURN;
+                    case 8: return TBT_ARRIVE;
+                    case 0: return TBT_STRAIGHT;
+                    default: return -1;
+                }
+            }
+
+            private static boolean isSameCoarseTbt(int ttKind, int tiKind) {
+                if (ttKind == tiKind) return true;
+                if ((ttKind == TBT_SHARP_LEFT || ttKind == TBT_SLIGHT_LEFT || ttKind == TBT_LEFT)
+                        && (tiKind == TBT_LEFT || tiKind == TBT_SLIGHT_LEFT)) return true;
+                if ((ttKind == TBT_SHARP_RIGHT || ttKind == TBT_SLIGHT_RIGHT || ttKind == TBT_RIGHT)
+                        && (tiKind == TBT_RIGHT || tiKind == TBT_SLIGHT_RIGHT)) return true;
+                return false;
+            }
+
+            static int resolveTbtTurnKind(TelemetrySnapshot s) {
+                if (s == null) return TBT_STRAIGHT;
+                int ttKind = s.carrotTbtTurnType >= 0 ? mapTurnTypeKind(s.carrotTbtTurnType) : -1;
+                int tiKind = s.carrotTbtTurnInfo >= 0 ? mapTurnInfoKind(s.carrotTbtTurnInfo) : -1;
+                if (ttKind >= 0 && tiKind >= 0) {
+                    if (isSameCoarseTbt(ttKind, tiKind)) return ttKind;
+                    return (s.carrotTbtTurnTypeMs >= s.carrotTbtTurnInfoMs) ? ttKind : tiKind;
+                }
+                if (ttKind >= 0) return ttKind;
+                if (tiKind >= 0) return tiKind;
+                String atc = s.carrotTbtAtcType != null ? s.carrotTbtAtcType.toLowerCase(Locale.US) : "";
+                String road = s.carrotTbtRoad != null ? s.carrotTbtRoad : "";
+                if (atc.contains("uturn") || road.contains("유턴")) return TBT_UTURN;
+                if (atc.contains("roundabout") || atc.contains("rotary") || road.contains("회전")) return TBT_ROUNDABOUT;
+                if (atc.contains("toll") || road.contains("톨게이트") || road.contains("요금소") || road.endsWith("TG")) return TBT_TOLLGATE;
+                if (road.contains("목적지") || road.contains("도착")) return TBT_ARRIVE;
+                if (atc.contains("fork")) {
+                    if (road.contains("좌") || road.contains("왼쪽")) return TBT_SLIGHT_LEFT;
+                    if (road.contains("우") || road.contains("오른쪽")) return TBT_SLIGHT_RIGHT;
+                }
+                if (atc.contains("turn") || atc.contains("exit") || atc.contains("ramp")) {
+                    if (road.contains("좌회전") || road.contains("왼쪽")) return TBT_LEFT;
+                    if (road.contains("우회전") || road.contains("오른쪽") || road.contains("진출") || road.contains("출구")) return TBT_RIGHT;
+                }
+                return TBT_STRAIGHT;
+            }
+
+            static String tbtTurnArrowChar(int kind) {
+                switch (kind) {
+                    case TBT_LEFT: return "←";
+                    case TBT_RIGHT: return "→";
+                    case TBT_SLIGHT_LEFT: return "↖";
+                    case TBT_SLIGHT_RIGHT: return "↗";
+                    case TBT_SHARP_LEFT: return "↙";
+                    case TBT_SHARP_RIGHT: return "↘";
+                    case TBT_UTURN: return "↶";
+                    case TBT_ROUNDABOUT: return "↻";
+                    case TBT_TOLLGATE: return "◈";
+                    case TBT_ARRIVE: return "◎";
+                    default: return "↑";
+                }
+            }
+
+            private static void addArrowHead(float tipX, float tipY, float angleRad, float size) throws Exception {
+                float lx = tipX - size * (float) Math.cos(angleRad - 0.56);
+                float ly = tipY - size * (float) Math.sin(angleRad - 0.56);
+                float rx = tipX - size * (float) Math.cos(angleRad + 0.56);
+                float ry = tipY - size * (float) Math.sin(angleRad + 0.56);
+                mPMove.invoke(path, lx, ly);
+                mPLine.invoke(path, tipX, tipY);
+                mPLine.invoke(path, rx, ry);
+            }
+
+            private static void drawTbtIcon(Object c, int kind, float ix, float iy, float u, int fg) throws Exception {
+                Object sp = pIcon != null ? pIcon : pStroke;
+                if (sp == null) return;
+                mSetColor.invoke(sp, fg);
+                mSetStrokeW.invoke(sp, Math.max(2f, u * 0.27f));
+                mPReset.invoke(path);
+                float head = u * 0.42f;
+                switch (kind) {
+                    case TBT_RIGHT:
+                        mPMove.invoke(path, ix - u * 0.25f, iy + u * 0.78f);
+                        mPLine.invoke(path, ix - u * 0.25f, iy - u * 0.12f);
+                        mPLine.invoke(path, ix - u * 0.13f, iy - u * 0.24f);
+                        mPLine.invoke(path, ix + u * 0.68f, iy - u * 0.24f);
+                        addArrowHead(ix + u * 0.72f, iy - u * 0.24f, 0f, head);
+                        mDrawPath.invoke(c, path, sp);
+                        break;
+                    case TBT_LEFT:
+                        mPMove.invoke(path, ix + u * 0.25f, iy + u * 0.78f);
+                        mPLine.invoke(path, ix + u * 0.25f, iy - u * 0.12f);
+                        mPLine.invoke(path, ix + u * 0.13f, iy - u * 0.24f);
+                        mPLine.invoke(path, ix - u * 0.68f, iy - u * 0.24f);
+                        addArrowHead(ix - u * 0.72f, iy - u * 0.24f, (float) Math.PI, head);
+                        mDrawPath.invoke(c, path, sp);
+                        break;
+                    case TBT_SLIGHT_RIGHT:
+                        mPMove.invoke(path, ix - u * 0.25f, iy + u * 0.78f);
+                        mPLine.invoke(path, ix - u * 0.25f, iy + u * 0.08f);
+                        mPLine.invoke(path, ix + u * 0.56f, iy - u * 0.66f);
+                        addArrowHead(ix + u * 0.58f, iy - u * 0.68f, (float) (-Math.PI / 4.0), head);
+                        mDrawPath.invoke(c, path, sp);
+                        break;
+                    case TBT_SLIGHT_LEFT:
+                        mPMove.invoke(path, ix + u * 0.25f, iy + u * 0.78f);
+                        mPLine.invoke(path, ix + u * 0.25f, iy + u * 0.08f);
+                        mPLine.invoke(path, ix - u * 0.56f, iy - u * 0.66f);
+                        addArrowHead(ix - u * 0.58f, iy - u * 0.68f, (float) (-3.0 * Math.PI / 4.0), head);
+                        mDrawPath.invoke(c, path, sp);
+                        break;
+                    case TBT_SHARP_RIGHT:
+                        mPMove.invoke(path, ix - u * 0.35f, iy + u * 0.78f);
+                        mPLine.invoke(path, ix - u * 0.35f, iy - u * 0.44f);
+                        mPLine.invoke(path, ix + u * 0.58f, iy + u * 0.34f);
+                        addArrowHead(ix + u * 0.60f, iy + u * 0.36f, (float) (Math.PI / 4.0), head);
+                        mDrawPath.invoke(c, path, sp);
+                        break;
+                    case TBT_SHARP_LEFT:
+                        mPMove.invoke(path, ix + u * 0.35f, iy + u * 0.78f);
+                        mPLine.invoke(path, ix + u * 0.35f, iy - u * 0.44f);
+                        mPLine.invoke(path, ix - u * 0.58f, iy + u * 0.34f);
+                        addArrowHead(ix - u * 0.60f, iy + u * 0.36f, (float) (3.0 * Math.PI / 4.0), head);
+                        mDrawPath.invoke(c, path, sp);
+                        break;
+                    case TBT_UTURN:
+                        mPMove.invoke(path, ix + u * 0.34f, iy + u * 0.76f);
+                        mPLine.invoke(path, ix + u * 0.34f, iy - u * 0.28f);
+                        for (int k = 1; k <= 8; k++) {
+                            double a = -Math.PI * k / 8.0;
+                            mPLine.invoke(path, ix + (float) (u * 0.34f * Math.cos(a)), iy - u * 0.28f + (float) (u * 0.34f * Math.sin(a)));
+                        }
+                        mPLine.invoke(path, ix - u * 0.34f, iy + u * 0.40f);
+                        addArrowHead(ix - u * 0.34f, iy + u * 0.44f, (float) (Math.PI / 2.0), head * 0.92f);
+                        mDrawPath.invoke(c, path, sp);
+                        break;
+                    case TBT_ROUNDABOUT: {
+                        float r = u * 0.40f, cy = iy - u * 0.08f;
+                        for (int k = 0; k <= 14; k++) {
+                            double a = Math.PI * 0.65 + (Math.PI * 1.55) * k / 14.0;
+                            float px = ix + (float) (r * Math.cos(a));
+                            float py = cy + (float) (r * Math.sin(a));
+                            if (k == 0) mPMove.invoke(path, px, py);
+                            else mPLine.invoke(path, px, py);
+                        }
+                        mPMove.invoke(path, ix, iy + u * 0.78f);
+                        mPLine.invoke(path, ix, cy + r);
+                        addArrowHead(ix + r * 0.85f, cy - r * 0.55f, -0.35f, head * 0.82f);
+                        mDrawPath.invoke(c, path, sp);
+                        break;
+                    }
+                    case TBT_TOLLGATE:
+                        mPMove.invoke(path, ix - u * 0.72f, iy + u * 0.52f);
+                        mPLine.invoke(path, ix - u * 0.45f, iy - u * 0.42f);
+                        mPLine.invoke(path, ix + u * 0.45f, iy - u * 0.42f);
+                        mPLine.invoke(path, ix + u * 0.72f, iy + u * 0.52f);
+                        mPMove.invoke(path, ix - u * 0.76f, iy + u * 0.06f);
+                        mPLine.invoke(path, ix + u * 0.76f, iy + u * 0.06f);
+                        mPMove.invoke(path, ix, iy + u * 0.70f);
+                        mPLine.invoke(path, ix, iy - u * 0.64f);
+                        addArrowHead(ix, iy - u * 0.68f, (float) (-Math.PI / 2.0), head * 0.85f);
+                        mDrawPath.invoke(c, path, sp);
+                        break;
+                    case TBT_ARRIVE:
+                        mSetStrokeW.invoke(sp, Math.max(1.8f, u * 0.24f));
+                        mSetRf.invoke(rf, ix - u * 0.62f, iy - u * 0.62f, ix + u * 0.62f, iy + u * 0.62f);
+                        mDrawOval.invoke(c, rf, sp);
+                        mSetShader.invoke(pFill, new Object[]{null});
+                        mSetColor.invoke(pFill, fg);
+                        mSetRf.invoke(rf, ix - u * 0.24f, iy - u * 0.24f, ix + u * 0.24f, iy + u * 0.24f);
+                        mDrawOval.invoke(c, rf, pFill);
+                        break;
+                    default: // TBT_STRAIGHT
+                        mPMove.invoke(path, ix, iy + u * 0.78f);
+                        mPLine.invoke(path, ix, iy - u * 0.68f);
+                        addArrowHead(ix, iy - u * 0.72f, (float) (-Math.PI / 2.0), head);
+                        mDrawPath.invoke(c, path, sp);
+                        break;
                 }
             }
 
@@ -4227,7 +4482,7 @@ public class TurzxMonitorMain {
                                                 boolean iceMode) throws Exception {
                 copyActive(c, L.rect("prnd" + gear));
                 field(c, "speed", String.valueOf(spd), 0);
-                drawTelltales(c, String.valueOf(spd), LampProbe.headLampsOn(), BodyProbe.highBeamOn(), BodyProbe.parkingBrakeOn(),
+                drawTelltales(c, String.valueOf(spd), BodyProbe.parkingBrakeOn(),
                         iceMode, s.milOn);
                 // speed limit: camera event -> red ring, otherwise the current road limit -> blue ring
                 boolean camera = !(s.carrotSdiType < 0 && s.carrotSdiDistM <= 0);
@@ -4250,7 +4505,8 @@ public class TurzxMonitorMain {
                 float[] wr = L.rect("wheel");
                 if (wr != null) {
                     float cx = wr[0] + wr[2] / 2f, cy = wr[1] + wr[3] / 2f, u = wr[2] / 24f;
-                    int col = themeColor(s.carrotCruiseKph > 0 ? 0xFF6E95FF : 0xFF5A5D64, lightTheme);
+                    boolean steerOn = s.isSteeringEngaged() || s.isCruiseEngaged();
+                    int col = themeColor(steerOn ? 0xFF6E95FF : 0xFF5A5D64, lightTheme);
                     int sc = ((Integer) mSave.invoke(c)).intValue();
                     mRotate.invoke(c, Math.max(-540f, Math.min(540f, -s.steeringAngleDeg)), cx, cy);
                     mSetColor.invoke(pStroke, col);
@@ -4269,7 +4525,7 @@ public class TurzxMonitorMain {
                     mDrawPath.invoke(c, path, pStroke);
                     mRestore.invoke(c, sc);
                 }
-                if (s.carrotCruiseKph > 0) field(c, "cruise", String.valueOf(s.carrotCruiseKph), 0);
+                if (s.isCruiseEngaged()) field(c, "cruise", String.valueOf(s.carrotCruiseKph), 0);
                 if (camera && s.carrotSdiDistM > 0) {
                     int d = s.carrotSdiDistM;
                     String ds = d >= 1000 ? String.format(Locale.US, "%.1f km", d / 1000.0) : (d + " m");
@@ -4283,7 +4539,7 @@ public class TurzxMonitorMain {
                 if (!parked) {
                     Field lf = L.fields.get("lane");
                     String lane = s.laneConfidencePct > 0f ? String.format(Locale.US, "%.0f%%", s.laneConfidencePct)
-                            : (s.carrotConnected ? (s.carrotActive ? "ON" : "대기") : "--");
+                            : (s.carrotConnected ? ((s.isCruiseEngaged() || s.isSteeringEngaged()) ? "ON" : "대기") : "--");
                     if (lf != null) {
                         float pw = measure("차선 ", lf.size, false);
                         text(c, "차선 ", lf.x - pw, lf.y, lf.size, false, themeColor(0xFF5A5D64, lightTheme));
@@ -4320,18 +4576,9 @@ public class TurzxMonitorMain {
                 mSetRf.invoke(rf, x0, y0, x1, y0 + h);
                 float rr = tr.length > 4 ? tr[4] : 24f;
                 mDrawRoundRect.invoke(c, rf, rr, rr, pStroke);
-                // generic navigation arrow (turn direction is not available from the TBT feed)
                 float ix = x0 + pad + icon / 2f, iy = y0 + h / 2f, u = icon / 2f;
-                mPReset.invoke(path);
-                mPMove.invoke(path, ix, iy - u * 0.9f);
-                mPLine.invoke(path, ix + u * 0.7f, iy + u * 0.8f);
-                mPLine.invoke(path, ix, iy + u * 0.4f);
-                mPLine.invoke(path, ix - u * 0.7f, iy + u * 0.8f);
-                mPClose.invoke(path);
-                mSetShader.invoke(pFill, new Object[]{null});
                 int fgPrimary = themeColor(0xFFF5F5F7, lightTheme), fgSec = themeColor(0xFF8E9099, lightTheme);
-                mSetColor.invoke(pFill, fgPrimary);
-                mDrawPath.invoke(c, path, pFill);
+                drawTbtIcon(c, resolveTbtTurnKind(s), ix, iy, u, fgPrimary);
                 float tx = ix + icon / 2f + pad * 0.8f;
                 float base1 = y0 + h * 0.52f, base2 = y0 + h * 0.84f;
                 float w1 = text(c, num, tx, base1, distSize, true, fgPrimary);
@@ -4785,8 +5032,9 @@ public class TurzxMonitorMain {
             drawTextSmart(c, String.valueOf(egoSpd), L.egoX, L.egoY, L.egoFs, 0xFFFFFFFF, true, alignCenter,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
-            String cruiseStr = (s.carrotCruiseKph > 0) ? String.valueOf(s.carrotCruiseKph) : "--";
-            int cruiseColor = (s.carrotCruiseKph > 0) ? 0xFF44A282 : 0xFF8A8C92;
+            boolean cruiseOn = s.isCruiseEngaged();
+            String cruiseStr = cruiseOn ? String.valueOf(s.carrotCruiseKph) : "--";
+            int cruiseColor = cruiseOn ? 0xFF44A282 : 0xFF8A8C92;
             drawTextSmart(c, cruiseStr, L.cruiseX, L.cruiseY, L.cruiseFs, cruiseColor, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
@@ -4831,7 +5079,10 @@ public class TurzxMonitorMain {
                 String[] parts = roadName.split("·");
                 roadName = parts[parts.length - 1].trim();
             }
-            drawTextSmart(c, truncateText(roadName, 6), L.tbtRoadX, L.tbtRoadY, L.tbtRoadFs, 0xFFBDBDC0, true, alignLeft,
+            if (s.carrotTbtDistM > 0) {
+                roadName = TeslaHud.tbtTurnArrowChar(TeslaHud.resolveTbtTurnKind(s)) + " " + roadName;
+            }
+            drawTextSmart(c, truncateText(roadName, 7), L.tbtRoadX, L.tbtRoadY, L.tbtRoadFs, 0xFFBDBDC0, true, alignLeft,
                     pPubBold, pPubMed, pSysBold, pSysMed, setColor, setTextSize, setTextAlign, measureText, drawText);
 
             String nextTbtStr;
@@ -4850,7 +5101,7 @@ public class TurzxMonitorMain {
             if (s.laneConfidencePct > 0f) {
                 laneChipStr = String.format(Locale.US, "%.0f%%", s.laneConfidencePct);
             } else if (s.carrotConnected) {
-                laneChipStr = s.carrotActive ? "ON" : "대기";
+                laneChipStr = (s.isCruiseEngaged() || s.isSteeringEngaged()) ? "ON" : "대기";
             } else {
                 laneChipStr = "--%";
             }
@@ -8506,7 +8757,7 @@ public class TurzxMonitorMain {
 
                     OutputStream os = wsSock.getOutputStream();
                     InputStream is = wsSock.getInputStream();
-                    String handshake = "GET /ws/compact_state?services=carState,controlsState,carrotMan,radarState,selfdriveState,longitudinalPlan,modelV2 HTTP/1.1\r\n"
+                    String handshake = "GET /ws/compact_state?services=carState,controlsState,carrotMan,radarState,selfdriveState,longitudinalPlan,modelV2,carControl HTTP/1.1\r\n"
                             + "Host: " + ip + ":" + CARROT_WS_PORT + "\r\n"
                             + "Upgrade: websocket\r\n"
                             + "Connection: Upgrade\r\n"
@@ -8776,11 +9027,22 @@ public class TurzxMonitorMain {
             c.carrotSpeedKph = liveSnapshot.carrotSpeedKph;
             c.carrotCruiseKph = liveSnapshot.carrotCruiseKph;
             c.carrotActive = liveSnapshot.carrotActive;
+            c.carrotEnabledKnown = liveSnapshot.carrotEnabledKnown;
+            c.carrotSelfdriveSeen = liveSnapshot.carrotSelfdriveSeen;
+            c.carrotLatActive = liveSnapshot.carrotLatActive;
+            c.carrotLongActive = liveSnapshot.carrotLongActive;
+            c.carrotCarControlSeen = liveSnapshot.carrotCarControlSeen;
+            c.carrotCruiseRaw = liveSnapshot.carrotCruiseRaw;
             c.carrotSdiType = liveSnapshot.carrotSdiType;
             c.carrotSdiSpeedLimit = liveSnapshot.carrotSdiSpeedLimit;
             c.carrotSdiDistM = liveSnapshot.carrotSdiDistM;
             c.carrotTbtDistM = liveSnapshot.carrotTbtDistM;
             c.carrotTbtDistNextM = liveSnapshot.carrotTbtDistNextM;
+            c.carrotTbtTurnType = liveSnapshot.carrotTbtTurnType;
+            c.carrotTbtTurnInfo = liveSnapshot.carrotTbtTurnInfo;
+            c.carrotTbtTurnTypeMs = liveSnapshot.carrotTbtTurnTypeMs;
+            c.carrotTbtTurnInfoMs = liveSnapshot.carrotTbtTurnInfoMs;
+            c.carrotTbtAtcType = liveSnapshot.carrotTbtAtcType;
             c.carrotTbtRoad = liveSnapshot.carrotTbtRoad;
             c.carrotIp = liveSnapshot.carrotIp;
             c.leadDistM = liveSnapshot.leadDistM;
@@ -9265,7 +9527,7 @@ public class TurzxMonitorMain {
             }
             v.put("dr.line", s.carrotConnected
                     ? "콤마 연결 · " + Math.max(0, s.carrotSpeedKph) + " km/h · 크루즈 "
-                    + (s.carrotCruiseKph > 0 ? s.carrotCruiseKph + " km/h" : "--")
+                    + (s.isCruiseEngaged() ? s.carrotCruiseKph + " km/h" : "--")
                     : "콤마 미연결");
             v.put("dr.steer", String.format(Locale.US, "조향 %+.1f°", s.steeringAngleDeg));
 
@@ -13706,13 +13968,27 @@ public class TurzxMonitorMain {
                 if (!Float.isNaN(refMs) && refMs >= 0.0f && refMs <= 90.0f) {
                     target.carrotSpeedKph = Math.round(refMs * 3.6f);
                 }
-                if (!Float.isNaN(vCruiseKph) && vCruiseKph >= 0.0f && vCruiseKph <= 250.0f) {
-                    target.carrotCruiseKph = Math.round(vCruiseKph);
-                }
                 if (gearShifter == 1) target.gearPos = "P";
                 else if (gearShifter == 2) target.gearPos = "D";
                 else if (gearShifter == 3) target.gearPos = "N";
                 else if (gearShifter == 4) target.gearPos = "R";
+
+                String g = target.gearPos != null ? target.gearPos.trim().toUpperCase(Locale.US) : "";
+                boolean nonDriveGear = "P".equals(g) || "R".equals(g) || "N".equals(g);
+                if (!Float.isNaN(vCruiseKph) && vCruiseKph > 0.0f && vCruiseKph < 250.0f && !nonDriveGear) {
+                    target.carrotCruiseRaw = Math.round(vCruiseKph);
+                } else {
+                    target.carrotCruiseRaw = 0;
+                }
+                if (nonDriveGear) {
+                    target.carrotActive = false;
+                    target.carrotCruiseKph = 0;
+                } else if (target.carrotEnabledKnown) {
+                    target.carrotCruiseKph = (target.carrotActive && target.carrotCruiseRaw > 0) ? target.carrotCruiseRaw : 0;
+                } else {
+                    target.carrotCruiseKph = target.carrotCruiseRaw;
+                    target.carrotActive = (carrotCruise > 0) || (target.carrotCruiseKph > 0);
+                }
 
                 if (!Float.isNaN(flPsi) && flPsi >= 15.0f && flPsi <= 65.0f) target.tpmsFlPsi = flPsi;
                 if (!Float.isNaN(frPsi) && frPsi >= 15.0f && frPsi <= 65.0f) target.tpmsFrPsi = frPsi;
@@ -13727,7 +14003,6 @@ public class TurzxMonitorMain {
                     target.pathPoly[2] = -steerDeg * 0.000025f;
                 }
                 target.carrotConnected = true;
-                target.carrotActive = (carrotCruise > 0) || (target.carrotCruiseKph > 0);
                 return true;
             }
             case 2: { // controlsState (26 bytes)
@@ -13735,10 +14010,18 @@ public class TurzxMonitorMain {
                 boolean enabled = (buf[base + 8] & 0xFF) != 0;
                 float vCruise = bb.getFloat(base + 9);
                 float curvature = bb.getFloat(base + 14);
-                target.carrotActive = enabled;
-                if (!Float.isNaN(vCruise) && vCruise > 0.0f && vCruise <= 250.0f) {
-                    target.carrotCruiseKph = Math.round(vCruise);
+                target.carrotEnabledKnown = true;
+                if (!target.carrotSelfdriveSeen) {
+                    target.carrotActive = enabled;
                 }
+                if (!Float.isNaN(vCruise) && vCruise > 0.0f && vCruise < 250.0f) {
+                    target.carrotCruiseRaw = Math.round(vCruise);
+                } else {
+                    target.carrotCruiseRaw = 0;
+                }
+                String g = target.gearPos != null ? target.gearPos.trim().toUpperCase(Locale.US) : "";
+                boolean nonDrive = "P".equals(g) || "R".equals(g) || "N".equals(g);
+                target.carrotCruiseKph = (target.carrotActive && !nonDrive && target.carrotCruiseRaw > 0) ? target.carrotCruiseRaw : 0;
                 if (!Float.isNaN(curvature) && Math.abs(curvature) < 0.5f) {
                     if (target.pathPoly == null || target.pathPoly.length < 4) {
                         target.pathPoly = new float[4];
@@ -13750,18 +14033,23 @@ public class TurzxMonitorMain {
             }
             case 5: { // carrotMan (SDI speed camera + TBT navigation)
                 if (len < 44) return false;
-                int activeCarrot = bb.getInt(base + 8);
                 int roadLimitSpeed = bb.getInt(base + 12);
                 int xSpdType = bb.getInt(base + 16);
                 int xSpdLimit = bb.getInt(base + 20);
                 int xSpdDist = bb.getInt(base + 24);
+                int xTurnInfo = bb.getInt(base + 32);
                 int xDistToTurn = bb.getInt(base + 36);
 
-                if (activeCarrot > 0) target.carrotActive = true;
                 target.carrotSdiType = xSpdType;
                 target.carrotSdiSpeedLimit = (xSpdLimit > 0) ? xSpdLimit : Math.max(0, roadLimitSpeed);
                 target.carrotSdiDistM = Math.max(0, xSpdDist);
+                target.carrotTbtTurnInfo = xTurnInfo;
+                if (xTurnInfo >= 0) target.carrotTbtTurnInfoMs = System.currentTimeMillis();
                 if (xDistToTurn >= 0) target.carrotTbtDistM = xDistToTurn;
+                if (xDistToTurn == 0) {
+                    target.carrotTbtTurnInfo = -1;
+                    target.carrotTbtTurnType = -1;
+                }
 
                 int p = base + 44;
                 int end = base + len;
@@ -13770,14 +14058,34 @@ public class TurzxMonitorMain {
                     int sLen = bb.getShort(p) & 0xFFFF;
                     p += 2;
                     if (p + sLen > end) break;
-                    if (idx >= 1 && sLen > 0) {
-                        String txt = new String(buf, p, sLen, UTF8).trim();
-                        if (!txt.isEmpty()) {
-                            target.carrotTbtRoad = txt;
-                        }
+                    String txt = sLen > 0 ? new String(buf, p, sLen, UTF8).trim() : "";
+                    if (idx == 0) {
+                        target.carrotTbtAtcType = txt;
+                    } else if (!txt.isEmpty()) {
+                        target.carrotTbtRoad = txt;
                     }
                     p += sLen;
                 }
+                target.carrotConnected = true;
+                return true;
+            }
+            case 6: { // selfdriveState (enabled@8)
+                if (len < 9) return false;
+                boolean enabled = (buf[base + 8] & 0xFF) != 0;
+                target.carrotSelfdriveSeen = true;
+                target.carrotEnabledKnown = true;
+                target.carrotActive = enabled;
+                String g = target.gearPos != null ? target.gearPos.trim().toUpperCase(Locale.US) : "";
+                boolean nonDrive = "P".equals(g) || "R".equals(g) || "N".equals(g);
+                target.carrotCruiseKph = (enabled && !nonDrive && target.carrotCruiseRaw > 0) ? target.carrotCruiseRaw : 0;
+                target.carrotConnected = true;
+                return true;
+            }
+            case 14: { // carControl (latActive@8, longActive@9)
+                if (len < 10) return false;
+                target.carrotCarControlSeen = true;
+                target.carrotLatActive = (buf[base + 8] & 0xFF) != 0;
+                target.carrotLongActive = (buf[base + 9] & 0xFF) != 0;
                 target.carrotConnected = true;
                 return true;
             }
@@ -14406,12 +14714,23 @@ public class TurzxMonitorMain {
             target.carrotSpeedKph = nPosSpd.intValue();
             matched = true;
         }
+        Boolean active = extractJsonBool(json, "active");
+        if (active == null) active = extractJsonBool(json, "enabled");
+        if (active != null) {
+            target.carrotEnabledKnown = true;
+            target.carrotActive = active.booleanValue();
+            matched = true;
+        }
         Integer vCruise = extractJsonInt(json, "v_cruise_kph");
         if (vCruise == null) vCruise = extractJsonInt(json, "vCruise");
-        if (vCruise != null) { target.carrotCruiseKph = vCruise.intValue(); matched = true; }
-        Boolean active = extractJsonBool(json, "active");
-        if (active == null) active = extractJsonBool(json, "activeCarrot");
-        if (active != null) { target.carrotActive = active.booleanValue(); matched = true; }
+        if (vCruise != null) {
+            int raw = (vCruise.intValue() > 0 && vCruise.intValue() < 250) ? vCruise.intValue() : 0;
+            target.carrotCruiseRaw = raw;
+            target.carrotCruiseKph = (target.carrotEnabledKnown && !target.carrotActive) ? 0 : raw;
+            matched = true;
+        } else if (active != null && !active.booleanValue()) {
+            target.carrotCruiseKph = 0;
+        }
 
         Integer sdiType = extractJsonInt(json, "sdi_type");
         if (sdiType == null) sdiType = extractJsonInt(json, "xSpdType");
@@ -14471,12 +14790,36 @@ public class TurzxMonitorMain {
         if (tbtDist == null) tbtDist = extractJsonInt(json, "nTBTDist");
         if (tbtDist != null && tbtDist.intValue() >= 0) {
             target.carrotTbtDistM = tbtDist.intValue();
+            if (tbtDist.intValue() == 0) {
+                target.carrotTbtTurnType = -1;
+                target.carrotTbtTurnInfo = -1;
+            }
             matched = true;
         }
         Integer tbtNext = extractJsonInt(json, "tbt_dist_next");
         if (tbtNext == null) tbtNext = extractJsonInt(json, "nTBTDistNext");
         if (tbtNext != null && tbtNext.intValue() >= 0) {
             target.carrotTbtDistNextM = tbtNext.intValue();
+            matched = true;
+        }
+        Integer turnType = extractJsonInt(json, "nTBTTurnType");
+        if (turnType == null) turnType = extractJsonInt(json, "tbt_turn_type");
+        if (turnType == null) turnType = extractJsonInt(json, "tbtTurnType");
+        if (turnType != null && turnType.intValue() >= 0) {
+            target.carrotTbtTurnType = turnType.intValue();
+            target.carrotTbtTurnTypeMs = System.currentTimeMillis();
+            matched = true;
+        }
+        Integer turnInfo = extractJsonInt(json, "xTurnInfo");
+        if (turnInfo == null) turnInfo = extractJsonInt(json, "tbt_turn_info");
+        if (turnInfo != null && turnInfo.intValue() >= 0) {
+            target.carrotTbtTurnInfo = turnInfo.intValue();
+            target.carrotTbtTurnInfoMs = System.currentTimeMillis();
+            matched = true;
+        }
+        String atc = extractJsonString(json, "atcType");
+        if (atc != null) {
+            target.carrotTbtAtcType = atc.trim();
             matched = true;
         }
         String road = extractJsonString(json, "tbt_road");
@@ -14582,13 +14925,17 @@ public class TurzxMonitorMain {
         sb.append(",\"carrot\":{");
         sb.append("\"connected\":").append(ev.carrotConnected);
         sb.append(",\"speedKph\":").append(ev.carrotSpeedKph);
-        sb.append(",\"cruiseKph\":").append(ev.carrotCruiseKph);
+        sb.append(",\"cruiseKph\":").append(ev.isCruiseEngaged() ? ev.carrotCruiseKph : 0);
         sb.append(",\"active\":").append(ev.carrotActive);
+        sb.append(",\"latActive\":").append(ev.isSteeringEngaged());
         sb.append(",\"sdiType\":").append(ev.carrotSdiType);
         sb.append(",\"sdiSpeedLimit\":").append(ev.carrotSdiSpeedLimit);
         sb.append(",\"sdiDistM\":").append(ev.carrotSdiDistM);
         sb.append(",\"tbtDistM\":").append(ev.carrotTbtDistM);
         sb.append(",\"tbtDistNextM\":").append(ev.carrotTbtDistNextM);
+        sb.append(",\"tbtTurnType\":").append(ev.carrotTbtTurnType);
+        sb.append(",\"tbtTurnInfo\":").append(ev.carrotTbtTurnInfo);
+        sb.append(",\"tbtTurnKind\":").append(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(ev));
         sb.append(",\"tbtRoad\":\"").append(escapeJson(ev.carrotTbtRoad)).append("\"");
         sb.append(String.format(Locale.US, ",\"steerDeg\":%.1f,\"leadDistM\":%.1f,\"hasLead\":%b",
                 ev.steeringAngleDeg, ev.leadDistM, ev.hasLeadCar));
@@ -18195,6 +18542,126 @@ public class TurzxMonitorMain {
         } catch (Exception e) {
             throw new RuntimeException("v1.5.15 HMG-API OTA shortcut self-test failed", e);
         }
+
+        // v1.5.16: telltales removal, cruise CANCEL suppression (incl. MADS & park), and TBT maneuver decoding
+        String[] evTt = TurzxFrameRenderer.TeslaHud.telltaleKinds(false);
+        String[] iceTt = TurzxFrameRenderer.TeslaHud.telltaleKinds(true);
+        assertTrue(evTt.length == 1 && "pbrake".equals(evTt[0]),
+                "v1.5.16 telltales: EV has only pbrake (head/high removed)");
+        assertTrue(iceTt.length == 2 && "pbrake".equals(iceTt[0]) && "mil".equals(iceTt[1]),
+                "v1.5.16 telltales: ICE has pbrake+mil (head/high removed)");
+
+        TelemetrySnapshot cSnap = new TelemetrySnapshot();
+        // 1) selfdriveState enabled=false + carState vCruiseCluster=80 + carControl latActive=true -> CANCEL + MADS
+        byte[] sdOff = new byte[12];
+        sdOff[0] = 'C'; sdOff[1] = 'V'; sdOff[2] = 'S'; sdOff[3] = '1'; sdOff[4] = 6;
+        sdOff[8] = 0; // enabled = false
+        assertTrue(decodeSingleCvs1Frame(sdOff, 0, sdOff.length, cSnap), "selfdriveState=off decoded");
+
+        byte[] ccLat = new byte[12];
+        ccLat[0] = 'C'; ccLat[1] = 'V'; ccLat[2] = 'S'; ccLat[3] = '1'; ccLat[4] = 14;
+        ccLat[8] = 1; // latActive = true (MADS)
+        ccLat[9] = 0; // longActive = false
+        assertTrue(decodeSingleCvs1Frame(ccLat, 0, ccLat.length, cSnap), "carControl MADS decoded");
+
+        byte[] csCancel = new byte[73];
+        ByteBuffer csBb = ByteBuffer.wrap(csCancel).order(ByteOrder.LITTLE_ENDIAN);
+        csCancel[0] = 'C'; csCancel[1] = 'V'; csCancel[2] = 'S'; csCancel[3] = '1'; csCancel[4] = 1;
+        csBb.putFloat(8, 20.0f);
+        csBb.putFloat(16, 20.0f);
+        csBb.putFloat(20, 80.0f); // memorized cluster target speed during CANCEL
+        csCancel[46] = 2; // D
+        assertTrue(decodeSingleCvs1Frame(csCancel, 0, csCancel.length, cSnap), "carState decoded during CANCEL");
+        assertTrue(!cSnap.isCruiseEngaged() && cSnap.carrotCruiseKph == 0,
+                "v1.5.16 CANCEL suppresses memorized vCruise=80");
+        assertTrue(cSnap.isSteeringEngaged(),
+                "v1.5.16 MADS keeps steering wheel engaged during cruise CANCEL");
+
+        // 2) carrotMan activeCarrot=1 must NOT falsely mark cruise engaged while cancelled
+        byte[] cmTurn = new byte[44 + 2 + 4 + 2 + 9 + 2 + 8];
+        ByteBuffer cmBb = ByteBuffer.wrap(cmTurn).order(ByteOrder.LITTLE_ENDIAN);
+        cmTurn[0] = 'C'; cmTurn[1] = 'V'; cmTurn[2] = 'S'; cmTurn[3] = '1'; cmTurn[4] = 5;
+        cmBb.putInt(8, 1);   // activeCarrot = 1 (map active, not cruise)
+        cmBb.putInt(32, 1);  // xTurnInfo = 1 (left)
+        cmBb.putInt(36, 320); // xDistToTurn = 320m
+        int off = 44;
+        byte[] atcB = "turn".getBytes(UTF8);
+        cmBb.putShort(off, (short) atcB.length); off += 2;
+        System.arraycopy(atcB, 0, cmTurn, off, atcB.length); off += atcB.length;
+        byte[] roadB = "판교로".getBytes(UTF8);
+        cmBb.putShort(off, (short) roadB.length); off += 2;
+        System.arraycopy(roadB, 0, cmTurn, off, roadB.length); off += roadB.length;
+        byte[] mainB = "판교JC".getBytes(UTF8);
+        cmBb.putShort(off, (short) mainB.length); off += 2;
+        System.arraycopy(mainB, 0, cmTurn, off, mainB.length); off += mainB.length;
+        assertTrue(decodeSingleCvs1Frame(cmTurn, 0, off, cSnap), "carrotMan turn decoded");
+        assertTrue(!cSnap.isCruiseEngaged() && cSnap.carrotCruiseKph == 0,
+                "v1.5.16 activeCarrot=1 does not re-enable cancelled cruise");
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(cSnap) == TurzxFrameRenderer.TeslaHud.TBT_LEFT && "판교JC".equals(cSnap.carrotTbtRoad),
+                "v1.5.16 CVS1 xTurnInfo=1 resolves to TBT_LEFT");
+
+        // 3) Engage cruise via selfdriveState enabled=1 + controlsState enabled=1 -> shows 90; stale controlsState doesn't override selfdriveState=0
+        sdOff[8] = 1;
+        assertTrue(decodeSingleCvs1Frame(sdOff, 0, sdOff.length, cSnap), "selfdriveState=on decoded");
+        byte[] ctOn = new byte[26];
+        ByteBuffer ctBb = ByteBuffer.wrap(ctOn).order(ByteOrder.LITTLE_ENDIAN);
+        ctOn[0] = 'C'; ctOn[1] = 'V'; ctOn[2] = 'S'; ctOn[3] = '1'; ctOn[4] = 2;
+        ctOn[8] = 1;
+        ctBb.putFloat(9, 90.0f);
+        assertTrue(decodeSingleCvs1Frame(ctOn, 0, ctOn.length, cSnap) && cSnap.isCruiseEngaged() && cSnap.carrotCruiseKph == 90,
+                "v1.5.16 engaged cruise shows 90");
+        sdOff[8] = 0;
+        decodeSingleCvs1Frame(sdOff, 0, sdOff.length, cSnap);
+        assertTrue(decodeSingleCvs1Frame(ctOn, 0, ctOn.length, cSnap) && !cSnap.isCruiseEngaged() && cSnap.carrotCruiseKph == 0,
+                "v1.5.16 selfdriveState=0 takes precedence over stale controlsState=1");
+
+        sdOff[8] = 1;
+        decodeSingleCvs1Frame(sdOff, 0, sdOff.length, cSnap);
+        csBb.putFloat(20, 255.0f);
+        assertTrue(decodeSingleCvs1Frame(csCancel, 0, csCancel.length, cSnap) && !cSnap.isCruiseEngaged() && cSnap.carrotCruiseKph == 0,
+                "v1.5.16 V_CRUISE_UNSET=255 suppressed");
+
+        ctBb.putFloat(9, 80.0f);
+        decodeSingleCvs1Frame(ctOn, 0, ctOn.length, cSnap);
+        csBb.putFloat(20, 80.0f);
+        csCancel[46] = 1; // P gear
+        decodeSingleCvs1Frame(csCancel, 0, csCancel.length, cSnap);
+        assertTrue(!cSnap.isCruiseEngaged() && cSnap.carrotCruiseKph == 0,
+                "v1.5.16 P gear hides cruise speed");
+
+        // 4) JSON TBT maneuver mapping (TMAP nTBTTurnType + JSON active=false + freshness reconciliation)
+        TelemetrySnapshot jTbt = new TelemetrySnapshot();
+        parseCarrotManJson("{\"v_cruise_kph\":100,\"active\":false,\"nTBTTurnType\":13,\"tbt_dist\":280,\"tbt_road\":\"분당수서로\"}", jTbt);
+        assertTrue(jTbt.carrotCruiseKph == 0 && !jTbt.isCruiseEngaged(), "v1.5.16 JSON active=false zeroes cruiseKph");
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_RIGHT, "v1.5.16 nTBTTurnType=13 -> TBT_RIGHT");
+        jTbt.carrotTbtTurnType = 16;
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_SHARP_LEFT, "v1.5.16 nTBTTurnType=16 -> TBT_SHARP_LEFT");
+        jTbt.carrotTbtTurnType = 19;
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_SHARP_RIGHT, "v1.5.16 nTBTTurnType=19 -> TBT_SHARP_RIGHT");
+        jTbt.carrotTbtTurnType = 17;
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_SLIGHT_LEFT, "v1.5.16 nTBTTurnType=17 -> TBT_SLIGHT_LEFT");
+        jTbt.carrotTbtTurnType = 104;
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_SLIGHT_RIGHT, "v1.5.16 nTBTTurnType=104 -> TBT_SLIGHT_RIGHT");
+        jTbt.carrotTbtTurnType = 105;
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_SLIGHT_LEFT, "v1.5.16 nTBTTurnType=105 -> TBT_SLIGHT_LEFT");
+        jTbt.carrotTbtTurnType = 117;
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_SLIGHT_RIGHT, "v1.5.16 nTBTTurnType=117 -> TBT_SLIGHT_RIGHT");
+        jTbt.carrotTbtTurnType = 118;
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_SLIGHT_LEFT, "v1.5.16 nTBTTurnType=118 -> TBT_SLIGHT_LEFT");
+        jTbt.carrotTbtTurnType = 123;
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_SLIGHT_RIGHT, "v1.5.16 nTBTTurnType=123 -> TBT_SLIGHT_RIGHT");
+        jTbt.carrotTbtTurnType = 14;
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_UTURN, "v1.5.16 nTBTTurnType=14 -> TBT_UTURN");
+        jTbt.carrotTbtTurnType = 132;
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_ROUNDABOUT, "v1.5.16 nTBTTurnType=132 -> TBT_ROUNDABOUT");
+        jTbt.carrotTbtTurnType = 201;
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_ARRIVE, "v1.5.16 nTBTTurnType=201 -> TBT_ARRIVE");
+        // Conflicting stale nTBTTurnType is overridden when xTurnInfo timestamp is newer
+        jTbt.carrotTbtTurnType = 13; // right
+        jTbt.carrotTbtTurnTypeMs = 1000L;
+        jTbt.carrotTbtTurnInfo = 1; // left
+        jTbt.carrotTbtTurnInfoMs = 2000L;
+        assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_LEFT, "v1.5.16 newer xTurnInfo overrides stale nTBTTurnType");
 
         System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + Chromium 1:1 HUD Assets + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");
     }
