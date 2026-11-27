@@ -78,14 +78,25 @@ public final class HudView extends View implements Choreographer.FrameCallback {
         this.renderer = new HudRenderer(context.getAssets());
         this.gestureDetector = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener() {
             @Override
-            public boolean onDoubleTap(MotionEvent e) {
-                if (onOpenSettings != null) onOpenSettings.run();
+            public boolean onDown(MotionEvent e) {
                 return true;
             }
 
             @Override
-            public void onLongPress(MotionEvent e) {
-                if (onOpenSettings != null) onOpenSettings.run();
+            public boolean onSingleTapUp(MotionEvent e) {
+                if (onOpenSettings == null || getWidth() <= 0 || getHeight() <= 0) return false;
+                if (renderer.isLastStandby()) {
+                    onOpenSettings.run();
+                    return true;
+                }
+                float nx = e.getX() / getWidth();
+                float ny = e.getY() / getHeight();
+                if (nx >= 1392f / 1920f && nx <= 1904f / 1920f
+                        && ny >= 16f / 720f && ny <= 592f / 720f) {
+                    onOpenSettings.run();
+                    return true;
+                }
+                return false;
             }
         });
     }

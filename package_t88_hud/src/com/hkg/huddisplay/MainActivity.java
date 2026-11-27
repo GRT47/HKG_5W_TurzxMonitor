@@ -88,7 +88,6 @@ public final class MainActivity extends Activity {
             }
         };
         hudView.setOnOpenSettings(openSettings);
-        overlayView.setOnOpenSettings(openSettings);
 
         root.addView(hudView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
@@ -512,7 +511,7 @@ public final class MainActivity extends Activity {
         root.addView(rgColor);
 
         AlertDialog dlg = new AlertDialog.Builder(this)
-                .setTitle("HKG HUD Display 설정 (더블탭/길게 눌러 열기)")
+                .setTitle("HKG HUD Display 설정 (미디어 화면 탭)")
                 .setView(scroll)
                 .setPositiveButton("저장", (d, w) -> {
                     int mId = rgMode.getCheckedRadioButtonId();

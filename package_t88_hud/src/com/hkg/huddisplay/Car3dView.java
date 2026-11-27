@@ -995,8 +995,8 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
             if (revAnim < revTgt) revAnim = Math.min(revTgt, revAnim + revStep);
             else if (revAnim > revTgt) revAnim = Math.max(revTgt, revAnim - revStep);
 
-            if (!localState.parked) {
-                float speedMps = Math.max(0f, localState.speedKph) / 3.6f;
+            if (localState.speedKph > 0.2f) {
+                float speedMps = localState.speedKph / 3.6f;
                 float dir = localState.reverse ? 1f : -1f; // -X rotation rolls top of tire toward -Z (forward)
                 wheelSpinDeg = (wheelSpinDeg + dir * (speedMps / WHEEL_RADIUS_M) * (180f / (float) Math.PI) * dt) % 360f;
             }

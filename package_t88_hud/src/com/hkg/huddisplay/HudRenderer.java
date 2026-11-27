@@ -152,12 +152,17 @@ public final class HudRenderer {
     private float parkBrakeAnim = 0f;
     private float parkFade = 0f;
     private boolean parkAnimInit = false;
+    private volatile boolean forceParkView = false;
 
     private final Object camLock = new Object();
+    private static final float ORBIT_AUTO_RESET_SEC = 5.0f;
     private float parkYawDeg = 0f, parkPitchDeg = 0f, parkZoom = 1f;
     private float driveYawDeg = 0f, drivePitchDeg = 0f, driveZoom = 1f;
     private boolean driveResetting = false;
-    private float camOrbitIdleSec = 99f, camSimTimeSec = 0f;
+    private boolean driveAutoReturnArmed = false;
+    private boolean parkAutoReturnArmed = false;
+    private boolean orbitTouchActive = false;
+    private float camOrbitIdleSec = 99f, driveOrbitIdleSec = 99f, camSimTimeSec = 0f;
     private boolean lastParkedState = false;
     private int prevDoorFocusMask = -1;
     private boolean doorFocusActive = false;
@@ -189,18 +194,31 @@ public final class HudRenderer {
         return ((deg + 180f) % 360f + 360f) % 360f - 180f;
     }
 
+    public void setOrbitTouchActive(boolean active) {
+        synchronized (camLock) {
+            orbitTouchActive = active;
+            if (!active) {
+                if (driveAutoReturnArmed) driveOrbitIdleSec = 0f;
+                if (parkAutoReturnArmed) camOrbitIdleSec = 0f;
+            }
+        }
+    }
+
     public void addOrbitDelta(boolean parked, float dYawDeg, float dPitchDeg) {
         synchronized (camLock) {
             if (parked) {
-                parkYawDeg += dYawDeg;
+                parkYawDeg = wrapDeg180(parkYawDeg + dYawDeg);
                 parkPitchDeg = Math.max(-20f, Math.min(36f, parkPitchDeg + dPitchDeg));
                 camOrbitIdleSec = 0f;
+                parkAutoReturnArmed = true;
                 doorFocusActive = false;
                 doorFocusSuppressed = true;
             } else {
                 driveResetting = false;
                 driveYawDeg = wrapDeg180(driveYawDeg + dYawDeg);
                 drivePitchDeg = Math.max(-2.5f, Math.min(56f, drivePitchDeg + dPitchDeg));
+                driveOrbitIdleSec = 0f;
+                driveAutoReturnArmed = true;
             }
         }
     }
@@ -211,11 +229,14 @@ public final class HudRenderer {
             if (parked) {
                 parkZoom = Math.max(0.72f, Math.min(1.45f, parkZoom / scaleFactor));
                 camOrbitIdleSec = 0f;
+                parkAutoReturnArmed = true;
                 doorFocusActive = false;
                 doorFocusSuppressed = true;
             } else {
                 driveResetting = false;
                 driveZoom = Math.max(0.55f, Math.min(1.50f, driveZoom / scaleFactor));
+                driveOrbitIdleSec = 0f;
+                driveAutoReturnArmed = true;
             }
         }
     }
@@ -223,14 +244,17 @@ public final class HudRenderer {
     public void setOrbitAngles(boolean parked, float yawDeg, float pitchDeg) {
         synchronized (camLock) {
             if (parked) {
-                parkYawDeg = yawDeg;
+                parkYawDeg = wrapDeg180(yawDeg);
                 parkPitchDeg = Math.max(-20f, Math.min(36f, pitchDeg));
                 parkZoom = 1f;
                 camOrbitIdleSec = 0f;
+                parkAutoReturnArmed = false;
                 doorFocusActive = false;
-                doorFocusSuppressed = true;
+                doorFocusSuppressed = (Math.abs(parkYawDeg) > 0.1f || Math.abs(parkPitchDeg) > 0.1f);
             } else {
                 driveResetting = false;
+                driveAutoReturnArmed = false;
+                driveOrbitIdleSec = 0f;
                 driveYawDeg = wrapDeg180(yawDeg);
                 drivePitchDeg = Math.max(-2.5f, Math.min(56f, pitchDeg));
                 driveZoom = 1f;
@@ -274,6 +298,7 @@ public final class HudRenderer {
     public void resetDriveOrbit() {
         synchronized (camLock) {
             driveResetting = true;
+            driveAutoReturnArmed = false;
         }
     }
 
@@ -288,6 +313,32 @@ public final class HudRenderer {
         synchronized (camLock) {
             return lastParkedState;
         }
+    }
+
+    public boolean isLastStandby() {
+        return lastStandby;
+    }
+
+    public boolean toggleForceParkView() {
+        forceParkView = !forceParkView;
+        return forceParkView;
+    }
+
+    public boolean isForceParkView() {
+        return forceParkView;
+    }
+
+    public boolean isInTpmsRect(float nx, float ny) {
+        if (curL == null) return false;
+        float[] vz = curL.rect("viz");
+        float[] tr = curL.rect("tpms");
+        float vx = vz != null ? vz[0] : 16f, vy = vz != null ? vz[1] : 16f;
+        float vw = vz != null ? vz[2] : 864f, vh = vz != null ? vz[3] : 576f;
+        float tx = tr != null ? tr[0] : 679.8f, ty = tr != null ? tr[1] : 450.0f;
+        float tw = tr != null ? tr[2] : 184.3f, th = tr != null ? tr[3] : 126.0f;
+        float x = vx + nx * vw;
+        float y = vy + ny * vh;
+        return x >= tx - 6f && x <= tx + tw + 6f && y >= ty - 6f && y <= ty + th + 6f;
     }
 
     public HudRenderer(AssetManager assets) {
@@ -430,7 +481,7 @@ public final class HudRenderer {
             if (s.rpm >= 0) smoothRpm += (s.rpm - smoothRpm) * aMed;
         }
         String gearNow = (s.gearPos != null && !s.gearPos.isEmpty()) ? s.gearPos : "D";
-        boolean parkedNow = "P".equals(gearNow);
+        boolean parkedNow = "P".equals(gearNow) || forceParkView;
         if (!parkAnimInit) {
             parkAnimInit = true;
             for (int i = 0; i < 6; i++) {
@@ -488,7 +539,7 @@ public final class HudRenderer {
         }
 
         String gear = (s.gearPos != null && !s.gearPos.isEmpty()) ? s.gearPos : "D";
-        boolean parked = "P".equals(gear);
+        boolean parked = "P".equals(gear) || forceParkView;
 
         float effCurve = Math.max(-0.0025f, Math.min(0.0025f, smoothCurve));
         if (Math.abs(effCurve) < 1e-6f && Math.abs(smoothSteer) > 0.05f) {
@@ -500,7 +551,10 @@ public final class HudRenderer {
         float pb = parkFade * parkFade * parkFade * (parkFade * (parkFade * 6f - 15f) + 10f);
         synchronized (camLock) {
             camSimTimeSec += dt;
-            camOrbitIdleSec = Math.min(99f, camOrbitIdleSec + dt);
+            if (!orbitTouchActive) {
+                camOrbitIdleSec = Math.min(99f, camOrbitIdleSec + dt);
+                driveOrbitIdleSec = Math.min(99f, driveOrbitIdleSec + dt);
+            }
             int doorMask = 0;
             for (int i = 0; i < 6; i++) {
                 if (s.doors[i]) doorMask |= (1 << i);
@@ -514,6 +568,7 @@ public final class HudRenderer {
             } else if (doorMask != prevDoorFocusMask) {
                 prevDoorFocusMask = doorMask;
                 doorFocusSuppressed = false;
+                parkAutoReturnArmed = false;
                 if (doorMask == 0) {
                     doorFocusParkYaw = 0f;
                     doorFocusParkPitch = 0f;
@@ -527,7 +582,13 @@ public final class HudRenderer {
                 computeDoorFocusTarget(doorMask);
                 doorFocusActive = true;
             }
-            if (parked && doorFocusActive && !doorFocusSuppressed) {
+            if (parkAutoReturnArmed && !orbitTouchActive && camOrbitIdleSec >= ORBIT_AUTO_RESET_SEC) {
+                parkAutoReturnArmed = false;
+                doorFocusSuppressed = false;
+                computeDoorFocusTarget(doorMask);
+                doorFocusActive = true;
+            }
+            if (doorFocusActive && !doorFocusSuppressed) {
                 float k = 1f - (float) Math.exp(-dt * 4.8f);
                 float dYaw = wrapDeg180(doorFocusParkYaw - parkYawDeg);
                 parkYawDeg = wrapDeg180(parkYawDeg + dYaw * k);
@@ -546,8 +607,12 @@ public final class HudRenderer {
             float rawB = 0.5f + 0.5f * (float) Math.sin(camSimTimeSec * Math.PI * 2.0 * doorHz);
             float bt = Math.max(0f, Math.min(1f, (rawB - 0.18f) / 0.64f));
             curDoorBlink = bt * bt * (3f - 2f * bt);
+            if (driveAutoReturnArmed && !orbitTouchActive && driveOrbitIdleSec >= ORBIT_AUTO_RESET_SEC) {
+                driveAutoReturnArmed = false;
+                driveResetting = true;
+            }
             if (driveResetting) {
-                float dec = (float) Math.exp(-dt * 6.5f);
+                float dec = (float) Math.exp(-dt * 5.2f);
                 driveYawDeg *= dec;
                 drivePitchDeg *= dec;
                 driveZoom = 1f + (driveZoom - 1f) * dec;
@@ -570,7 +635,8 @@ public final class HudRenderer {
             float dPitchDeg = 3.60f + drivePitchDeg;
             float dFov = 20.0f + (32.0f - 20.0f) * om;
 
-            float demoSway = (demoMode && doorMask == 0 && !doorFocusActive && camOrbitIdleSec > 3.5f)
+            float demoSway = (demoMode && doorMask == 0 && !doorFocusActive
+                    && !parkAutoReturnArmed && !orbitTouchActive && camOrbitIdleSec > 3.5f)
                     ? (float) Math.sin(camSimTimeSec * 0.55) * 14f
                     : 0f;
             float pTgtX = -0.14f, pTgtY = 0.44f, pTgtZ = 0.02f;
@@ -673,7 +739,7 @@ public final class HudRenderer {
             pStatus.setColor(0xFF3E434E);
             pStatus.setTextSize(22f);
             pStatus.setTextAlign(Paint.Align.CENTER);
-            c.drawText("시동 OFF · 절전 대기 중 (두 번 탭하여 설정)", viewW * 0.5f, viewH * 0.52f, pStatus);
+            c.drawText("시동 OFF · 절전 대기 중 (화면 탭하여 설정)", viewW * 0.5f, viewH * 0.52f, pStatus);
             pStatus.setTextAlign(Paint.Align.LEFT);
             return;
         }
@@ -707,7 +773,7 @@ public final class HudRenderer {
 
     private void drawVizBgContent(Canvas c, HudState s, float[] vz, boolean external3dCar) {
         String gear = (s.gearPos != null && !s.gearPos.isEmpty()) ? s.gearPos : "D";
-        boolean parked = "P".equals(gear);
+        boolean parked = "P".equals(gear) || forceParkView;
         int spdDisp = Math.max(0, Math.round(smoothSpeed));
         if (external3dCar) {
             float pb = parkFade * parkFade * parkFade * (parkFade * (parkFade * 6f - 15f) + 10f);
@@ -744,21 +810,21 @@ public final class HudRenderer {
         c.scale(viewW / hudSpanW, viewH / hudSpanH);
         c.translate(-hudOffX, -hudOffY);
         String gear = (s.gearPos != null && !s.gearPos.isEmpty()) ? s.gearPos : "D";
-        boolean parked = "P".equals(gear);
+        boolean drivingGear = !"P".equals(gear);
         int spdDisp = Math.max(0, Math.round(smoothSpeed));
         float[] vz = curL.rect("viz");
 
         boolean anyDoor = hasAnyOpenDoor();
         boolean driveOrbit = external3dCar && isDriveOrbitActive();
-        drawVizOverlays(c, s, vz, gear, spdDisp, parked, lastIceMode);
+        drawVizOverlays(c, s, vz, gear, spdDisp, !drivingGear, lastIceMode);
         if (anyDoor && external3dCar && vz != null && doorMarkersUv != null) {
-            drawDoorMarkers3d(c, vz, doorMarkersUv, !parked);
+            drawDoorMarkers3d(c, vz, doorMarkersUv, drivingGear);
         }
         if (driveOrbit && vz != null) {
             drawDriveResetPill(c, vz);
         }
         if (anyDoor && vz != null) {
-            drawDoorAlertBanner(c, vz, !parked, driveOrbit);
+            drawDoorAlertBanner(c, vz, drivingGear, driveOrbit);
         }
         if (showStatusPill || (!demoMode && !s.hubConnected)) {
             drawStatusPill(c, s, fps, demoMode);
@@ -1003,8 +1069,8 @@ public final class HudRenderer {
             dotCol = 0xFF3DD68C;
         } else {
             txt = (s.hubIp != null && !s.hubIp.isEmpty())
-                    ? ("연결 대기 " + s.hubIp + " (두번탭 설정)")
-                    : "헤드유닛 자동탐색 중 (:8767) · 두번탭 설정";
+                    ? ("연결 대기 " + s.hubIp + " (미디어 탭 설정)")
+                    : "헤드유닛 자동탐색 중 (:8767) · 미디어 탭 설정";
             dotCol = 0xFFF5A623;
         }
         pStatus.setTypeface(Typeface.DEFAULT_BOLD);
@@ -2283,8 +2349,10 @@ public final class HudRenderer {
         if (tr == null || ts == null || vz == null) return;
         float w = tr[2], h = tr[3], x0 = tr[0], y0 = top ? vz[1] + 20f : tr[1], rad = tr.length > 4 ? tr[4] : 20f;
         roundRect(c, x0, y0, x0 + w, y0 + h, rad, lightTheme ? 0xEBFFFFFF : 0xDB0E0F12);
-        pStroke.setStrokeWidth(2f);
-        pStroke.setColor(lightTheme ? 0xFFCBD2DF : 0xFF2A2C31);
+        pStroke.setStrokeWidth(forceParkView ? 2.4f : 2f);
+        pStroke.setColor(forceParkView
+                ? (lightTheme ? 0xFF2563EB : 0xFF4F7FFF)
+                : (lightTheme ? 0xFFCBD2DF : 0xFF2A2C31));
         rf.set(x0, y0, x0 + w, y0 + h);
         c.drawRoundRect(rf, rad, rad, pStroke);
 
@@ -2302,8 +2370,15 @@ public final class HudRenderer {
             float x = (i % 2 == 0) ? cx - carW / 2f - gap - tw : cx + carW / 2f + gap;
             text(c, t, x, i < 2 ? row1 : row2, size, true, themeColor(warn ? 0xFFF5A623 : 0xFFF5F5F7, lightTheme));
         }
-        float pw = measure("psi", size * 0.36f, false);
-        text(c, "psi", cx - pw / 2f, y0 + h - size * 0.3f, size * 0.36f, false, themeColor(0xFF5A5D64, lightTheme));
+        if (forceParkView) {
+            String lbl = "psi · P고정";
+            float pw = measure(lbl, size * 0.36f, true);
+            text(c, lbl, cx - pw / 2f, y0 + h - size * 0.3f, size * 0.36f, true,
+                    lightTheme ? 0xFF2563EB : 0xFF6E95FF);
+        } else {
+            float pw = measure("psi", size * 0.36f, false);
+            text(c, "psi", cx - pw / 2f, y0 + h - size * 0.3f, size * 0.36f, false, themeColor(0xFF5A5D64, lightTheme));
+        }
     }
 
     // ---- Cards: EV Battery, ICE, Media, Climate ----

@@ -44,29 +44,19 @@ public final class HudOverlayView extends View {
         setWillNotDraw(false);
         this.gestureDetector = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener() {
             @Override
-            public boolean onDoubleTap(MotionEvent e) {
-                if (onOpenSettings != null) onOpenSettings.run();
-                return true;
-            }
-
-            @Override
-            public void onLongPress(MotionEvent e) {
-                if (!orbiting && onOpenSettings != null) onOpenSettings.run();
-            }
-
-            @Override
-            public boolean onSingleTapConfirmed(MotionEvent e) {
-                if (!parkedNow && car3dActive && renderer.isDriveOrbitActive() && getWidth() > 0 && getHeight() > 0) {
+            public boolean onSingleTapUp(MotionEvent e) {
+                if (!orbiting && getWidth() > 0 && getHeight() > 0) {
                     float nx = e.getX() / getWidth();
                     float ny = e.getY() / getHeight();
-                    if (nx >= 0.42f && nx <= 0.59f && ny >= 0.05f && ny <= 0.16f) {
+                    if (renderer.isInTpmsRect(nx, ny)) {
+                        renderer.toggleForceParkView();
+                        return true;
+                    }
+                    if (!parkedNow && car3dActive && renderer.isDriveOrbitActive()
+                            && nx >= 0.42f && nx <= 0.59f && ny >= 0.05f && ny <= 0.16f) {
                         renderer.resetDriveOrbit();
                         return true;
                     }
-                }
-                if (e.getX() > getWidth() * 0.72f && e.getY() < getHeight() * 0.16f) {
-                    if (onOpenSettings != null) onOpenSettings.run();
-                    return true;
                 }
                 return false;
             }
@@ -106,7 +96,9 @@ public final class HudOverlayView extends View {
         int action = ev.getActionMasked();
         if (ev.getPointerCount() >= 2 || scaleDetector.isInProgress()) {
             orbiting = false;
-            if (action == MotionEvent.ACTION_POINTER_UP && ev.getPointerCount() == 2) {
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                renderer.setOrbitTouchActive(false);
+            } else if (action == MotionEvent.ACTION_POINTER_UP && ev.getPointerCount() == 2) {
                 int keepIdx = ev.getActionIndex() == 0 ? 1 : 0;
                 lastTouchX = ev.getX(keepIdx);
                 lastTouchY = ev.getY(keepIdx);
@@ -117,6 +109,7 @@ public final class HudOverlayView extends View {
         if (action == MotionEvent.ACTION_DOWN) {
             orbiting = false;
             if (car3dActive) {
+                renderer.setOrbitTouchActive(true);
                 lastTouchX = ev.getX();
                 lastTouchY = ev.getY();
             }
@@ -133,6 +126,7 @@ public final class HudOverlayView extends View {
             }
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
             orbiting = false;
+            renderer.setOrbitTouchActive(false);
         }
         gestureDetector.onTouchEvent(ev);
         return true;
