@@ -88,6 +88,12 @@ public final class TelemetryClient {
             if (state.commaConnected && !state.commaDirectConnected && (now - state.commaLastRxMs) > 3500L) {
                 state.commaConnected = false;
             }
+            if (!state.commaDirectConnected && !state.commaConnected) {
+                state.leftBlinker = false;
+                state.rightBlinker = false;
+                state.leftBlindspot = false;
+                state.rightBlindspot = false;
+            }
             return state.copy();
         }
     }
@@ -435,6 +441,10 @@ public final class TelemetryClient {
                 boolean brakeLights = buf[base + 39] != 0 || buf[base + 28] != 0;
                 int gearShifter = buf[base + 46] & 0xFF;
                 target.brakeLamp = brakeLights;
+                target.leftBlindspot = buf[base + 40] != 0;
+                target.rightBlindspot = buf[base + 41] != 0;
+                target.leftBlinker = buf[base + 47] != 0;
+                target.rightBlinker = buf[base + 48] != 0;
                 float fl = bb.getFloat(base + 57), fr = bb.getFloat(base + 61);
                 float rl = bb.getFloat(base + 65), rr = bb.getFloat(base + 69);
 

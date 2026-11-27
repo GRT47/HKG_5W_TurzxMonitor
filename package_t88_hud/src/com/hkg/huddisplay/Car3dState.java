@@ -13,6 +13,12 @@ public final class Car3dState {
     public boolean lightTheme;
     public float headAnim;
     public float brakeAnim;
+    public float turnLeftAnim;
+    public float turnRightAnim;
+    public float blindLeftAnim;
+    public float blindRightAnim;
+    public float blindLeftDanger;
+    public float blindRightDanger;
     public final float[] doorEased = new float[6];
     public float doorBlink;
     public int bodyColorId;
@@ -35,6 +41,12 @@ public final class Car3dState {
         lightTheme = s.lightTheme;
         headAnim = s.headAnim;
         brakeAnim = s.brakeAnim;
+        turnLeftAnim = s.turnLeftAnim;
+        turnRightAnim = s.turnRightAnim;
+        blindLeftAnim = s.blindLeftAnim;
+        blindRightAnim = s.blindRightAnim;
+        blindLeftDanger = s.blindLeftDanger;
+        blindRightDanger = s.blindRightDanger;
         System.arraycopy(s.doorEased, 0, doorEased, 0, 6);
         doorBlink = s.doorBlink;
         bodyColorId = s.bodyColorId;

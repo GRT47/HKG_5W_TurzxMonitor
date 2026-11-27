@@ -7,7 +7,10 @@ Reuses 1920x720 Tesla HUD assets from package_turzx_monitor/design_tesla without
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -197,7 +200,58 @@ def stage_assets() -> None:
     print(f"Staged {copied} HUD assets + 2 fonts cleanly into {ASSETS_DIR}")
 
 
-def build(install: bool = False) -> Path:
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def update_manifest_version(version_name: str | None, version_code: int | None) -> tuple[int, str]:
+    txt = MANIFEST_XML.read_text(encoding="utf-8")
+    cur_code_m = re.search(r'android:versionCode="(\d+)"', txt)
+    cur_name_m = re.search(r'android:versionName="([^"]+)"', txt)
+    cur_code = int(cur_code_m.group(1)) if cur_code_m else 100
+    cur_name = cur_name_m.group(1) if cur_name_m else "1.0.0"
+
+    new_code = version_code if version_code is not None else cur_code
+    new_name = version_name if version_name else cur_name
+    if version_name and version_code is None and new_name != cur_name:
+        new_code = cur_code + 1
+
+    if new_code != cur_code or new_name != cur_name:
+        txt = re.sub(r'android:versionCode="\d+"', f'android:versionCode="{new_code}"', txt, count=1)
+        txt = re.sub(r'android:versionName="[^"]+"', f'android:versionName="{new_name}"', txt, count=1)
+        MANIFEST_XML.write_text(txt, encoding="utf-8")
+        print(f"Updated AndroidManifest.xml -> versionName={new_name}, versionCode={new_code}")
+    return new_code, new_name
+
+
+def write_update_json(version_code: int, version_name: str, apk_path: Path, repo: str, tag: str, notes: str) -> Path:
+    sha = sha256_file(apk_path)
+    apk_url = f"https://github.com/{repo}/releases/download/{tag}/{apk_path.name}"
+    meta = {
+        "package": "com.hkg.huddisplay",
+        "versionCode": version_code,
+        "versionName": version_name,
+        "apkUrl": apk_url,
+        "sha256": sha,
+        "notes": notes,
+    }
+    out = HERE / "update.json"
+    out.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"Wrote {out} -> v{version_name} ({version_code}), sha256={sha}")
+    return out
+
+
+def build(install: bool = False, version: str | None = None, version_code: int | None = None,
+          do_write_update_json: bool = False, repo: str = "GRT47/HKG_5W_TurzxMonitor",
+          tag: str | None = None, notes: str = "") -> Path:
+    v_code, v_name = update_manifest_version(version, version_code)
     sdk = find_sdk_root()
     platforms = sorted((sdk / "platforms").glob("android-*"), reverse=True)
     build_tools = sorted((sdk / "build-tools").iterdir(), reverse=True)
@@ -290,7 +344,11 @@ def build(install: bool = False) -> Path:
         ALIGNED_APK.unlink()
     subprocess.run([zipalign, "-f", "4", str(UNSIGNED_APK), str(ALIGNED_APK)], check=True)
 
-    keystore = BUILD_DIR / "debug_sign.p12"
+    env_ks = os.environ.get("HKG_HUD_KEYSTORE", "").strip()
+    keystore = Path(env_ks) if env_ks else (BUILD_DIR / "debug_sign.p12")
+    ks_pass = os.environ.get("HKG_HUD_KS_PASS", "android")
+    key_pass = os.environ.get("HKG_HUD_KEY_PASS", "android")
+    key_alias = os.environ.get("HKG_HUD_KEY_ALIAS", "hkghud")
     if not keystore.is_file():
         subprocess.run(
             [
@@ -301,11 +359,11 @@ def build(install: bool = False) -> Path:
                 "-keystore",
                 str(keystore),
                 "-storepass",
-                "android",
+                ks_pass,
                 "-keypass",
-                "android",
+                key_pass,
                 "-alias",
-                "hkghud",
+                key_alias,
                 "-keyalg",
                 "RSA",
                 "-keysize",
@@ -327,9 +385,11 @@ def build(install: bool = False) -> Path:
             "--ks",
             str(keystore),
             "--ks-pass",
-            "pass:android",
+            f"pass:{ks_pass}",
             "--key-pass",
-            "pass:android",
+            f"pass:{key_pass}",
+            "--ks-key-alias",
+            key_alias,
             "--min-sdk-version",
             "26",
             "--out",
@@ -339,7 +399,12 @@ def build(install: bool = False) -> Path:
         check=True,
     )
     subprocess.run([apksigner, "verify", "--min-sdk-version", "26", str(SIGNED_APK)], check=True)
-    print(f"Built & verified APK: {SIGNED_APK} ({SIGNED_APK.stat().st_size} bytes)")
+    apk_sha = sha256_file(SIGNED_APK)
+    print(f"Built & verified APK: {SIGNED_APK} ({SIGNED_APK.stat().st_size} bytes) sha256={apk_sha}")
+
+    if do_write_update_json:
+        rel_tag = tag or f"hud-v{v_name}"
+        write_update_json(v_code, v_name, SIGNED_APK, repo, rel_tag, notes)
 
     if install:
         adb = str(sdk / "platform-tools" / ("adb.exe" if os.name == "nt" else "adb"))
@@ -352,5 +417,19 @@ def build(install: bool = False) -> Path:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--install", action="store_true", help="Install APK via adb after build")
+    ap.add_argument("--version", default=None, help="Set android:versionName before building")
+    ap.add_argument("--version-code", type=int, default=None, help="Set android:versionCode before building")
+    ap.add_argument("--write-update-json", action="store_true", help="Write package_t88_hud/update.json with APK sha256")
+    ap.add_argument("--repo", default="GRT47/HKG_5W_TurzxMonitor", help="GitHub repo slug (owner/repo)")
+    ap.add_argument("--tag", default=None, help="GitHub release tag for update.json apkUrl (default hud-v<version>)")
+    ap.add_argument("--notes", default="", help="Release notes text for update.json")
     args = ap.parse_args()
-    build(install=args.install)
+    build(
+        install=args.install,
+        version=args.version,
+        version_code=args.version_code,
+        do_write_update_json=args.write_update_json,
+        repo=args.repo,
+        tag=args.tag,
+        notes=args.notes,
+    )

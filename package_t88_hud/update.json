@@ -1,0 +1,8 @@
+{
+  "package": "com.hkg.huddisplay",
+  "versionCode": 100,
+  "versionName": "1.0.0",
+  "apkUrl": "https://github.com/GRT47/HKG_5W_TurzxMonitor/releases/download/hud-v1.0.0/HkgHudDisplay.apk",
+  "sha256": "38b2b48dbe04926a8681ce8e854ae1ec39405a8f3724d1ef6183c6f0437204c2",
+  "notes": "외장 안드로이드 HUD(1920x720) 첫 정식 릴리스 — 실시간 3D 니로 EV, 방향지시등·후측방 경고(BSD/BCA) 2D/3D 시각화, GitHub 자동 업데이트, 터치 360° 시점·5초 자동 복귀, TPMS P고정, :8768 웹 테스트 콘솔"
+}

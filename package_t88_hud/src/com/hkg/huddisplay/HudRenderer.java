@@ -152,7 +152,18 @@ public final class HudRenderer {
     private float parkBrakeAnim = 0f;
     private float parkFade = 0f;
     private boolean parkAnimInit = false;
+    private float blinkerCycleSec = 0f;
+    private boolean prevAnyBlinker = false;
+    private float turnLeftAnim = 0f, turnRightAnim = 0f;
+    private float blindLeftFade = 0f, blindRightFade = 0f;
+    private float blindLeftDanger = 0f, blindRightDanger = 0f;
+    private float blindLeftAnim = 0f, blindRightAnim = 0f;
     private volatile boolean forceParkView = false;
+    private volatile String availableUpdateVer = "";
+
+    public void setAvailableUpdateVersion(String ver) {
+        this.availableUpdateVer = ver != null ? ver.trim() : "";
+    }
 
     private final Object camLock = new Object();
     private static final float ORBIT_AUTO_RESET_SEC = 5.0f;
@@ -514,6 +525,41 @@ public final class HudRenderer {
             else if (parkFade > pTgt) parkFade = Math.max(pTgt, parkFade - parkStep);
         }
 
+        boolean anyBlinker = s.leftBlinker || s.rightBlinker;
+        if (anyBlinker) {
+            if (!prevAnyBlinker) blinkerCycleSec = 0f;
+            else blinkerCycleSec = (blinkerCycleSec + dt) % 0.72f;
+        } else {
+            blinkerCycleSec = 0f;
+        }
+        prevAnyBlinker = anyBlinker;
+        boolean flashOn = anyBlinker && (blinkerCycleSec < 0.37f);
+        float turnRise = dt / 0.045f;
+        float turnFall = dt / 0.065f;
+        float tLTgt = (s.leftBlinker && flashOn) ? 1f : 0f;
+        if (turnLeftAnim < tLTgt) turnLeftAnim = Math.min(tLTgt, turnLeftAnim + turnRise);
+        else if (turnLeftAnim > tLTgt) turnLeftAnim = Math.max(tLTgt, turnLeftAnim - turnFall);
+        float tRTgt = (s.rightBlinker && flashOn) ? 1f : 0f;
+        if (turnRightAnim < tRTgt) turnRightAnim = Math.min(tRTgt, turnRightAnim + turnRise);
+        else if (turnRightAnim > tRTgt) turnRightAnim = Math.max(tRTgt, turnRightAnim - turnFall);
+
+        boolean bsdAllowed = !"P".equals(gearNow);
+        boolean bsdL = bsdAllowed && s.leftBlindspot;
+        boolean bsdR = bsdAllowed && s.rightBlindspot;
+        float bsdUp = dt / 0.16f;
+        float bsdDown = dt / 0.24f;
+        if (blindLeftFade < (bsdL ? 1f : 0f)) blindLeftFade = Math.min(1f, blindLeftFade + bsdUp);
+        else if (blindLeftFade > (bsdL ? 1f : 0f)) blindLeftFade = Math.max(0f, blindLeftFade - bsdDown);
+        if (blindRightFade < (bsdR ? 1f : 0f)) blindRightFade = Math.min(1f, blindRightFade + bsdUp);
+        else if (blindRightFade > (bsdR ? 1f : 0f)) blindRightFade = Math.max(0f, blindRightFade - bsdDown);
+        float dngStep = dt / 0.10f;
+        float dLTgt = (bsdL && s.leftBlinker) ? 1f : 0f;
+        if (blindLeftDanger < dLTgt) blindLeftDanger = Math.min(dLTgt, blindLeftDanger + dngStep);
+        else if (blindLeftDanger > dLTgt) blindLeftDanger = Math.max(dLTgt, blindLeftDanger - dngStep);
+        float dRTgt = (bsdR && s.rightBlinker) ? 1f : 0f;
+        if (blindRightDanger < dRTgt) blindRightDanger = Math.min(dRTgt, blindRightDanger + dngStep);
+        else if (blindRightDanger > dRTgt) blindRightDanger = Math.max(dRTgt, blindRightDanger - dngStep);
+
         float speedSign = "R".equals(gearNow) ? -1f : 1f;
         phase = ((phase + speedSign * (Math.max(0f, smoothSpeed) / 3.6f) * dt) % 7000f + 7000f) % 7000f;
 
@@ -607,6 +653,12 @@ public final class HudRenderer {
             float rawB = 0.5f + 0.5f * (float) Math.sin(camSimTimeSec * Math.PI * 2.0 * doorHz);
             float bt = Math.max(0f, Math.min(1f, (rawB - 0.18f) / 0.64f));
             curDoorBlink = bt * bt * (3f - 2f * bt);
+            float bsdCalm = 0.65f + 0.35f * (0.5f + 0.5f * (float) Math.sin(camSimTimeSec * Math.PI * 2.0 * 1.55));
+            float rawUrg = 0.5f + 0.5f * (float) Math.sin(camSimTimeSec * Math.PI * 2.0 * 3.4);
+            float ut = Math.max(0f, Math.min(1f, (rawUrg - 0.15f) / 0.70f));
+            float bsdUrg = 0.25f + 0.75f * (ut * ut * (3f - 2f * ut));
+            blindLeftAnim = blindLeftFade * (bsdCalm + (bsdUrg - bsdCalm) * blindLeftDanger);
+            blindRightAnim = blindRightFade * (bsdCalm + (bsdUrg - bsdCalm) * blindRightDanger);
             if (driveAutoReturnArmed && !orbitTouchActive && driveOrbitIdleSec >= ORBIT_AUTO_RESET_SEC) {
                 driveAutoReturnArmed = false;
                 driveResetting = true;
@@ -682,6 +734,12 @@ public final class HudRenderer {
             out3dState.lightTheme = light;
             out3dState.headAnim = parkHeadAnim * parkHeadAnim * (3f - 2f * parkHeadAnim);
             out3dState.brakeAnim = parkBrakeAnim * parkBrakeAnim * (3f - 2f * parkBrakeAnim);
+            out3dState.turnLeftAnim = turnLeftAnim;
+            out3dState.turnRightAnim = turnRightAnim;
+            out3dState.blindLeftAnim = blindLeftAnim;
+            out3dState.blindRightAnim = blindRightAnim;
+            out3dState.blindLeftDanger = blindLeftDanger;
+            out3dState.blindRightDanger = blindRightDanger;
             System.arraycopy(doorEased, 0, out3dState.doorEased, 0, 6);
             out3dState.doorBlink = curDoorBlink;
             out3dState.bodyColorId = bodyColorId;
@@ -816,15 +874,22 @@ public final class HudRenderer {
 
         boolean anyDoor = hasAnyOpenDoor();
         boolean driveOrbit = external3dCar && isDriveOrbitActive();
+        boolean anyBlinker = s.leftBlinker || s.rightBlinker || turnLeftAnim > 0.01f || turnRightAnim > 0.01f;
+        if (vz != null && (blindLeftFade > 0.01f || blindRightFade > 0.01f)) {
+            drawBlindspotOverlay(c, vz);
+        }
         drawVizOverlays(c, s, vz, gear, spdDisp, !drivingGear, lastIceMode);
+        if (vz != null && anyBlinker) {
+            drawTurnSignals(c, s, vz);
+        }
         if (anyDoor && external3dCar && vz != null && doorMarkersUv != null) {
             drawDoorMarkers3d(c, vz, doorMarkersUv, drivingGear);
         }
         if (driveOrbit && vz != null) {
-            drawDriveResetPill(c, vz);
+            drawDriveResetPill(c, vz, anyBlinker);
         }
         if (anyDoor && vz != null) {
-            drawDoorAlertBanner(c, vz, drivingGear, driveOrbit);
+            drawDoorAlertBanner(c, vz, drivingGear, driveOrbit, anyBlinker);
         }
         if (showStatusPill || (!demoMode && !s.hubConnected)) {
             drawStatusPill(c, s, fps, demoMode);
@@ -832,7 +897,146 @@ public final class HudRenderer {
         c.restoreToCount(sc);
     }
 
-    private void drawDriveResetPill(Canvas c, float[] vz) {
+    private void drawTurnSignals(Canvas c, HudState s, float[] vz) {
+        float cx = vz[0] + vz[2] * 0.50f;
+        float cy = vz[1] + 54f;
+        int arrowOnRgb = lightTheme ? 0x15803D : 0x22C55E;
+        int arrowOffRgb = lightTheme ? 0x94A3B8 : 0x2E3833;
+        int bgCol = lightTheme ? 0xD8FFFFFF : 0xBA10141C;
+
+        for (int side = -1; side <= 1; side += 2) {
+            boolean active = side < 0 ? s.leftBlinker : s.rightBlinker;
+            float anim = side < 0 ? turnLeftAnim : turnRightAnim;
+            if (!active && anim <= 0.01f) continue;
+
+            float ax = cx + side * 44f;
+            roundRect(c, ax - 22f, cy - 15f, ax + 22f, cy + 15f, 12f, bgCol);
+            pStroke.setColor(withAlpha(blendRgb(arrowOffRgb, arrowOnRgb, anim), 0.35f + 0.55f * anim));
+            pStroke.setStrokeWidth(1.4f);
+            rf.set(ax - 22f, cy - 15f, ax + 22f, cy + 15f);
+            c.drawRoundRect(rf, 12f, 12f, pStroke);
+
+            if (anim > 0.02f) {
+                glow(c, ax, cy, 28f, arrowOnRgb, (lightTheme ? 0.30f : 0.45f) * anim);
+            }
+
+            path.reset();
+            path.moveTo(ax + side * 12f, cy);
+            path.lineTo(ax, cy - 9.5f);
+            path.lineTo(ax, cy - 4.5f);
+            path.lineTo(ax - side * 11f, cy - 4.5f);
+            path.lineTo(ax - side * 11f, cy + 4.5f);
+            path.lineTo(ax, cy + 4.5f);
+            path.lineTo(ax, cy + 9.5f);
+            path.close();
+
+            int onFillRgb = lightTheme ? arrowOnRgb : blendRgb(arrowOnRgb, 0xBBF7D0, 0.35f);
+            int fillRgb = blendRgb(arrowOffRgb, onFillRgb, anim);
+            pFill.setShader(null);
+            pFill.setColor(withAlpha(fillRgb, active ? (0.28f + 0.72f * anim) : anim));
+            c.drawPath(path, pFill);
+        }
+    }
+
+    private void drawBlindspotOverlay(Canvas c, float[] vz) {
+        if (vz == null || (blindLeftFade <= 0.01f && blindRightFade <= 0.01f)) return;
+        float vx = vz[0], vy = vz[1], vw = vz[2], vh = vz[3];
+        float vrad = vz.length > 4 ? vz[4] : 28f;
+
+        int scClip = c.save();
+        rf.set(vx, vy, vx + vw, vy + vh);
+        path.reset();
+        path.addRoundRect(rf, vrad, vrad, Path.Direction.CW);
+        c.clipPath(path);
+
+        Paint.Cap prevCap = pStroke.getStrokeCap();
+        for (int side = -1; side <= 1; side += 2) {
+            float fade = side < 0 ? blindLeftFade : blindRightFade;
+            float anim = side < 0 ? blindLeftAnim : blindRightAnim;
+            float dng = side < 0 ? blindLeftDanger : blindRightDanger;
+            if (fade <= 0.01f) continue;
+
+            int amberRgb = lightTheme ? 0xEA580C : 0xFF8C1A;
+            int redRgb = lightTheme ? 0xDC2626 : 0xFF2438;
+            int colRgb = blendRgb(amberRgb, redRgb, dng);
+            int brightRgb = blendRgb(0xFFD080, 0xFF9AA2, dng);
+
+            float yTop = vy + 225f;
+            float yBot = vy + 445f;
+            float yMid = (yTop + yBot) * 0.5f;
+            float edgeX = side < 0 ? vx : (vx + vw);
+            float inDir = -side;
+
+            float bandW = 72f + 36f * dng;
+            float peakA = Math.min(0.88f, (lightTheme ? 0.46f : 0.62f) * (0.45f + 0.55f * anim) * (1.0f + 0.28f * dng));
+            int scGlow = c.save();
+            c.translate(edgeX, yMid);
+            c.scale(bandW, (yBot - yTop) * 0.56f);
+            pFill.setShader(new RadialGradient(0f, 0f, 1f,
+                    new int[]{withAlpha(colRgb, peakA), withAlpha(colRgb, peakA * 0.44f), withAlpha(colRgb, 0f)},
+                    new float[]{0f, 0.52f, 1f}, Shader.TileMode.CLAMP));
+            c.drawCircle(0f, 0f, 1f, pFill);
+            pFill.setShader(null);
+            c.restoreToCount(scGlow);
+
+            pStroke.setStrokeCap(Paint.Cap.ROUND);
+            pStroke.setColor(withAlpha(blendRgb(colRgb, brightRgb, 0.45f * anim), Math.min(1f, 0.55f + 0.45f * anim) * fade));
+            pStroke.setStrokeWidth(3.5f + 1.5f * dng);
+            c.drawLine(edgeX + inDir * 3.5f, yTop + 18f, edgeX + inDir * 3.5f, yBot - 18f, pStroke);
+
+            float bx = edgeX + inDir * 44f;
+            float by = yMid - 8f;
+            int cardBg = blendRgb(lightTheme ? 0xFFFFFF : 0x161922, colRgb, 0.22f + 0.42f * dng * anim);
+            roundRect(c, bx - 22f, by - 19f, bx + 22f, by + 19f, 11f, withAlpha(cardBg, 0.90f * fade));
+            pStroke.setColor(withAlpha(colRgb, (0.65f + 0.35f * anim) * fade));
+            pStroke.setStrokeWidth(1.6f + 0.6f * dng);
+            rf.set(bx - 22f, by - 19f, bx + 22f, by + 19f);
+            c.drawRoundRect(rf, 11f, 11f, pStroke);
+
+            float tx = bx + inDir * 6.5f;
+            path.reset();
+            path.moveTo(tx, by - 7.5f);
+            path.lineTo(tx + 7.5f, by + 6.5f);
+            path.lineTo(tx - 7.5f, by + 6.5f);
+            path.close();
+            pFill.setShader(null);
+            pFill.setColor(withAlpha(blendRgb(colRgb, 0xFFFFFF, 0.45f * anim), fade));
+            c.drawPath(path, pFill);
+            pFill.setColor(withAlpha(cardBg, fade));
+            c.drawRect(tx - 0.9f, by - 3.2f, tx + 0.9f, by + 1.8f, pFill);
+            c.drawCircle(tx, by + 4.0f, 1.0f, pFill);
+
+            float ax = bx + inDir * 1.5f;
+            float startDeg = (side < 0) ? 142f : -38f;
+            pStroke.setColor(withAlpha(brightRgb, (0.55f + 0.45f * anim) * fade));
+            pStroke.setStrokeWidth(1.9f);
+            rf.set(ax - 10.5f, by - 10.5f, ax + 10.5f, by + 10.5f);
+            c.drawArc(rf, startDeg, 76f, false, pStroke);
+            rf.set(ax - 15.5f, by - 15.5f, ax + 15.5f, by + 15.5f);
+            c.drawArc(rf, startDeg + 5f, 66f, false, pStroke);
+
+            if (dng > 0.25f) {
+                float df = fade * Math.min(1f, (dng - 0.25f) / 0.75f);
+                String msg = side < 0 ? "좌측 후측방" : "우측 후측방";
+                float tw = measure(msg, 12.5f, true);
+                float pw = tw + 20f;
+                float ph = 24f;
+                float px0 = Math.max(vx + 10f, Math.min(vx + vw - pw - 10f, (edgeX + inDir * 56f) - pw * 0.5f));
+                float py0 = yMid + 20f;
+                int pillBg = blendRgb(0x7F1D1D, 0xDC2626, anim);
+                roundRect(c, px0, py0, px0 + pw, py0 + ph, 12f, withAlpha(pillBg, 0.94f * df));
+                pStroke.setColor(withAlpha(0xFF9AA2, (0.6f + 0.4f * anim) * df));
+                pStroke.setStrokeWidth(1.5f);
+                rf.set(px0, py0, px0 + pw, py0 + ph);
+                c.drawRoundRect(rf, 12f, 12f, pStroke);
+                text(c, msg, px0 + 10f, py0 + 16.5f, 12.5f, true, withAlpha(0xFFFFFF, df));
+            }
+        }
+        pStroke.setStrokeCap(prevCap);
+        c.restoreToCount(scClip);
+    }
+
+    private void drawDriveResetPill(Canvas c, float[] vz, boolean belowBlinkers) {
         String txt = "↺ 기본 시점";
         pStatus.setTypeface(Typeface.DEFAULT_BOLD);
         pStatus.setTextSize(14f);
@@ -840,7 +1044,7 @@ public final class HudRenderer {
         float cx = vz[0] + vz[2] * 0.50f;
         float bx0 = cx - tw * 0.5f - 14f;
         float bx1 = cx + tw * 0.5f + 14f;
-        float by0 = vz[1] + 40f;
+        float by0 = vz[1] + (belowBlinkers ? 78f : 40f);
         float by1 = by0 + 28f;
         roundRect(c, bx0, by0, bx1, by1, 14f, lightTheme ? 0xEBFFFFFF : 0xD4141822);
         pStroke.setColor(lightTheme ? 0xFF3B82F6 : 0xFF4F7FFF);
@@ -986,7 +1190,7 @@ public final class HudRenderer {
         }
     }
 
-    private void drawDoorAlertBanner(Canvas c, float[] vz, boolean driving, boolean belowResetPill) {
+    private void drawDoorAlertBanner(Canvas c, float[] vz, boolean driving, boolean belowResetPill, boolean belowBlinkers) {
         int cnt = 0;
         int firstIdx = -1;
         float maxOpen = 0f;
@@ -1024,7 +1228,7 @@ public final class HudRenderer {
         float bh = 30f;
         float cx = vz[0] + vz[2] * 0.45f;
         float bx0 = Math.max(vz[0] + 12f, Math.min(vz[0] + vz[2] - bw - 12f, cx - bw * 0.5f));
-        float by0 = vz[1] + (belowResetPill ? 74f : 40f);
+        float by0 = vz[1] + 40f + (belowBlinkers ? 38f : 0f) + (belowResetPill ? 34f : 0f);
 
         if (blink > 0.15f) {
             roundRect(c, bx0 - 3.5f, by0 - 3.5f, bx0 + bw + 3.5f, by0 + bh + 3.5f, 18f,
@@ -1060,18 +1264,22 @@ public final class HudRenderer {
     private void drawStatusPill(Canvas c, HudState s, double fps, boolean demoMode) {
         String txt;
         int dotCol;
+        String upd = availableUpdateVer;
         if (demoMode) {
             txt = String.format(Locale.US, "DEMO · %.0f FPS", fps);
             dotCol = 0xFF6E95FF;
         } else if (s.hubConnected) {
             txt = String.format(Locale.US, "HUD %.0f FPS · HUB%s", fps,
                     s.commaDirectConnected ? " · 직결" : (s.commaConnected ? " · 경유" : ""));
-            dotCol = 0xFF3DD68C;
+            dotCol = !upd.isEmpty() ? 0xFF6E95FF : 0xFF3DD68C;
         } else {
             txt = (s.hubIp != null && !s.hubIp.isEmpty())
                     ? ("연결 대기 " + s.hubIp + " (미디어 탭 설정)")
                     : "헤드유닛 자동탐색 중 (:8767) · 미디어 탭 설정";
             dotCol = 0xFFF5A623;
+        }
+        if (!upd.isEmpty()) {
+            txt = txt + " · 업데이트 v" + upd;
         }
         pStatus.setTypeface(Typeface.DEFAULT_BOLD);
         pStatus.setTextSize(15f);

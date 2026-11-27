@@ -105,6 +105,8 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     + "uniform float uBrakeLamp;\n"
                     + "uniform float uReverse;\n"
                     + "uniform float uLightTheme;\n"
+                    + "uniform float uTurnLeft;\n"
+                    + "uniform float uTurnRight;\n"
                     + "out vec4 fragColor;\n"
                     + "void main() {\n"
                     + "    vec3 N = normalize(vWorldNrm);\n"
@@ -119,6 +121,7 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     + "    float envStrength = 0.25;\n"
                     + "    float alpha = 1.0;\n"
                     + "    vec3 emissive = vec3(0.0);\n"
+                    + "    float sideTurn = (vLocalPos.x < 0.0) ? uTurnLeft : uTurnRight;\n"
                     + "\n"
                     + "    if (uMatId == 0) {\n" // BODY
                     + "        baseCol = uBodyRgb;\n"
@@ -174,12 +177,28 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     + "        float fresGlass = mix(0.06, 0.50, pow(1.0 - NdotV, 2.8));\n"
                     + "        alpha = clamp(fresGlass + 0.05 * uHeadLamp, 0.08, 0.58);\n"
                     + "        emissive = vec3(0.24, 0.34, 0.50) * uHeadLamp * (0.12 + 0.22 * (1.0 - NdotV));\n"
-                    + "    } else if (uMatId == 9) {\n" // DRL
-                    + "        baseCol = vec3(0.76, 0.84, 0.94);\n"
-                    + "        shininess = 120.0;\n"
-                    + "        specStrength = 0.85;\n"
-                    + "        envStrength = 0.6;\n"
-                    + "        emissive = vec3(0.75, 0.90, 1.15) * max(0.45, uHeadLamp);\n"
+                    + "    } else if (uMatId == 9) {\n" // DRL + Side Mirror Turn Repeaters + Switchback Front Brow
+                    + "        if (vLocalPos.z > -1.0 && vLocalPos.z < 0.0) {\n"
+                    + "            baseCol = mix(vec3(0.32, 0.24, 0.14), vec3(1.00, 0.62, 0.12), sideTurn);\n"
+                    + "            shininess = 130.0;\n"
+                    + "            specStrength = 0.90;\n"
+                    + "            envStrength = 0.65;\n"
+                    + "            emissive = vec3(3.40, 1.50, 0.08) * sideTurn;\n"
+                    + "        } else if (vLocalPos.z <= -1.0 && vLocalPos.y >= 0.70) {\n"
+                    + "            baseCol = mix(vec3(0.76, 0.84, 0.94), vec3(1.00, 0.64, 0.12), sideTurn);\n"
+                    + "            shininess = 120.0;\n"
+                    + "            specStrength = 0.85;\n"
+                    + "            envStrength = 0.6;\n"
+                    + "            vec3 drlEm = vec3(0.75, 0.90, 1.15) * max(0.45, uHeadLamp);\n"
+                    + "            vec3 turnEm = vec3(3.30, 1.45, 0.06);\n"
+                    + "            emissive = mix(drlEm, turnEm, sideTurn);\n"
+                    + "        } else {\n"
+                    + "            baseCol = vec3(0.76, 0.84, 0.94);\n"
+                    + "            shininess = 120.0;\n"
+                    + "            specStrength = 0.85;\n"
+                    + "            envStrength = 0.6;\n"
+                    + "            emissive = vec3(0.75, 0.90, 1.15) * max(0.45, uHeadLamp);\n"
+                    + "        }\n"
                     + "    } else if (uMatId == 10) {\n" // TAILLAMP: bumper reflector+reverse / main lamp / spoiler HMSL
                     + "        if (vLocalPos.y < 0.72) {\n"
                     + "            float revZone = smoothstep(0.658, 0.674, abs(vLocalPos.x));\n"
@@ -202,20 +221,33 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     + "            vec3 tailCol = vec3(0.24, 0.015, 0.028) * uHeadLamp;\n"
                     + "            float core = smoothstep(0.32, 0.78, abs(vLocalPos.x)) * (1.0 - smoothstep(0.04, 0.10, abs(vLocalPos.y - 1.05)));\n"
                     + "            vec3 brkCol = mix(vec3(2.20, 0.14, 0.10), vec3(3.40, 0.75, 0.40), core * 0.65) * uBrakeLamp;\n"
-                    + "            emissive = max(tailCol, brkCol);\n"
+                    + "            float turnZone = smoothstep(0.56, 0.72, abs(vLocalPos.x)) * (1.0 - smoothstep(1.01, 1.08, vLocalPos.y));\n"
+                    + "            vec3 turnCol = vec3(3.40, 1.45, 0.06) * sideTurn * turnZone;\n"
+                    + "            emissive = mix(max(tailCol, brkCol), turnCol, clamp(sideTurn * turnZone * 1.15, 0.0, 1.0));\n"
                     + "        }\n"
-                    + "    } else if (uMatId == 11) {\n" // MAT_REVERSE
-                    + "        baseCol = vec3(0.72, 0.75, 0.80);\n"
-                    + "        shininess = 120.0;\n"
-                    + "        specStrength = 0.85;\n"
-                    + "        emissive = vec3(2.60, 2.80, 3.10) * uReverse;\n"
-                    + "    } else {\n" // MAT_PROJECTOR (12: dual bi-LED convex lenses & fog)
+                    + "    } else if (uMatId == 11) {\n" // MAT_REVERSE (lower bumper) + rear upper turn chamber (y >= 0.85)
+                    + "        if (vLocalPos.y >= 0.85) {\n"
+                    + "            baseCol = mix(vec3(0.46, 0.30, 0.14), vec3(1.00, 0.62, 0.12), sideTurn);\n"
+                    + "            shininess = 130.0;\n"
+                    + "            specStrength = 0.90;\n"
+                    + "            envStrength = 0.65;\n"
+                    + "            emissive = vec3(3.60, 1.55, 0.06) * sideTurn;\n"
+                    + "        } else {\n"
+                    + "            baseCol = vec3(0.72, 0.75, 0.80);\n"
+                    + "            shininess = 120.0;\n"
+                    + "            specStrength = 0.85;\n"
+                    + "            emissive = vec3(2.60, 2.80, 3.10) * uReverse;\n"
+                    + "        }\n"
+                    + "    } else {\n" // MAT_PROJECTOR (12: dual bi-LED convex lenses & lower bumper corner turn)
                     + "        baseCol = vec3(0.11, 0.15, 0.24);\n"
                     + "        metal = 0.28;\n"
                     + "        shininess = 160.0;\n"
                     + "        specStrength = 1.05;\n"
                     + "        envStrength = 1.05;\n"
                     + "        emissive = vec3(1.15, 1.30, 1.55) * uHeadLamp;\n"
+                    + "        if (vLocalPos.y < 0.70 && vLocalPos.z < -1.0) {\n"
+                    + "            emissive = mix(emissive, vec3(3.00, 1.30, 0.06), sideTurn);\n"
+                    + "        }\n"
                     + "    }\n"
                     + "\n"
                     + "    vec3 skyCol = mix(vec3(0.66, 0.72, 0.84), vec3(0.92, 0.95, 1.00), uLightTheme);\n"
@@ -284,11 +316,22 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     + "uniform float uLightTheme;\n"
                     + "uniform vec4 uDoorsSide;\n"
                     + "uniform vec4 uDoorsEnd;\n"
+                    + "uniform vec4 uTurnBlind;\n"
+                    + "uniform vec2 uBlindDanger;\n"
                     + "out vec4 fragColor;\n"
                     + "float doorPuddle(vec2 p, vec2 c, vec2 r, float open) {\n"
                     + "    if (open <= 0.01) return 0.0;\n"
                     + "    vec2 d = (p - c) / r;\n"
                     + "    return exp(-dot(d, d) * 2.2) * open;\n"
+                    + "}\n"
+                    + "float blindZone(vec2 p, float sideSign) {\n"
+                    + "    float sx = p.x * sideSign;\n"
+                    + "    if (sx < 0.85 || sx > 2.75) return 0.0;\n"
+                    + "    vec2 d = vec2((sx - 1.58) / 0.64, (p.y - 1.15) / 1.48);\n"
+                    + "    float lobe = exp(-dot(d, d) * 1.85) * smoothstep(0.88, 1.14, sx);\n"
+                    + "    float rad = length(vec2((sx - 0.85) * 1.05, (p.y - 0.95) * 0.65));\n"
+                    + "    float arc = smoothstep(0.10, 0.0, abs(rad - 0.64)) + smoothstep(0.10, 0.0, abs(rad - 1.08)) * 0.78;\n"
+                    + "    return clamp(lobe * 0.82 + arc * lobe * 0.95, 0.0, 1.0);\n"
                     + "}\n"
                     + "float coneBeam(vec2 p, vec2 src, float reach) {\n"
                     + "    vec2 d = p - src;\n"
@@ -309,8 +352,8 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     + "    return angFade * distFade;\n"
                     + "}\n"
                     + "void main() {\n"
-                    + "    // Quad spans X in [-2.6, 2.6], Z in [-6.8, 5.4]; smoothly fade near boundary\n"
-                    + "    float edgeX = 1.0 - smoothstep(2.0, 2.55, abs(vXZ.x));\n"
+                    + "    // Quad spans X in [-3.2, 3.2], Z in [-6.8, 5.4]; smoothly fade near boundary\n"
+                    + "    float edgeX = 1.0 - smoothstep(2.60, 3.15, abs(vXZ.x));\n"
                     + "    float edgeZ = smoothstep(-6.75, -5.6, vXZ.y) * (1.0 - smoothstep(4.2, 5.35, vXZ.y));\n"
                     + "    float edge = edgeX * edgeZ;\n"
                     + "    if (edge <= 0.001) discard;\n"
@@ -357,8 +400,25 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     + "    vec3 doorRgb = mix(vec3(1.00, 0.42, 0.10), vec3(1.00, 0.16, 0.22), uDoorsEnd.w);\n"
                     + "    float doorA = clamp(doorG * blinkMul * mix(0.62, 0.42, uLightTheme), 0.0, 0.65);\n"
                     + "\n"
-                    + "    float outA = clamp(shAlpha + beamA + tailA + revBeamA + doorA, 0.0, 0.92) * edge;\n"
-                    + "    vec3 premul = (shRgb * shAlpha + beamRgb * beamA + rearGlowCol * tailA + revBeamRgb * revBeamA + doorRgb * doorA) * edge;\n"
+                    + "    float turnG = 0.0;\n"
+                    + "    turnG = max(turnG, doorPuddle(vXZ, vec2(-0.98, -1.96), vec2(0.52, 0.56), uTurnBlind.x));\n"
+                    + "    turnG = max(turnG, doorPuddle(vXZ, vec2(-0.96,  2.14), vec2(0.54, 0.62), uTurnBlind.x));\n"
+                    + "    turnG = max(turnG, doorPuddle(vXZ, vec2(-1.18, -0.58), vec2(0.36, 0.36), uTurnBlind.x) * 0.55);\n"
+                    + "    turnG = max(turnG, doorPuddle(vXZ, vec2( 0.98, -1.96), vec2(0.52, 0.56), uTurnBlind.y));\n"
+                    + "    turnG = max(turnG, doorPuddle(vXZ, vec2( 0.96,  2.14), vec2(0.54, 0.62), uTurnBlind.y));\n"
+                    + "    turnG = max(turnG, doorPuddle(vXZ, vec2( 1.18, -0.58), vec2(0.36, 0.36), uTurnBlind.y) * 0.55);\n"
+                    + "    vec3 turnRgb = mix(vec3(1.00, 0.52, 0.06), vec3(0.95, 0.44, 0.04), uLightTheme);\n"
+                    + "    float turnA = clamp(turnG * mix(0.48, 0.32, uLightTheme), 0.0, 0.54);\n"
+                    + "\n"
+                    + "    float bLA = (uTurnBlind.z > 0.01)\n"
+                    + "            ? clamp(blindZone(vXZ, -1.0) * uTurnBlind.z * mix(0.72, 0.48, uLightTheme), 0.0, 0.74) : 0.0;\n"
+                    + "    float bRA = (uTurnBlind.w > 0.01)\n"
+                    + "            ? clamp(blindZone(vXZ,  1.0) * uTurnBlind.w * mix(0.72, 0.48, uLightTheme), 0.0, 0.74) : 0.0;\n"
+                    + "    vec3 bLCol = mix(vec3(1.00, 0.48, 0.08), vec3(1.00, 0.14, 0.20), uBlindDanger.x);\n"
+                    + "    vec3 bRCol = mix(vec3(1.00, 0.48, 0.08), vec3(1.00, 0.14, 0.20), uBlindDanger.y);\n"
+                    + "\n"
+                    + "    float outA = clamp(shAlpha + beamA + tailA + revBeamA + doorA + turnA + bLA + bRA, 0.0, 0.94) * edge;\n"
+                    + "    vec3 premul = (shRgb * shAlpha + beamRgb * beamA + rearGlowCol * tailA + revBeamRgb * revBeamA + doorRgb * doorA + turnRgb * turnA + bLCol * bLA + bRCol * bRA) * edge;\n"
                     + "    fragColor = vec4(premul, outA);\n"
                     + "}\n";
 
@@ -368,6 +428,7 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     + "layout(location = 1) in vec2 aUv;\n"
                     + "uniform mat4 uModel;\n"
                     + "uniform mat4 uViewProj;\n"
+                    + "uniform mediump float uFaceDir;\n"
                     + "out vec2 vUv;\n"
                     + "out vec3 vWorldPos;\n"
                     + "out vec3 vRearNrm;\n"
@@ -375,7 +436,7 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     + "    vUv = aUv;\n"
                     + "    vec4 wp = uModel * vec4(aPos, 1.0);\n"
                     + "    vWorldPos = wp.xyz;\n"
-                    + "    vRearNrm = normalize(mat3(uModel) * vec3(0.0, 0.08, 1.0));\n"
+                    + "    vRearNrm = normalize(mat3(uModel) * vec3(0.0, 0.08, (abs(uFaceDir) < 0.5) ? 1.0 : uFaceDir));\n"
                     + "    gl_Position = uViewProj * wp;\n"
                     + "}\n";
 
@@ -388,23 +449,30 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     + "uniform vec3 uCamPos;\n"
                     + "uniform float uBrakeLamp;\n"
                     + "uniform float uLightTheme;\n"
-                    + "uniform float uReverseMode;\n"
+                    + "uniform float uBloomMode;\n"
+                    + "uniform float uFaceDir;\n"
                     + "out vec4 fragColor;\n"
                     + "void main() {\n"
                     + "    float r2 = dot(vUv, vUv);\n"
                     + "    if (r2 >= 1.0) discard;\n"
                     + "    vec3 V = normalize(uCamPos - vWorldPos);\n"
-                    + "    float rearVis = smoothstep(-0.10, 0.35, dot(normalize(vRearNrm), V));\n"
+                    + "    float rearVis = (abs(uFaceDir) < 0.5) ? 1.0 : smoothstep(-0.10, 0.35, dot(normalize(vRearNrm), V));\n"
                     + "    float outer = exp(-r2 * 3.4) * (1.0 - smoothstep(0.55, 1.0, r2));\n"
                     + "    float core = exp(-r2 * 13.0);\n"
                     + "    float str = (outer * mix(0.62, 0.44, uLightTheme) + core * mix(0.50, 0.32, uLightTheme)) * uBrakeLamp * rearVis;\n"
                     + "    if (str <= 0.002) discard;\n"
-                    + "    vec3 brkOuter = mix(vec3(1.00, 0.14, 0.10), vec3(0.92, 0.08, 0.12), uLightTheme);\n"
-                    + "    vec3 brkCore  = mix(vec3(1.00, 0.58, 0.36), vec3(1.00, 0.28, 0.20), uLightTheme);\n"
-                    + "    vec3 revOuter = mix(vec3(0.72, 0.86, 1.00), vec3(0.45, 0.72, 1.00), uLightTheme);\n"
-                    + "    vec3 revCore  = mix(vec3(1.00, 1.00, 1.00), vec3(0.96, 0.99, 1.00), uLightTheme);\n"
-                    + "    vec3 outerCol = mix(brkOuter, revOuter, uReverseMode);\n"
-                    + "    vec3 coreCol  = mix(brkCore,  revCore,  uReverseMode);\n"
+                    + "    vec3 outerCol;\n"
+                    + "    vec3 coreCol;\n"
+                    + "    if (uBloomMode < 0.5) {\n"
+                    + "        outerCol = mix(vec3(1.00, 0.14, 0.10), vec3(0.92, 0.08, 0.12), uLightTheme);\n"
+                    + "        coreCol  = mix(vec3(1.00, 0.58, 0.36), vec3(1.00, 0.28, 0.20), uLightTheme);\n"
+                    + "    } else if (uBloomMode < 1.5) {\n"
+                    + "        outerCol = mix(vec3(0.72, 0.86, 1.00), vec3(0.45, 0.72, 1.00), uLightTheme);\n"
+                    + "        coreCol  = mix(vec3(1.00, 1.00, 1.00), vec3(0.96, 0.99, 1.00), uLightTheme);\n"
+                    + "    } else {\n"
+                    + "        outerCol = mix(vec3(1.00, 0.50, 0.04), vec3(0.95, 0.42, 0.04), uLightTheme);\n"
+                    + "        coreCol  = mix(vec3(1.00, 0.86, 0.40), vec3(1.00, 0.68, 0.18), uLightTheme);\n"
+                    + "    }\n"
                     + "    vec3 col = mix(outerCol, coreCol, clamp(core * 1.25, 0.0, 1.0));\n"
                     + "    fragColor = vec4(col * str, clamp(str, 0.0, 0.85));\n"
                     + "}\n";
@@ -553,13 +621,13 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
         private EGLSurface eglSurface = EGL14.EGL_NO_SURFACE;
 
         private int carProgram;
-        private int uModelLoc, uVpLoc, uPosScaleLoc, uMatLoc, uCamPosLoc, uBodyRgbLoc, uHeadLoc, uBrakeLoc, uRevLoc, uLightLoc;
+        private int uModelLoc, uVpLoc, uPosScaleLoc, uMatLoc, uCamPosLoc, uBodyRgbLoc, uHeadLoc, uBrakeLoc, uRevLoc, uLightLoc, uTurnLeftLoc, uTurnRightLoc;
 
         private int floorProgram;
-        private int fVpLoc, fHeadLoc, fBrakeLoc, fRevLoc, fParkLoc, fLightLoc, fDoorsSideLoc, fDoorsEndLoc;
+        private int fVpLoc, fHeadLoc, fBrakeLoc, fRevLoc, fParkLoc, fLightLoc, fDoorsSideLoc, fDoorsEndLoc, fTurnBlindLoc, fBlindDangerLoc;
 
         private int bloomProgram;
-        private int bModelLoc, bVpLoc, bCamPosLoc, bBrakeLoc, bLightLoc, bRevModeLoc;
+        private int bModelLoc, bVpLoc, bCamPosLoc, bBrakeLoc, bLightLoc, bBloomModeLoc, bFaceDirLoc;
 
         private int carVbo, carIbo, floorVbo, bloomVbo;
         private float posScale = 2.5f;
@@ -804,6 +872,8 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
             uBrakeLoc = GLES30.glGetUniformLocation(carProgram, "uBrakeLamp");
             uRevLoc = GLES30.glGetUniformLocation(carProgram, "uReverse");
             uLightLoc = GLES30.glGetUniformLocation(carProgram, "uLightTheme");
+            uTurnLeftLoc = GLES30.glGetUniformLocation(carProgram, "uTurnLeft");
+            uTurnRightLoc = GLES30.glGetUniformLocation(carProgram, "uTurnRight");
 
             fVpLoc = GLES30.glGetUniformLocation(floorProgram, "uViewProj");
             fHeadLoc = GLES30.glGetUniformLocation(floorProgram, "uHeadLamp");
@@ -813,21 +883,24 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
             fLightLoc = GLES30.glGetUniformLocation(floorProgram, "uLightTheme");
             fDoorsSideLoc = GLES30.glGetUniformLocation(floorProgram, "uDoorsSide");
             fDoorsEndLoc = GLES30.glGetUniformLocation(floorProgram, "uDoorsEnd");
+            fTurnBlindLoc = GLES30.glGetUniformLocation(floorProgram, "uTurnBlind");
+            fBlindDangerLoc = GLES30.glGetUniformLocation(floorProgram, "uBlindDanger");
 
             bModelLoc = GLES30.glGetUniformLocation(bloomProgram, "uModel");
             bVpLoc = GLES30.glGetUniformLocation(bloomProgram, "uViewProj");
             bCamPosLoc = GLES30.glGetUniformLocation(bloomProgram, "uCamPos");
             bBrakeLoc = GLES30.glGetUniformLocation(bloomProgram, "uBrakeLamp");
             bLightLoc = GLES30.glGetUniformLocation(bloomProgram, "uLightTheme");
-            bRevModeLoc = GLES30.glGetUniformLocation(bloomProgram, "uReverseMode");
+            bBloomModeLoc = GLES30.glGetUniformLocation(bloomProgram, "uBloomMode");
+            bFaceDirLoc = GLES30.glGetUniformLocation(bloomProgram, "uFaceDir");
 
             if (!loadCarAsset()) return false;
 
             float[] floorVerts = {
-                    -2.6f, 0.002f, -6.8f,
-                     2.6f, 0.002f, -6.8f,
-                    -2.6f, 0.002f,  5.4f,
-                     2.6f, 0.002f,  5.4f,
+                    -3.2f, 0.002f, -6.8f,
+                     3.2f, 0.002f, -6.8f,
+                    -3.2f, 0.002f,  5.4f,
+                     3.2f, 0.002f,  5.4f,
             };
             float[] bloomVerts = {
                     // Left taillamp (-0.62, 1.05, 2.11), hw=0.48, hh=0.26
@@ -865,6 +938,48 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                      0.475f, 0.440f, 2.13f, -1f, -1f,
                      0.955f, 0.720f, 2.13f,  1f,  1f,
                      0.475f, 0.720f, 2.13f, -1f,  1f,
+                    // Rear-Left turn signal (-0.71, 1.03, 2.12), hw=0.30, hh=0.18
+                    -1.01f, 0.85f, 2.12f, -1f, -1f,
+                    -0.41f, 0.85f, 2.12f,  1f, -1f,
+                    -0.41f, 1.21f, 2.12f,  1f,  1f,
+                    -1.01f, 0.85f, 2.12f, -1f, -1f,
+                    -0.41f, 1.21f, 2.12f,  1f,  1f,
+                    -1.01f, 1.21f, 2.12f, -1f,  1f,
+                    // Rear-Right turn signal (+0.71, 1.03, 2.12), hw=0.30, hh=0.18
+                     0.41f, 0.85f, 2.12f, -1f, -1f,
+                     1.01f, 0.85f, 2.12f,  1f, -1f,
+                     1.01f, 1.21f, 2.12f,  1f,  1f,
+                     0.41f, 0.85f, 2.12f, -1f, -1f,
+                     1.01f, 1.21f, 2.12f,  1f,  1f,
+                     0.41f, 1.21f, 2.12f, -1f,  1f,
+                    // Front-Left turn signal (-0.75, 0.85, -1.94), hw=0.30, hh=0.18
+                    -1.05f, 0.67f, -1.94f, -1f, -1f,
+                    -0.45f, 0.67f, -1.94f,  1f, -1f,
+                    -0.45f, 1.03f, -1.94f,  1f,  1f,
+                    -1.05f, 0.67f, -1.94f, -1f, -1f,
+                    -0.45f, 1.03f, -1.94f,  1f,  1f,
+                    -1.05f, 1.03f, -1.94f, -1f,  1f,
+                    // Front-Right turn signal (+0.75, 0.85, -1.94), hw=0.30, hh=0.18
+                     0.45f, 0.67f, -1.94f, -1f, -1f,
+                     1.05f, 0.67f, -1.94f,  1f, -1f,
+                     1.05f, 1.03f, -1.94f,  1f,  1f,
+                     0.45f, 0.67f, -1.94f, -1f, -1f,
+                     1.05f, 1.03f, -1.94f,  1f,  1f,
+                     0.45f, 1.03f, -1.94f, -1f,  1f,
+                    // Mirror-Left turn repeater (-1.02, 1.11, -0.58)
+                    -0.91f, 0.98f, -0.69f, -1f, -1f,
+                    -1.13f, 0.98f, -0.47f,  1f, -1f,
+                    -1.13f, 1.24f, -0.47f,  1f,  1f,
+                    -0.91f, 0.98f, -0.69f, -1f, -1f,
+                    -1.13f, 1.24f, -0.47f,  1f,  1f,
+                    -0.91f, 1.24f, -0.69f, -1f,  1f,
+                    // Mirror-Right turn repeater (+1.02, 1.11, -0.58)
+                     0.91f, 0.98f, -0.69f, -1f, -1f,
+                     1.13f, 0.98f, -0.47f,  1f, -1f,
+                     1.13f, 1.24f, -0.47f,  1f,  1f,
+                     0.91f, 0.98f, -0.69f, -1f, -1f,
+                     1.13f, 1.24f, -0.47f,  1f,  1f,
+                     0.91f, 1.24f, -0.69f, -1f,  1f,
             };
             int[] bufs = new int[2];
             GLES30.glGenBuffers(2, bufs, 0);
@@ -1111,6 +1226,11 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
             GLES30.glUniform4f(fDoorsEndLoc,
                     localState.doorEased[4], localState.doorEased[5],
                     localState.doorBlink, localState.parked ? 0f : 1f);
+            GLES30.glUniform4f(fTurnBlindLoc,
+                    localState.turnLeftAnim, localState.turnRightAnim,
+                    localState.blindLeftAnim, localState.blindRightAnim);
+            GLES30.glUniform2f(fBlindDangerLoc,
+                    localState.blindLeftDanger, localState.blindRightDanger);
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, floorVbo);
             GLES30.glEnableVertexAttribArray(0);
             GLES30.glDisableVertexAttribArray(1);
@@ -1134,6 +1254,8 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
             GLES30.glUniform1f(uBrakeLoc, localState.brakeAnim);
             GLES30.glUniform1f(uRevLoc, revAnim);
             GLES30.glUniform1f(uLightLoc, lt);
+            GLES30.glUniform1f(uTurnLeftLoc, localState.turnLeftAnim);
+            GLES30.glUniform1f(uTurnRightLoc, localState.turnRightAnim);
 
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, carVbo);
             GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, carIbo);
@@ -1153,8 +1275,10 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
             GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, 0);
 
-            // Pass 4: 3-point brake + 2-point reverse LED bloom halo quads
-            if ((localState.brakeAnim > 0.01f || revAnim > 0.01f) && bloomProgram != 0 && bloomVbo != 0) {
+            // Pass 4: Brake + Reverse + Turn Signal LED bloom halo quads
+            if ((localState.brakeAnim > 0.01f || revAnim > 0.01f
+                    || localState.turnLeftAnim > 0.01f || localState.turnRightAnim > 0.01f)
+                    && bloomProgram != 0 && bloomVbo != 0) {
                 GLES30.glDisable(GLES30.GL_CULL_FACE);
                 GLES30.glDepthMask(false);
                 GLES30.glEnable(GLES30.GL_BLEND);
@@ -1171,13 +1295,35 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                 GLES30.glVertexAttribPointer(1, 2, GLES30.GL_FLOAT, false, 20, 12);
                 if (localState.brakeAnim > 0.01f) {
                     GLES30.glUniform1f(bBrakeLoc, localState.brakeAnim);
-                    GLES30.glUniform1f(bRevModeLoc, 0f);
+                    GLES30.glUniform1f(bBloomModeLoc, 0f);
+                    GLES30.glUniform1f(bFaceDirLoc, 1f);
                     GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 18);
                 }
                 if (revAnim > 0.01f) {
                     GLES30.glUniform1f(bBrakeLoc, revAnim);
-                    GLES30.glUniform1f(bRevModeLoc, 1f);
+                    GLES30.glUniform1f(bBloomModeLoc, 1f);
+                    GLES30.glUniform1f(bFaceDirLoc, 1f);
                     GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 18, 12);
+                }
+                if (localState.turnLeftAnim > 0.01f) {
+                    GLES30.glUniform1f(bBrakeLoc, localState.turnLeftAnim);
+                    GLES30.glUniform1f(bBloomModeLoc, 2f);
+                    GLES30.glUniform1f(bFaceDirLoc, 1f);
+                    GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 30, 6);
+                    GLES30.glUniform1f(bFaceDirLoc, -1f);
+                    GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 42, 6);
+                    GLES30.glUniform1f(bFaceDirLoc, 0f);
+                    GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 54, 6);
+                }
+                if (localState.turnRightAnim > 0.01f) {
+                    GLES30.glUniform1f(bBrakeLoc, localState.turnRightAnim);
+                    GLES30.glUniform1f(bBloomModeLoc, 2f);
+                    GLES30.glUniform1f(bFaceDirLoc, 1f);
+                    GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 36, 6);
+                    GLES30.glUniform1f(bFaceDirLoc, -1f);
+                    GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 48, 6);
+                    GLES30.glUniform1f(bFaceDirLoc, 0f);
+                    GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 60, 6);
                 }
                 GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
                 GLES30.glDepthMask(true);

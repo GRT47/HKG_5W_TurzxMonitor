@@ -4,26 +4,35 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInstaller;
 import android.graphics.Color;
 import android.graphics.Outline;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewOutlineProvider;
 import android.view.Window;
 import android.view.WindowManager;
+import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 import org.json.JSONObject;
+import java.io.File;
+import java.util.Locale;
 
 /**
  * Fullscreen 1920x720 activity for t88 secondary HUD display.
@@ -43,6 +52,13 @@ public final class MainActivity extends Activity {
     public static final String KEY_STATUS_PILL = "show_status_pill";
     public static final String KEY_CAR3D = "car3d_enabled";
     public static final String KEY_CAR3D_COLOR = "car3d_color";
+    public static final String KEY_AUTO_UPDATE = "auto_update";
+    public static final String KEY_UPDATE_REPO = "update_repo";
+    public static final String KEY_UPDATE_BRANCH = "update_branch";
+    public static final String KEY_DISMISSED_UPDATE_VER = "dismissed_update_ver";
+
+    private static final long AUTO_UPDATE_INITIAL_DELAY_MS = 8000L;
+    private static final long AUTO_UPDATE_INTERVAL_MS = 3L * 3600L * 1000L;
 
     private HudView hudView;
     private HudVizBgView vizBgView;
@@ -50,9 +66,31 @@ public final class MainActivity extends Activity {
     private HudOverlayView overlayView;
     private TelemetryClient telemetryClient;
     private HudDebugWebServer debugWebServer;
+    private AppUpdater appUpdater;
     private SharedPreferences prefs;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private volatile boolean manualModeActive = false;
+    private volatile boolean pendingPermissionInstall = false;
+    private final Runnable autoUpdateRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (isFinishing()) return;
+            if (prefs != null && prefs.getBoolean(KEY_AUTO_UPDATE, true) && appUpdater != null) {
+                appUpdater.checkForUpdateAsync(null, (ok, avail, msg) -> uiHandler.post(() -> {
+                    if (hudView != null) {
+                        hudView.getRenderer().setAvailableUpdateVersion(avail != null ? avail.versionName : "");
+                    }
+                    if (ok && avail != null && !isFinishing() && !isDrivingNow()) {
+                        String dismissed = prefs.getString(KEY_DISMISSED_UPDATE_VER, "");
+                        if (!avail.versionName.equals(dismissed)) {
+                            showUpdateAvailableDialog(avail);
+                        }
+                    }
+                }));
+            }
+            uiHandler.postDelayed(this, AUTO_UPDATE_INTERVAL_MS);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -152,6 +190,13 @@ public final class MainActivity extends Activity {
         setContentView(root);
 
         telemetryClient = new TelemetryClient(this);
+        appUpdater = new AppUpdater(this);
+        AppUpdater.setInstallStatusListener((status, message) -> uiHandler.post(() -> {
+            if (isFinishing()) return;
+            if (status != PackageInstaller.STATUS_PENDING_USER_ACTION && message != null && !message.isEmpty()) {
+                Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+            }
+        }));
         hudView.setTelemetryClient(telemetryClient);
         debugWebServer = new HudDebugWebServer(getAssets(), new HudDebugWebServer.Listener() {
             @Override
@@ -246,12 +291,46 @@ public final class MainActivity extends Activity {
                 }
                 return app;
             }
+
+            @Override
+            public JSONObject readUpdateStatusJson() {
+                return appUpdater != null ? appUpdater.toStatusJson() : new JSONObject();
+            }
+
+            @Override
+            public void onTriggerUpdateAction(final String action, final String manifestUrl) {
+                if (appUpdater == null) return;
+                if ("install".equals(action)) {
+                    AppUpdater.UpdateInfo avail = appUpdater.getLatestAvailable();
+                    if (avail != null && !avail.apkUrl.isEmpty()) {
+                        uiHandler.post(() -> {
+                            if (!isFinishing()) startUpdateDownloadAndInstall(avail);
+                        });
+                    } else {
+                        appUpdater.checkForUpdateAsync(manifestUrl, (ok, found, msg) -> uiHandler.post(() -> {
+                            if (hudView != null) {
+                                hudView.getRenderer().setAvailableUpdateVersion(found != null ? found.versionName : "");
+                            }
+                            if (ok && found != null && !isFinishing()) {
+                                startUpdateDownloadAndInstall(found);
+                            }
+                        }));
+                    }
+                } else {
+                    appUpdater.checkForUpdateAsync(manifestUrl, (ok, found, msg) -> uiHandler.post(() -> {
+                        if (hudView != null) {
+                            hudView.getRenderer().setAvailableUpdateVersion(found != null ? found.versionName : "");
+                        }
+                    }));
+                }
+            }
         });
         hudView.setManualStateProvider(debugWebServer::buildManualSnapshot);
         applyConfigToRuntime();
         telemetryClient.start();
         debugWebServer.start();
         applyImmersiveUi();
+        uiHandler.postDelayed(autoUpdateRunnable, AUTO_UPDATE_INITIAL_DELAY_MS);
     }
 
     @Override
@@ -341,6 +420,11 @@ public final class MainActivity extends Activity {
         if (telemetryClient != null) {
             telemetryClient.configure(hubIp, commaIp, commaDirect, demo);
         }
+        if (appUpdater != null) {
+            String repo = prefs.getString(KEY_UPDATE_REPO, AppUpdater.DEFAULT_REPO);
+            String br = prefs.getString(KEY_UPDATE_BRANCH, AppUpdater.DEFAULT_BRANCH);
+            appUpdater.configure(repo, br);
+        }
     }
 
     @Override
@@ -348,6 +432,19 @@ public final class MainActivity extends Activity {
         super.onResume();
         if (car3dView != null && prefs != null) {
             car3dView.setRenderPaused(!prefs.getBoolean(KEY_CAR3D, true));
+        }
+        if (pendingPermissionInstall && appUpdater != null) {
+            File apk = appUpdater.getPendingInstallApk();
+            if (apk != null && apk.isFile()) {
+                boolean canInstall = Build.VERSION.SDK_INT < 26
+                        || getPackageManager().canRequestPackageInstalls();
+                if (canInstall) {
+                    pendingPermissionInstall = false;
+                    appUpdater.startInstall(this, apk);
+                }
+            } else {
+                pendingPermissionInstall = false;
+            }
         }
         applyImmersiveUi();
     }
@@ -378,9 +475,126 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        uiHandler.removeCallbacks(autoUpdateRunnable);
+        AppUpdater.setInstallStatusListener(null);
         if (debugWebServer != null) debugWebServer.stop();
         if (telemetryClient != null) telemetryClient.stop();
         super.onDestroy();
+    }
+
+    private boolean isDrivingNow() {
+        if (telemetryClient == null) return false;
+        HudState st = telemetryClient.snapshot();
+        if (!st.hubConnected && !st.commaConnected && !st.commaDirectConnected) {
+            return false;
+        }
+        String g = st.gearPos != null ? st.gearPos.trim().toUpperCase(Locale.US) : "P";
+        return st.speedKph > 0 || !"P".equals(g);
+    }
+
+    private void showUpdateAvailableDialog(final AppUpdater.UpdateInfo info) {
+        if (info == null || isFinishing()) return;
+        StringBuilder sb = new StringBuilder();
+        sb.append("현재 버전: v").append(appUpdater.getLocalVersionName())
+          .append(" (").append(appUpdater.getLocalVersionCode()).append(")\n")
+          .append("새 버전: v").append(info.versionName);
+        if (info.versionCode > 0) sb.append(" (").append(info.versionCode).append(")");
+        if (info.apkSize > 0) {
+            sb.append(String.format(Locale.US, "\n크기: %.2f MB", info.apkSize / (1024.0 * 1024.0)));
+        }
+        if (info.notes != null && !info.notes.isEmpty()) {
+            sb.append("\n\n변경 내용:\n").append(info.notes);
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("HKG HUD Display 업데이트 가능")
+                .setMessage(sb.toString())
+                .setPositiveButton("지금 업데이트", (d, w) -> startUpdateDownloadAndInstall(info))
+                .setNeutralButton("이 버전 건너뛰기", (d, w) -> {
+                    prefs.edit().putString(KEY_DISMISSED_UPDATE_VER, info.versionName).apply();
+                    applyImmersiveUi();
+                })
+                .setNegativeButton("나중에", (d, w) -> applyImmersiveUi())
+                .show();
+    }
+
+    private void startUpdateDownloadAndInstall(final AppUpdater.UpdateInfo info) {
+        if (appUpdater == null || info == null || isFinishing()) return;
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(36, 24, 36, 16);
+
+        final TextView tvStage = new TextView(this);
+        tvStage.setText("GitHub에서 APK 다운로드 준비 중...");
+        tvStage.setPadding(0, 0, 0, 14);
+        box.addView(tvStage);
+
+        final ProgressBar pb = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        pb.setMax(100);
+        pb.setProgress(0);
+        box.addView(pb);
+
+        final AlertDialog progDlg = new AlertDialog.Builder(this)
+                .setTitle("업데이트 다운로드 (v" + info.versionName + ")")
+                .setView(box)
+                .setCancelable(false)
+                .setNegativeButton("취소", (d, w) -> {
+                    appUpdater.cancelDownload();
+                    applyImmersiveUi();
+                })
+                .create();
+        progDlg.show();
+
+        appUpdater.downloadApkAsync(info, new AppUpdater.DownloadCallback() {
+            @Override
+            public void onProgress(final long downloaded, final long total, final String stage) {
+                uiHandler.post(() -> {
+                    if (isFinishing() || !progDlg.isShowing()) return;
+                    if (total > 0) {
+                        int pct = (int) Math.max(0, Math.min(100, (downloaded * 100L) / total));
+                        pb.setIndeterminate(false);
+                        pb.setProgress(pct);
+                        tvStage.setText(String.format(Locale.US, "%s (%d%% · %.2f / %.2f MB)",
+                                stage, pct, downloaded / 1048576.0, total / 1048576.0));
+                    } else {
+                        pb.setIndeterminate(true);
+                        tvStage.setText(String.format(Locale.US, "%s (%.2f MB)", stage, downloaded / 1048576.0));
+                    }
+                });
+            }
+
+            @Override
+            public void onComplete(final boolean ok, final File apkFile, final String message) {
+                uiHandler.post(() -> {
+                    if (progDlg.isShowing()) progDlg.dismiss();
+                    if (isFinishing()) return;
+                    if (!ok || apkFile == null) {
+                        Toast.makeText(MainActivity.this, message != null ? message : "다운로드 실패", Toast.LENGTH_LONG).show();
+                        applyImmersiveUi();
+                        return;
+                    }
+                    boolean started = appUpdater.startInstall(MainActivity.this, apkFile);
+                    if (!started && Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+                        pendingPermissionInstall = true;
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("앱 설치 권한 필요")
+                                .setMessage("자동 업데이트 APK 설치를 위해 '이 출처의 앱 허용' 권한을 켜주세요.")
+                                .setPositiveButton("권한 설정 열기", (d2, w2) -> {
+                                    try {
+                                        startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                                Uri.parse("package:" + getPackageName())));
+                                    } catch (Throwable ignored) {
+                                        Toast.makeText(MainActivity.this, "설정 화면을 열 수 없습니다", Toast.LENGTH_SHORT).show();
+                                    }
+                                })
+                                .setNegativeButton("취소", (d2, w2) -> {
+                                    pendingPermissionInstall = false;
+                                    applyImmersiveUi();
+                                })
+                                .show();
+                    }
+                });
+            }
+        });
     }
 
     private void showSettingsDialog() {
@@ -392,9 +606,13 @@ public final class MainActivity extends Activity {
         scroll.addView(root);
 
         HudState st = telemetryClient != null ? telemetryClient.snapshot() : new HudState();
-        TextView statusTv = new TextView(this);
+        final TextView statusTv = new TextView(this);
+        String verLine = appUpdater != null
+                ? String.format(Locale.US, "\n앱 버전: v%s (%d) · %s",
+                        appUpdater.getLocalVersionName(), appUpdater.getLocalVersionCode(), appUpdater.getStatusText())
+                : "";
         statusTv.setText(String.format(
-                "연결 상태: 헤드유닛 %s (%s, %.1f Hz) | 콤마 %s (%s, %.1f Hz)\n웹 테스트 콘솔: http://%s:%d",
+                "연결 상태: 헤드유닛 %s (%s, %.1f Hz) | 콤마 %s (%s, %.1f Hz)\n웹 테스트 콘솔: http://%s:%d%s",
                 st.hubConnected ? "연결됨" : "대기중",
                 st.hubIp != null && !st.hubIp.isEmpty() ? st.hubIp : "자동탐색",
                 st.hubHz,
@@ -402,7 +620,8 @@ public final class MainActivity extends Activity {
                 st.commaIp != null && !st.commaIp.isEmpty() ? st.commaIp : "-",
                 st.commaHz,
                 HudDebugWebServer.getLocalIpv4(),
-                HudDebugWebServer.PORT));
+                HudDebugWebServer.PORT,
+                verLine));
         statusTv.setPadding(0, 0, 0, 18);
         root.addView(statusTv);
 
@@ -510,6 +729,65 @@ public final class MainActivity extends Activity {
         rgColor.check(30 + curCol);
         root.addView(rgColor);
 
+        final CheckBox cbAutoUpdate = new CheckBox(this);
+        cbAutoUpdate.setText("GitHub 자동 업데이트 확인 (주차 시 안내)");
+        cbAutoUpdate.setChecked(prefs.getBoolean(KEY_AUTO_UPDATE, true));
+        cbAutoUpdate.setPadding(0, 14, 0, 4);
+        root.addView(cbAutoUpdate);
+
+        TextView repoLbl = new TextView(this);
+        repoLbl.setText("GitHub 업데이트 저장소 / 브랜치");
+        repoLbl.setPadding(0, 8, 0, 4);
+        root.addView(repoLbl);
+        final EditText etUpdateRepo = new EditText(this);
+        etUpdateRepo.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        etUpdateRepo.setHint(AppUpdater.DEFAULT_REPO);
+        etUpdateRepo.setText(prefs.getString(KEY_UPDATE_REPO, AppUpdater.DEFAULT_REPO));
+        root.addView(etUpdateRepo);
+
+        final EditText etUpdateBranch = new EditText(this);
+        etUpdateBranch.setInputType(InputType.TYPE_CLASS_TEXT);
+        etUpdateBranch.setHint(AppUpdater.DEFAULT_BRANCH);
+        etUpdateBranch.setText(prefs.getString(KEY_UPDATE_BRANCH, AppUpdater.DEFAULT_BRANCH));
+        root.addView(etUpdateBranch);
+
+        final Button btnCheckUpdate = new Button(this);
+        AppUpdater.UpdateInfo curAvail = appUpdater != null ? appUpdater.getLatestAvailable() : null;
+        btnCheckUpdate.setText(curAvail != null
+                ? ("새 버전 v" + curAvail.versionName + " 다운로드 · 설치")
+                : "GitHub 지금 업데이트 확인");
+        btnCheckUpdate.setOnClickListener(v -> {
+            if (appUpdater == null) return;
+            String rSlug = etUpdateRepo.getText().toString().trim();
+            String bName = etUpdateBranch.getText().toString().trim();
+            if (rSlug.isEmpty()) rSlug = AppUpdater.DEFAULT_REPO;
+            if (bName.isEmpty()) bName = AppUpdater.DEFAULT_BRANCH;
+            prefs.edit().putString(KEY_UPDATE_REPO, rSlug).putString(KEY_UPDATE_BRANCH, bName).apply();
+            appUpdater.configure(rSlug, bName);
+
+            AppUpdater.UpdateInfo ready = appUpdater.getLatestAvailable();
+            if (ready != null && !ready.apkUrl.isEmpty()) {
+                showUpdateAvailableDialog(ready);
+                return;
+            }
+            btnCheckUpdate.setEnabled(false);
+            btnCheckUpdate.setText("GitHub 확인 중...");
+            appUpdater.checkForUpdateAsync(null, (ok, found, msg) -> uiHandler.post(() -> {
+                btnCheckUpdate.setEnabled(true);
+                if (hudView != null) {
+                    hudView.getRenderer().setAvailableUpdateVersion(found != null ? found.versionName : "");
+                }
+                if (found != null) {
+                    btnCheckUpdate.setText("새 버전 v" + found.versionName + " 다운로드 · 설치");
+                    showUpdateAvailableDialog(found);
+                } else {
+                    btnCheckUpdate.setText("GitHub 지금 업데이트 확인");
+                    Toast.makeText(MainActivity.this, msg != null ? msg : "확인 완료", Toast.LENGTH_LONG).show();
+                }
+            }));
+        });
+        root.addView(btnCheckUpdate);
+
         AlertDialog dlg = new AlertDialog.Builder(this)
                 .setTitle("HKG HUD Display 설정 (미디어 화면 탭)")
                 .setView(scroll)
@@ -523,6 +801,10 @@ public final class MainActivity extends Activity {
                     int p = pId == 21 ? HudState.PT_EV : (pId == 22 ? HudState.PT_ICE : HudState.PT_AUTO);
                     int cId = rgColor.getCheckedRadioButtonId();
                     int c = (cId >= 30 && cId <= 34) ? (cId - 30) : 0;
+                    String rSlug = etUpdateRepo.getText().toString().trim();
+                    String bName = etUpdateBranch.getText().toString().trim();
+                    if (rSlug.isEmpty()) rSlug = AppUpdater.DEFAULT_REPO;
+                    if (bName.isEmpty()) bName = AppUpdater.DEFAULT_BRANCH;
                     prefs.edit()
                             .putBoolean(KEY_DEMO, demo)
                             .putBoolean(KEY_DEMO_PARK, park)
@@ -536,6 +818,9 @@ public final class MainActivity extends Activity {
                             .putBoolean(KEY_STATUS_PILL, cbPill.isChecked())
                             .putBoolean(KEY_CAR3D, cbCar3d.isChecked())
                             .putInt(KEY_CAR3D_COLOR, c)
+                            .putBoolean(KEY_AUTO_UPDATE, cbAutoUpdate.isChecked())
+                            .putString(KEY_UPDATE_REPO, rSlug)
+                            .putString(KEY_UPDATE_BRANCH, bName)
                             .apply();
                     manualModeActive = false;
                     if (debugWebServer != null) debugWebServer.setManualModeFlag(false);

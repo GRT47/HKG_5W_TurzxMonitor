@@ -33,6 +33,8 @@ public final class HudDebugWebServer {
         void onManualStateUpdated();
         void onCameraPreset(String preset, float yawDeg, float pitchDeg);
         JSONObject readAppConfigJson();
+        JSONObject readUpdateStatusJson();
+        void onTriggerUpdateAction(String action, String manifestUrl);
     }
 
     private final AssetManager assets;
@@ -322,6 +324,17 @@ public final class HudDebugWebServer {
                 JSONObject ok = new JSONObject();
                 ok.put("ok", true);
                 sendJson(os, 200, ok);
+            } else if ("GET".equals(method) && "/api/update".equals(path)) {
+                JSONObject u = listener != null ? listener.readUpdateStatusJson() : new JSONObject();
+                sendJson(os, 200, u);
+            } else if ("POST".equals(method) && "/api/update".equals(path)) {
+                String txt = new String(bodyBytes, StandardCharsets.UTF_8);
+                JSONObject j = txt.trim().isEmpty() ? new JSONObject() : new JSONObject(txt);
+                String action = j.optString("action", "check");
+                String manifestUrl = j.optString("manifestUrl", "");
+                if (listener != null) listener.onTriggerUpdateAction(action, manifestUrl);
+                JSONObject u = listener != null ? listener.readUpdateStatusJson() : new JSONObject();
+                sendJson(os, 200, u);
             } else {
                 sendResponse(os, 404, "text/plain; charset=utf-8", "Not found".getBytes(StandardCharsets.UTF_8));
             }
@@ -398,6 +411,10 @@ public final class HudDebugWebServer {
 
             if (j.has("headLamp")) { manual.headLamp = j.optBoolean("headLamp"); simChanged = true; }
             if (j.has("brakeLamp")) { manual.brakeLamp = j.optBoolean("brakeLamp"); simChanged = true; }
+            if (j.has("leftBlinker")) { manual.leftBlinker = j.optBoolean("leftBlinker"); simChanged = true; }
+            if (j.has("rightBlinker")) { manual.rightBlinker = j.optBoolean("rightBlinker"); simChanged = true; }
+            if (j.has("leftBlindspot")) { manual.leftBlindspot = j.optBoolean("leftBlindspot"); simChanged = true; }
+            if (j.has("rightBlindspot")) { manual.rightBlindspot = j.optBoolean("rightBlindspot"); simChanged = true; }
             if (j.has("pbrake")) { manual.pbrake = j.optBoolean("pbrake"); simChanged = true; }
             if (j.has("milOn")) { manual.milOn = j.optBoolean("milOn"); simChanged = true; }
             if (j.has("screenOff")) { manual.screenOff = j.optBoolean("screenOff"); simChanged = true; }
@@ -480,6 +497,10 @@ public final class HudDebugWebServer {
             autoSteerSweep = false;
             manual.screenOff = false;
             manual.milOn = false;
+            manual.leftBlinker = false;
+            manual.rightBlinker = false;
+            manual.leftBlindspot = false;
+            manual.rightBlindspot = false;
             for (int i = 0; i < 6; i++) manual.doors[i] = false;
 
             Integer wantTheme = null;
@@ -547,6 +568,21 @@ public final class HudDebugWebServer {
                 trafficRightFarD = -10.0f;
                 trafficLaneOffset = 3.4f;
                 wantTheme = Integer.valueOf(HudState.THEME_DARK);
+            } else if ("bsd_warn".equals(name)) {
+                manual.gearPos = "D"; manual.speedKph = 76; manual.pbrake = false;
+                manual.cruiseActive = true; manual.cruiseKph = 80; manual.latActive = true;
+                manual.headLamp = true; manual.brakeLamp = false;
+                manual.leftBlinker = true; manual.leftBlindspot = true;
+                manual.curveC2 = 0f; manual.steerDeg = 0f;
+                showTraffic = true;
+                trafficAnimate = false;
+                trafficBrake = false;
+                trafficLeftNearD = -1.5f;
+                trafficRightNearD = 18.0f;
+                trafficLeftFarD = 26.0f;
+                trafficRightFarD = 42.0f;
+                trafficLaneOffset = 3.4f;
+                wantTheme = Integer.valueOf(HudState.THEME_DARK);
             }
             if (listener != null) {
                 listener.onApplyAppConfig("manual", wantTheme, wantPt, null, null, null);
@@ -610,6 +646,10 @@ public final class HudDebugWebServer {
 
             sim.put("headLamp", manual.headLamp);
             sim.put("brakeLamp", manual.brakeLamp);
+            sim.put("leftBlinker", manual.leftBlinker);
+            sim.put("rightBlinker", manual.rightBlinker);
+            sim.put("leftBlindspot", manual.leftBlindspot);
+            sim.put("rightBlindspot", manual.rightBlindspot);
             sim.put("pbrake", manual.pbrake);
             sim.put("milOn", manual.milOn);
             sim.put("screenOff", manual.screenOff);

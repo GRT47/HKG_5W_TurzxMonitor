@@ -17,7 +17,7 @@
 |---|---|---|
 | **UDP `:8767`** | Gen5W 헤드유닛 (`hkg.turzxmonitor` v1.5.17+) | 1초 간격 UDP 비콘(`hkg_turzx_hub`) 수신 → 헤드유닛 IP 및 콤마 IP 자동 탐색 |
 | **HTTP `:8766`** | Gen5W 헤드유닛 | `/status.json`(기어·차속·EV/ICE·TPMS·공조·도어·램프·미디어·TBT·SDI), `/albumart.jpg` 수신 |
-| **WebSocket `ws://<comma_ip>:7000/ws/compact_state`** | Comma 3X (`carrot-wip`) | `CVB1` / `CVS1` 바이너리 프로토콜 직결 (20~33 Hz 초저지연 차속·곡률·조향·선행차·주변차·TBT, 미연결 시 헤드유닛 경유 폴백) |
+| **WebSocket `ws://<comma_ip>:7000/ws/compact_state`** | Comma 3X (`carrot-wip`) | `CVB1` / `CVS1` 바이너리 프로토콜 직결 (20~33 Hz 차속·곡률·조향·선행차·주변차·TBT 및 `carState` `@40/@41` 후측방 경고·`@47/@48` 방향지시등, 미연결 시 헤드유닛 폴백) |
 | **HTTP `:8768`** | 안드로이드 HUD 앱 자체 | 내장 웹 테스트 콘솔 (`HudDebugWebServer`) |
 
 ---
@@ -34,10 +34,15 @@
   - **전조등 / 미등 / DRL**: 투명 폴리카보네이트 헤드램프 외피, 프로젝터 발광, 전방 도로 헤드라이트 빔 콘
   - **제동등**: 스포일러 HMSL + 좌우 테일램프 3점 LED 블룸 + 노면 붉은 제동 반사광
   - **후진등 (`R`)**: 범퍼 클리어 렌즈 발광 + 2점 화이트 LED 블룸 + 후방 쌍광원 백색 노면 콘
+  - **방향지시등 (좌/우/비상등)**: 전면 상단 스위치백 DRL·범퍼 하단·사이드미러 리피터·후면 상단 엠버 램프 및 3D LED 블룸 + 노면 주황 반사광 동기화 점멸
+  - **후측방 경고 (BSD/BCA 노면 레이더)**: 주행 기어(`R`/`N`/`D`)에서 좌·우 사각지대 감지 시 후측방 바닥 레이더 아크 글로우(평시 호박색 → 동일 방향 깜빡이 점등 시 적색 위험 승격)
   - **도어 퍼들 라이트**: 열린 도어/트렁크/후드 위치에 맞춘 지면 경고 펄스 셰이더
 
 ### 주행 시각화 & 오버레이 (`HudRenderer`)
 - **주행 도로 뷰**: 3D·2D 공유 원근 카메라 위에서 동작하는 차선(`l_poly` / `r_poly`), `Canvas.drawVertices` 페더링 그라데이션 AP 경로 리본, Navdy 다각도 주변 차량·선행차 거리(`m`) 표시.
+- **2D 방향지시등 & 후측방 경고 오버레이**:
+  - **방향지시등(`◀` / `▶`)**: 상단 중앙 녹색 화살표 배지(`P` 기어 비상등 포함 전 기어 지원), 3D 리셋 알약·도어 배너와 겹치지 않도록 자동 배치.
+  - **후측방 경고(BSD/BCA)**: `R`/`N`/`D` 주행 중 좌·우 `viz` 테두리 곡선형 글로우 커튼 + `⚠` 레이더 배지 표시(동일 방향 깜빡이 작동 시 적색 고속 점멸 + `좌측/우측 후측방` 경고 알약 승격, 실제 `P` 기어에서는 숨김).
 - **오버레이 자동 가시성**:
   - **실제 `P` 기어**일 때는 도로 제한속도, 구간단속, 크루즈 목표속도, ADAS 조향 아이콘, 차선 신뢰도, TBT 회전 안내를 자동으로 숨겨 깔끔한 주차 쇼케이스 화면을 제공합니다.
   - **`R`/`N`/`D` 주행 기어**에서는 TPMS 쇼케이스(`P고정`) 시점을 켜더라도 제한속도·크루즈·구간단속·차선·TBT 오버레이를 계속 표시합니다.
@@ -50,6 +55,9 @@
 - **자동 테마 (다크 / 라이트)**: 헤드유닛 전조등/일루미네이션 신호에 맞춰 주간(라이트)·야간(다크) 테마를 자동 전환(설정에서 수동 고정 가능).
 - **미디어 & 공조 바**: 앨범 아트, 곡 정보/진행 바, 실내·외 온도, 설정 온도, `AUTO`/`A/C`/`HEAT`/열선/내기 순환, 3방향 풍향·7단계 풍량 표시.
 - **전원·자동 실행**: 시동 OFF 수신 시 절전 대기화면 전환, `BootReceiver`를 통한 부팅/QuickBoot 자동 전체화면 실행 지원.
+- **GitHub 자동 업데이트 (`AppUpdater` · `UpdateInstallReceiver`)**:
+  - `package_t88_hud/update.json` 및 GitHub Releases(`.apk` + SHA-256)를 이중 확인해 신규 버전을 감지합니다.
+  - 주행 중에는 팝업을 띄우지 않고 상단 상태 배지(`· 업데이트 vX.Y.Z`)로만 안내하며, 주차/대기 상태 또는 설정 화면에서 다운로드 → ZIP/SHA-256/패키지명 무결성 검증 → Android `PackageInstaller.Session` 설치 및 완료 후 자동 전체화면 복귀를 수행합니다.
 
 ---
 
@@ -76,7 +84,7 @@
   adb forward tcp:8768 tcp:8768
   # 브라우저에서 http://127.0.0.1:8768 열기
   ```
-- 지원 제어: `P/R/N/D` 기어, 차속, 크루즈/조향 보조, 도로 곡률(`curveC2`), 핸들 조향각(`±500°` / S커브·핸들 왕복), 램프(전조등/제동등/EPB), 도어 6종 개별/전체 열기, 주변 차량 거리·제동 시뮬레이션, 테마·EV/ICE·차체 색상·카메라 프리셋.
+- 지원 제어: `P/R/N/D` 기어, 차속, 크루즈/조향 보조, 도로 곡률(`curveC2`), 핸들 조향각(`±500°` / S커브·핸들 왕복), 램프(전조등/제동등/EPB/좌·우 깜빡이/비상등/좌·우 후측방 BSD), 도어 6종 개별/전체 열기, 주변 차량 거리·제동 시뮬레이션(`bsd_warn` 포함), 테마·EV/ICE·차체 색상·카메라 프리셋, 앱 GitHub 업데이트 확인/설치(`/api/update`).
 
 ---
 
@@ -94,10 +102,13 @@
 | `src/com/hkg/huddisplay/TelemetryClient.java` | UDP `:8767` 자동탐색 + HTTP `:8766` + Comma `ws://:7000/ws/compact_state` 수신 |
 | `src/com/hkg/huddisplay/HudState.java` | 텔레메트리 스냅샷 모델 및 주행/주차 데모 시뮬레이션 상태 생성 |
 | `src/com/hkg/huddisplay/Car3dState.java` | `HudRenderer` → `Car3dView` 동기화 상태 및 공유 VP 행렬 |
-| `src/com/hkg/huddisplay/HudDebugWebServer.java` | `:8768` 내장 웹 테스트 콘솔 HTTP/JSON 서버 |
+| `src/com/hkg/huddisplay/HudDebugWebServer.java` | `:8768` 내장 웹 테스트 콘솔 HTTP/JSON 서버 (`/api/state`, `/api/control`, `/api/update`) |
+| `src/com/hkg/huddisplay/AppUpdater.java` | GitHub `update.json`/Releases 확인, APK 다운로드, SHA-256·패키지 무결성 검증 및 `PackageInstaller` 세션 설치 |
+| `src/com/hkg/huddisplay/UpdateInstallReceiver.java` | 설치 확인 인텐트 전달 및 `MY_PACKAGE_REPLACED` 업데이트 완료 후 자동 재실행 |
 | `src/com/hkg/huddisplay/BootReceiver.java` | 부팅/QuickBoot 완료 시 자동 실행 브로드캐스트 리시버 |
+| `update.json` | 브랜치 기반 자동 업데이트 매니페스트 (`versionCode`, `versionName`, `apkUrl`, `sha256`, `notes`) |
 | `assets/debug_web.html` | `:8768` 웹 테스트 콘솔 UI |
-| `build_apk.py` | 에셋 스테이징 + JDK(`--release 8`) + `d8`/`aapt`/`zipalign`/`apksigner` 원스텝 APK 빌드/설치 |
+| `build_apk.py` | 에셋 스테이징 + JDK(`--release 8`) + `d8`/`aapt`/`zipalign`/`apksigner` 원스텝 APK 빌드·설치 및 `update.json` 갱신 |
 | `build_car3d_asset.py` / `simplify_meshopt.mjs` | `3d/scene.gltf` → `niro_ev.c3d` 바이너리 메시 생성기 (선택) |
 
 ---
@@ -118,6 +129,9 @@ python package_t88_hud/build_apk.py
 
 # 빌드 후 ADB로 기기 설치 (T88 서드파티 설치 허용 설정 포함)
 python package_t88_hud/build_apk.py --install
+
+# 새 릴리스 버전 빌드 및 package_t88_hud/update.json SHA-256 자동 갱신
+python package_t88_hud/build_apk.py --version 1.0.1 --version-code 101 --write-update-json --notes "릴리스 노트"
 ```
 
 ### 헤드유닛 요구사항

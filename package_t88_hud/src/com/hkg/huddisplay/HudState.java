@@ -87,6 +87,10 @@ public final class HudState {
     public boolean pbrake = false;
     public boolean headLamp = false;
     public boolean brakeLamp = false;
+    public boolean leftBlinker = false;
+    public boolean rightBlinker = false;
+    public boolean leftBlindspot = false;
+    public boolean rightBlindspot = false;
     public float tpmsFlPsi = 0f;
     public float tpmsFrPsi = 0f;
     public float tpmsRlPsi = 0f;
@@ -204,6 +208,10 @@ public final class HudState {
         c.pbrake = pbrake;
         c.headLamp = headLamp;
         c.brakeLamp = brakeLamp;
+        c.leftBlinker = leftBlinker;
+        c.rightBlinker = rightBlinker;
+        c.leftBlindspot = leftBlindspot;
+        c.rightBlindspot = rightBlindspot;
         c.tpmsFlPsi = tpmsFlPsi;
         c.tpmsFrPsi = tpmsFrPsi;
         c.tpmsRlPsi = tpmsRlPsi;
@@ -503,6 +511,10 @@ public final class HudState {
                 hasLead = carrot.optBoolean("hasLead", hasLead);
                 laneConfPct = (float) carrot.optDouble("laneConf", laneConfPct);
                 curveC2 = (float) carrot.optDouble("curve", curveC2);
+                leftBlinker = carrot.optBoolean("leftBlinker", false);
+                rightBlinker = carrot.optBoolean("rightBlinker", false);
+                leftBlindspot = carrot.optBoolean("leftBlindspot", false);
+                rightBlindspot = carrot.optBoolean("rightBlindspot", false);
 
                 JSONArray trArr = carrot.optJSONArray("traffic");
                 if (trArr != null) {
