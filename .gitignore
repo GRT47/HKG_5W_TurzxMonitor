@@ -6,6 +6,7 @@ out/
 .cxx/
 captures/
 package_turzx_monitor/build/
+package_t88_hud/build/
 
 # Compiled binaries & archives
 *.apk

@@ -1,0 +1,696 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>HKG HUD Display · 웹 테스트 콘솔</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --card: #131823;
+    --card2: #19202e;
+    --border: #252f42;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --blue: #3e6ae1;
+    --blue-hi: #60a5fa;
+    --green: #22c55e;
+    --amber: #f59e0b;
+    --red: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Malgun Gothic", sans-serif;
+    font-size: 13px; line-height: 1.4;
+  }
+  .wrap { max-width: 1320px; margin: 0 auto; }
+  .topbar {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 12px 16px; margin-bottom: 12px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+  }
+  .title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .title { font-size: 17px; font-weight: 700; letter-spacing: -0.2px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    background: #1a2232; border: 1px solid var(--border); color: var(--muted);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); }
+  .dot.ok { background: var(--green); }
+  .dot.manual { background: var(--blue-hi); }
+
+  .seg { display: inline-flex; gap: 4px; background: #0d1119; padding: 4px; border-radius: 10px; border: 1px solid var(--border); flex-wrap: wrap; }
+  .btn {
+    border: 1px solid var(--border); background: var(--card2); color: var(--text);
+    padding: 6px 11px; border-radius: 8px; font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: 0.12s; user-select: none;
+  }
+  .btn:hover { border-color: #475569; background: #20293b; }
+  .btn.active { background: var(--blue); border-color: #5b86ff; color: #fff; }
+  .btn.warn.active, .btn.warn:hover { border-color: var(--amber); }
+  .btn.danger.active { background: var(--red); border-color: #f87171; }
+  .btn.sm { padding: 4px 8px; font-size: 11px; border-radius: 6px; }
+  .seg .btn { border: none; background: transparent; color: var(--muted); }
+  .seg .btn.active { background: var(--blue); color: #fff; }
+
+  .presets {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px;
+    padding: 10px 12px; background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    align-items: center;
+  }
+  .presets .lbl { font-weight: 700; color: var(--muted); margin-right: 4px; font-size: 12px; }
+
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+    gap: 12px;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 14px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .card h2 {
+    margin: 0; font-size: 14px; font-weight: 700; color: #e2e8f0;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--border); padding-bottom: 8px;
+  }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .sub { font-size: 11px; color: var(--muted); font-weight: 600; }
+
+  .prnd { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .prnd .btn { padding: 12px 0; font-size: 18px; font-weight: 800; border-radius: 10px; text-align: center; }
+
+  .sl-box { display: flex; flex-direction: column; gap: 4px; }
+  .sl-head { display: flex; justify-content: space-between; font-size: 12px; }
+  .sl-val { font-weight: 700; color: var(--blue-hi); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--blue-hi); cursor: pointer; }
+  select, input[type=text] {
+    background: #0d1119; color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 5px 8px; font-size: 12px;
+  }
+
+  .swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+  .swatch {
+    display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px;
+    border-radius: 8px; border: 1px solid var(--border); background: var(--card2);
+    cursor: pointer; font-size: 12px; font-weight: 600;
+  }
+  .swatch.active { border-color: var(--blue-hi); background: rgba(62, 106, 225, 0.2); }
+  .chip-col { width: 14px; height: 14px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.35); }
+
+  .toggles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+  .toggles3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .toggles .btn, .toggles3 .btn { text-align: center; padding: 7px 6px; }
+  .toast {
+    position: fixed; right: 14px; bottom: 14px; padding: 8px 12px; border-radius: 10px;
+    background: rgba(19, 24, 35, 0.94); border: 1px solid var(--border); color: var(--muted);
+    font-size: 12px; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="title-row">
+      <div class="title">HKG HUD Display · 웹 테스트 콘솔</div>
+      <span class="badge"><span id="stDot" class="dot"></span><span id="stText">연결 확인 중...</span></span>
+      <span class="badge" id="ipBadge">--</span>
+    </div>
+    <div class="seg" id="modeSeg">
+      <button class="btn" data-mode="live">실시간 (Live)</button>
+      <button class="btn" data-mode="manual">웹 수동 제어</button>
+      <button class="btn" data-mode="demo_drive">데모 (주행)</button>
+      <button class="btn" data-mode="demo_park">데모 (주차)</button>
+    </div>
+  </div>
+
+  <div class="presets">
+    <span class="lbl">빠른 시나리오</span>
+    <button class="btn sm" onclick="applyPreset('park_night')">주차 · 야간 점등</button>
+    <button class="btn sm" onclick="applyPreset('park_doors')">주차 · 도어 전체오픈</button>
+    <button class="btn sm" onclick="applyPreset('drive_right')">주행 · 우커브 AP</button>
+    <button class="btn sm" onclick="applyPreset('drive_left')">주행 · 좌커브 AP</button>
+    <button class="btn sm" onclick="applyPreset('drive_brake')">주행 · 전방 급제동 경고</button>
+    <button class="btn sm" onclick="applyPreset('traffic_close')">주행 · 밀집 근접</button>
+    <button class="btn sm" onclick="applyPreset('reverse')">후진 (R)</button>
+    <button class="btn sm" onclick="applyPreset('ice_day')">ICE(내연) · 주간 주행</button>
+    <button class="btn sm" onclick="applyPreset('live')">실시간 자동탐색 복귀</button>
+  </div>
+
+  <div class="grid">
+    <!-- 1. Display & Appearance -->
+    <div class="card">
+      <h2>화면 · 테마 · 3D 차량</h2>
+      <div class="row">
+        <span class="sub">화면 테마</span>
+        <div class="seg" id="themeSeg">
+          <button class="btn sm" data-val="auto">자동(전조등)</button>
+          <button class="btn sm" data-val="dark">다크</button>
+          <button class="btn sm" data-val="light">라이트</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="sub">파워트레인</span>
+        <div class="seg" id="ptSeg">
+          <button class="btn sm" data-val="auto">자동</button>
+          <button class="btn sm" data-val="ev">EV</button>
+          <button class="btn sm" data-val="ice">ICE(내연)</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="sub">3D 니로 EV</span>
+        <div class="seg" id="car3dSeg">
+          <button class="btn sm" data-val="1">3D ON</button>
+          <button class="btn sm" data-val="0">2D 폴백</button>
+        </div>
+        <button class="btn sm" id="pillBtn" onclick="toggleBool('statusPill')">FPS 배지</button>
+      </div>
+      <div>
+        <div class="sub" style="margin-bottom:6px">3D 차체 색상</div>
+        <div class="swatches" id="colorSwatches">
+          <div class="swatch" data-col="0"><span class="chip-col" style="background:#b9c2d0"></span>실버</div>
+          <div class="swatch" data-col="1"><span class="chip-col" style="background:#4b5563"></span>그라파이트</div>
+          <div class="swatch" data-col="2"><span class="chip-col" style="background:#f1f5f9"></span>화이트</div>
+          <div class="swatch" data-col="3"><span class="chip-col" style="background:#2557a7"></span>블루</div>
+          <div class="swatch" data-col="4"><span class="chip-col" style="background:#1c1f26"></span>블랙</div>
+        </div>
+      </div>
+      <div>
+        <div class="sub" style="margin-bottom:6px">3D 카메라 시점 (P · R · N · D 공통)</div>
+        <div class="row" style="justify-content:flex-start">
+          <button class="btn sm" onclick="setCam('default')">기본 시점</button>
+          <button class="btn sm" onclick="setCam('front')">정면</button>
+          <button class="btn sm" onclick="setCam('side')">측면</button>
+          <button class="btn sm" onclick="setCam('rear')">후면 3/4</button>
+          <button class="btn sm" onclick="setCam('top')">상단 버드뷰</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Gear (PRND) & Driving -->
+    <div class="card">
+      <h2>기어 (PRND) · 주행 제어</h2>
+      <div class="prnd" id="gearBtns">
+        <button class="btn" data-gear="P">P</button>
+        <button class="btn" data-gear="R">R</button>
+        <button class="btn" data-gear="N">N</button>
+        <button class="btn" data-gear="D">D</button>
+      </div>
+      <div class="sl-box">
+        <div class="sl-head"><span>차속 (km/h)</span><span class="sl-val" id="vSpeed">78</span></div>
+        <input type="range" id="rSpeed" min="0" max="160" step="1">
+      </div>
+      <div class="row">
+        <button class="btn sm" id="cruiseBtn" onclick="toggleSim('cruiseActive')">크루즈 ON/OFF</button>
+        <button class="btn sm" id="latBtn" onclick="toggleSim('latActive')">조향 보조(AP)</button>
+        <span class="sub">설정속도 <b id="vCruise">80</b></span>
+      </div>
+      <input type="range" id="rCruise" min="30" max="130" step="5">
+      <div class="sl-box">
+        <div class="sl-head"><span>도로 곡률 (curveC2)</span><span class="sl-val" id="vCurve">0.0000</span></div>
+        <input type="range" id="rCurve" min="-25" max="25" step="1">
+        <div class="row" style="justify-content:flex-start">
+          <button class="btn sm" onclick="setCurve(-0.0018)">좌급</button>
+          <button class="btn sm" onclick="setCurve(-0.0010)">좌커브</button>
+          <button class="btn sm" onclick="setCurve(0)">직진</button>
+          <button class="btn sm" onclick="setCurve(0.0010)">우커브</button>
+          <button class="btn sm" onclick="setCurve(0.0018)">우급</button>
+          <button class="btn sm" id="scurveBtn" onclick="toggleSim('autoScurve')">S커브 왕복</button>
+        </div>
+      </div>
+      <div class="sl-box">
+        <div class="sl-head">
+          <span>핸들 조향각 · 앞바퀴 조향</span>
+          <span>
+            <button class="btn sm" id="linkSteerBtn" onclick="toggleSim('linkSteer')" style="margin-right:6px">곡률연동</button>
+            <span class="sl-val" id="vSteer">직진 0°</span>
+          </span>
+        </div>
+        <input type="range" id="rSteer" min="-500" max="500" step="5">
+        <div class="row" style="margin-top:6px">
+          <button class="btn sm" onclick="setSteer(500)">좌 풀락</button>
+          <button class="btn sm" onclick="setSteer(180)">좌 180°</button>
+          <button class="btn sm" onclick="setSteer(0)">직진</button>
+          <button class="btn sm" onclick="setSteer(-180)">우 180°</button>
+          <button class="btn sm" onclick="setSteer(-500)">우 풀락</button>
+          <button class="btn sm" id="steerSweepBtn" onclick="toggleSim('autoSteerSweep')">자동 왕복</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. Lamps & Doors -->
+    <div class="card">
+      <h2>램프 · 도어 · 시동 상태</h2>
+      <div class="toggles">
+        <button class="btn" id="headLampBtn" onclick="toggleSim('headLamp')">전조등 ON/OFF</button>
+        <button class="btn danger" id="brakeLampBtn" onclick="toggleSim('brakeLamp')">브레이크등 ON/OFF</button>
+        <button class="btn warn" id="pbrakeBtn" onclick="toggleSim('pbrake')">파킹브레이크 (P)</button>
+        <button class="btn warn" id="milBtn" onclick="toggleSim('milOn')">엔진경고등 (MIL)</button>
+      </div>
+      <button class="btn" id="screenOffBtn" onclick="toggleSim('screenOff')">시동 OFF 절전 대기화면</button>
+      <div class="row" style="margin-top:4px">
+        <span class="sub">도어 · 트렁크 · 후드 열림 상태</span>
+        <div class="row">
+          <button class="btn sm" onclick="setAllDoors(true)">전체 열기</button>
+          <button class="btn sm" onclick="setAllDoors(false)">전체 닫기</button>
+        </div>
+      </div>
+      <div class="toggles3" id="doorBtns">
+        <button class="btn warn" data-door="0">운전석</button>
+        <button class="btn warn" data-door="1">조수석</button>
+        <button class="btn warn" data-door="2">좌후석</button>
+        <button class="btn warn" data-door="3">우후석</button>
+        <button class="btn warn" data-door="4">트렁크</button>
+        <button class="btn warn" data-door="5">후드</button>
+      </div>
+    </div>
+
+    <!-- 4. ADAS / Lead / Nav / Camera -->
+    <div class="card">
+      <h2>전방 차량 · 내비 TBT · 단속카메라</h2>
+      <div class="row">
+        <button class="btn sm" id="leadBtn" onclick="toggleSim('hasLead')">전방 차량</button>
+        <button class="btn sm danger" id="leadBrakeBtn" onclick="toggleLeadBrake()">전방 급제동</button>
+        <button class="btn sm" id="trafficBtn" onclick="toggleSim('showTraffic')">주변 차량</button>
+      </div>
+      <div class="sl-box">
+        <div class="sl-head"><span>전방 차량 거리 (m)</span><span class="sl-val" id="vLeadDist">36 m</span></div>
+        <input type="range" id="rLeadDist" min="6" max="90" step="1">
+      </div>
+      <div class="sl-box">
+        <div class="sl-head"><span>전방 차량 횡위치 (m)</span><span class="sl-val" id="vLeadY">0.0 m</span></div>
+        <input type="range" id="rLeadY" min="-35" max="35" step="1">
+      </div>
+      <div class="sl-box">
+        <div class="sl-head"><span>차선 신뢰도 (%)</span><span class="sl-val" id="vLane">98%</span></div>
+        <input type="range" id="rLane" min="0" max="100" step="1">
+      </div>
+      <div class="row" style="justify-content:flex-start;gap:4px">
+        <button class="btn sm" onclick="setCloseTraffic('dense')">밀집 근접</button>
+        <button class="btn sm" onclick="setCloseTraffic('side')">좌우 병행</button>
+        <button class="btn sm" onclick="setCloseTraffic('default')">기본 간격</button>
+        <button class="btn sm danger" id="trBrakeBtn" onclick="toggleSim('trafficBrake')">주변 급제동</button>
+        <button class="btn sm" id="trAnimBtn" onclick="toggleSim('trafficAnimate')">미세이동</button>
+      </div>
+      <div class="sl-box">
+        <div class="sl-head"><span>좌측 근접(L1) / 우측 근접(R1)</span><span class="sl-val" id="vTrNear">-1.5 / +3.5 m</span></div>
+        <div class="row">
+          <input type="range" id="rTrL1" min="-20" max="60" step="0.5" style="flex:1">
+          <input type="range" id="rTrR1" min="-20" max="60" step="0.5" style="flex:1">
+        </div>
+      </div>
+      <div class="sl-box">
+        <div class="sl-head"><span>좌측2(L2) / 우측2(R2) · 횡간격</span><span class="sl-val" id="vTrFar">+15 / -10 m · 3.4m</span></div>
+        <div class="row">
+          <input type="range" id="rTrL2" min="-20" max="80" step="1" style="flex:1">
+          <input type="range" id="rTrR2" min="-20" max="80" step="1" style="flex:1">
+          <input type="range" id="rTrLat" min="26" max="46" step="1" style="width:82px">
+        </div>
+      </div>
+      <div class="row">
+        <span class="sub">제한속도 / 카메라</span>
+        <select id="sLimit" onchange="patchSim({sdiSpeedLimit: +this.value})">
+          <option value="0">표지판 없음</option>
+          <option value="50">50 km/h</option>
+          <option value="60">60 km/h</option>
+          <option value="80">80 km/h</option>
+          <option value="100">100 km/h</option>
+          <option value="110">110 km/h</option>
+        </select>
+        <select id="sSdiType" onchange="onSdiChange()">
+          <option value="-1">카메라 없음</option>
+          <option value="0">고정식 카메라</option>
+          <option value="2">구간단속</option>
+        </select>
+        <input type="range" id="rSdiDist" min="100" max="2000" step="50" style="width:110px">
+      </div>
+      <div class="row">
+        <span class="sub">TBT 안내</span>
+        <select id="sTbtTurn" onchange="onTbtChange()">
+          <option value="-1">안내 없음</option>
+          <option value="11">직진</option>
+          <option value="12">좌회전</option>
+          <option value="13">우회전</option>
+          <option value="101">좌측 방향</option>
+          <option value="102">우측 방향</option>
+          <option value="14">유턴</option>
+          <option value="132">회전교차로</option>
+          <option value="153">톨게이트</option>
+        </select>
+        <input type="range" id="rTbtDist" min="0" max="2000" step="10" style="width:120px">
+        <span class="sl-val" id="vTbtDist">240m</span>
+      </div>
+    </div>
+
+    <!-- 5. EV / ICE / TPMS / HVAC -->
+    <div class="card">
+      <h2>배터리(EV) · 엔진(ICE) · TPMS · 공조</h2>
+      <div class="sl-box">
+        <div class="sl-head"><span>EV SOC (%) / 출력 (kW)</span><span class="sl-val" id="vEv">74.5% · +18.5 kW</span></div>
+        <div class="row">
+          <input type="range" id="rSoc" min="0" max="100" step="0.5" style="flex:1">
+          <input type="range" id="rKw" min="-60" max="150" step="1" style="flex:1">
+        </div>
+      </div>
+      <div class="sl-box">
+        <div class="sl-head"><span>ICE 연료 (%) / RPM</span><span class="sl-val" id="vIce">68% · 2,150 RPM</span></div>
+        <div class="row">
+          <input type="range" id="rFuel" min="0" max="100" step="1" style="flex:1">
+          <input type="range" id="rRpm" min="0" max="7000" step="50" style="flex:1">
+        </div>
+      </div>
+      <div class="row">
+        <span class="sub">타이어 TPMS (psi)</span>
+        <div class="row">
+          <button class="btn sm" onclick="setTpms(38,38,39,39)">정상 38/39</button>
+          <button class="btn sm warn" onclick="setTpms(26,38,39,39)">FL 저압(26)</button>
+        </div>
+      </div>
+      <div class="sl-box">
+        <div class="sl-head"><span>공조 설정온도 / 풍량</span><span class="sl-val" id="vHvac">21.5° · 3단</span></div>
+        <div class="row">
+          <button class="btn sm" id="hvacOnBtn" onclick="toggleSim('hvacOn')">공조 ON</button>
+          <button class="btn sm" id="hvacAutoBtn" onclick="toggleSim('hvacAuto')">AUTO</button>
+          <button class="btn sm" id="hvacAcBtn" onclick="toggleSim('hvacAc')">A/C</button>
+          <button class="btn sm warn" id="hvacHeatBtn" onclick="toggleSim('hvacHeat')">HEAT</button>
+        </div>
+        <div class="row">
+          <input type="range" id="rHvacTemp" min="17" max="28" step="0.5" style="flex:1">
+          <input type="range" id="rFan" min="0" max="7" step="1" style="flex:1">
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast">준비 완료</div>
+
+<script>
+let S = null;
+let dragging = false;
+let debounceTimer = null;
+let pendingPatch = {};
+
+function toast(msg) {
+  document.getElementById('toast').textContent = msg;
+}
+
+async function api(path, body) {
+  const opt = body ? {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  } : { method: 'GET' };
+  const r = await fetch(path, opt);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return await r.json();
+}
+
+function patchImmediate(obj) {
+  api('/api/control', obj).then(st => { S = st; render(); toast('적용됨'); })
+    .catch(e => toast('오류: ' + e.message));
+}
+
+function patchSim(obj) {
+  patchImmediate(obj);
+}
+
+function queuePatch(obj) {
+  Object.assign(pendingPatch, obj);
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => {
+    const p = pendingPatch;
+    pendingPatch = {};
+    api('/api/control', p).then(st => { S = st; if (!dragging) render(); })
+      .catch(e => toast('오류: ' + e.message));
+  }, 45);
+}
+
+function applyPreset(name) {
+  api('/api/preset', {name}).then(st => { S = st; render(); toast('시나리오: ' + name); })
+    .catch(e => toast('오류: ' + e.message));
+}
+
+function setCam(preset) {
+  api('/api/camera', {preset}).then(() => toast('카메라 시점: ' + preset))
+    .catch(e => toast('오류: ' + e.message));
+}
+
+function toggleBool(key) {
+  if (!S) return;
+  const o = {};
+  o[key] = !S.app[key];
+  patchImmediate(o);
+}
+
+function toggleSim(key) {
+  if (!S) return;
+  const o = {};
+  o[key] = !S.sim[key];
+  patchImmediate(o);
+}
+
+function fmtSteer(sd) {
+  const n = Math.min(1, Math.abs(sd) / 500);
+  const p = n * 0.62 + (1 - (1 - n) * (1 - n)) * 0.38;
+  const w = (33.2 * p).toFixed(1);
+  if (Math.abs(sd) < 1) return '직진 0°';
+  return (sd > 0 ? '좌 ' : '우 ') + Math.abs(Math.round(sd)) + '° (바퀴 ' + w + '°)';
+}
+
+function setSteer(sd) {
+  patchImmediate({ steerDeg: sd, autoSteerSweep: false, linkSteer: false });
+}
+
+function setCurve(c2) {
+  const patch = { curveC2: c2, autoScurve: false, autoSteerSweep: false };
+  if (S && S.sim.linkSteer) patch.steerDeg = Math.round(-c2 * 24000);
+  patchImmediate(patch);
+}
+
+function setAllDoors(open) {
+  patchImmediate({ doors: [open, open, open, open, open, open] });
+}
+
+function toggleLeadBrake() {
+  if (!S) return;
+  const hard = S.sim.leadAccelMps2 < -1.5;
+  patchImmediate({ hasLead: true, leadAccelMps2: hard ? 0.1 : -2.6, leadDistM: hard ? 36 : 11 });
+}
+
+function onSdiChange() {
+  const t = +document.getElementById('sSdiType').value;
+  const d = +document.getElementById('rSdiDist').value;
+  const lim = +document.getElementById('sLimit').value;
+  patchImmediate({ sdiType: t, sdiDistM: t >= 0 ? d : 0, sdiSpeedLimit: (t >= 0 && lim === 0) ? 80 : lim });
+}
+
+function onTbtChange() {
+  const turn = +document.getElementById('sTbtTurn').value;
+  const d = +document.getElementById('rTbtDist').value;
+  patchImmediate({ tbtTurnInfo: turn, tbtDistM: turn >= 0 ? Math.max(10, d) : 0 });
+}
+
+function setTpms(fl, fr, rl, rr) {
+  patchImmediate({ tpmsFlPsi: fl, tpmsFrPsi: fr, tpmsRlPsi: rl, tpmsRrPsi: rr });
+}
+
+function setCloseTraffic(kind) {
+  if (kind === 'dense') {
+    patchImmediate({
+      showTraffic: true, trafficAnimate: false, hasLead: true, leadDistM: 12,
+      trafficLeftNearD: -1.5, trafficRightNearD: 3.5,
+      trafficLeftFarD: 15.0, trafficRightFarD: -10.0, trafficLaneOffset: 3.4
+    });
+  } else if (kind === 'side') {
+    patchImmediate({
+      showTraffic: true, trafficAnimate: false,
+      trafficLeftNearD: -2.0, trafficRightNearD: -2.0,
+      trafficLeftFarD: 14.0, trafficRightFarD: 14.0, trafficLaneOffset: 3.4
+    });
+  } else {
+    patchImmediate({
+      showTraffic: true, trafficAnimate: true, trafficBrake: false,
+      trafficLeftNearD: 16.0, trafficRightNearD: 12.0,
+      trafficLeftFarD: 48.0, trafficRightFarD: 36.0, trafficLaneOffset: 3.5
+    });
+  }
+}
+
+function render() {
+  if (!S) return;
+  const a = S.app, m = S.sim;
+  const dot = document.getElementById('stDot');
+  const st = document.getElementById('stText');
+  dot.className = 'dot ' + (a.mode === 'manual' ? 'manual' : (m.hubConnected ? 'ok' : ''));
+  st.textContent = a.mode === 'manual' ? '웹 수동 제어 중'
+    : (a.mode === 'live' ? (m.hubConnected ? '실시간 HUB 연결됨' : '실시간 자동탐색 대기') : ('데모 모드 (' + a.mode + ')'));
+  document.getElementById('ipBadge').textContent = 'http://' + (a.serverIp || location.hostname) + ':' + (a.serverPort || 8768);
+
+  document.querySelectorAll('#modeSeg .btn').forEach(b => b.classList.toggle('active', b.dataset.mode === a.mode));
+  document.querySelectorAll('#themeSeg .btn').forEach(b => b.classList.toggle('active', b.dataset.val === a.theme));
+  document.querySelectorAll('#ptSeg .btn').forEach(b => b.classList.toggle('active', b.dataset.val === a.pt));
+  document.querySelectorAll('#car3dSeg .btn').forEach(b => b.classList.toggle('active', (b.dataset.val === '1') === !!a.car3d));
+  document.getElementById('pillBtn').classList.toggle('active', !!a.statusPill);
+  document.querySelectorAll('#colorSwatches .swatch').forEach(el => el.classList.toggle('active', +el.dataset.col === a.carColor));
+
+  document.querySelectorAll('#gearBtns .btn').forEach(b => b.classList.toggle('active', b.dataset.gear === m.gearPos));
+  document.getElementById('rSpeed').value = m.speedKph;
+  document.getElementById('vSpeed').textContent = m.speedKph;
+  document.getElementById('cruiseBtn').classList.toggle('active', !!m.cruiseActive);
+  document.getElementById('latBtn').classList.toggle('active', !!m.latActive);
+  document.getElementById('rCruise').value = m.cruiseKph || 80;
+  document.getElementById('vCruise').textContent = (m.cruiseKph || 0) + ' km/h';
+
+  document.getElementById('rCurve').value = Math.round(m.curveC2 * 10000);
+  document.getElementById('vCurve').textContent = (m.curveC2 >= 0 ? '+' : '') + m.curveC2.toFixed(4);
+  document.getElementById('scurveBtn').classList.toggle('active', !!m.autoScurve);
+  document.getElementById('steerSweepBtn').classList.toggle('active', !!m.autoSteerSweep);
+  document.getElementById('linkSteerBtn').classList.toggle('active', !!m.linkSteer);
+  document.getElementById('rSteer').value = Math.round(-m.steerDeg);
+  document.getElementById('vSteer').textContent = fmtSteer(m.steerDeg);
+
+  document.getElementById('headLampBtn').classList.toggle('active', !!m.headLamp);
+  document.getElementById('brakeLampBtn').classList.toggle('active', !!m.brakeLamp);
+  document.getElementById('pbrakeBtn').classList.toggle('active', !!m.pbrake);
+  document.getElementById('milBtn').classList.toggle('active', !!m.milOn);
+  document.getElementById('screenOffBtn').classList.toggle('active', !!m.screenOff);
+  document.querySelectorAll('#doorBtns .btn').forEach(b => b.classList.toggle('active', !!m.doors[+b.dataset.door]));
+
+  document.getElementById('leadBtn').classList.toggle('active', !!m.hasLead);
+  document.getElementById('leadBrakeBtn').classList.toggle('active', !!m.hasLead && m.leadAccelMps2 < -1.5);
+  document.getElementById('trafficBtn').classList.toggle('active', !!m.showTraffic);
+  document.getElementById('rLeadDist').value = Math.round(m.leadDistM);
+  document.getElementById('vLeadDist').textContent = Math.round(m.leadDistM) + ' m';
+  document.getElementById('rLeadY').value = Math.round(m.leadYRightM * 10);
+  document.getElementById('vLeadY').textContent = m.leadYRightM.toFixed(1) + ' m';
+  document.getElementById('rLane').value = Math.round(m.laneConfPct);
+  document.getElementById('vLane').textContent = Math.round(m.laneConfPct) + '%';
+  document.getElementById('trBrakeBtn').classList.toggle('active', !!m.trafficBrake);
+  document.getElementById('trAnimBtn').classList.toggle('active', !!m.trafficAnimate);
+  document.getElementById('rTrL1').value = m.trafficLeftNearD;
+  document.getElementById('rTrR1').value = m.trafficRightNearD;
+  document.getElementById('vTrNear').textContent = (m.trafficLeftNearD >= 0 ? '+' : '') + m.trafficLeftNearD.toFixed(1)
+    + ' / ' + (m.trafficRightNearD >= 0 ? '+' : '') + m.trafficRightNearD.toFixed(1) + ' m';
+  document.getElementById('rTrL2').value = Math.round(m.trafficLeftFarD);
+  document.getElementById('rTrR2').value = Math.round(m.trafficRightFarD);
+  document.getElementById('rTrLat').value = Math.round(m.trafficLaneOffset * 10);
+  document.getElementById('vTrFar').textContent = (m.trafficLeftFarD >= 0 ? '+' : '') + Math.round(m.trafficLeftFarD)
+    + ' / ' + (m.trafficRightFarD >= 0 ? '+' : '') + Math.round(m.trafficRightFarD) + ' m · ' + m.trafficLaneOffset.toFixed(1) + 'm';
+
+  document.getElementById('sLimit').value = m.sdiSpeedLimit || 0;
+  document.getElementById('sSdiType').value = (m.sdiType === 0 || m.sdiType === 2) ? String(m.sdiType) : '-1';
+  document.getElementById('rSdiDist').value = m.sdiDistM || 0;
+  document.getElementById('sTbtTurn').value = m.tbtTurnInfo >= 0 ? String(m.tbtTurnInfo) : '-1';
+  document.getElementById('rTbtDist').value = m.tbtDistM || 0;
+  document.getElementById('vTbtDist').textContent = (m.tbtDistM || 0) + 'm';
+
+  document.getElementById('rSoc').value = m.socPct;
+  document.getElementById('rKw').value = m.totalKw;
+  document.getElementById('vEv').textContent = m.socPct.toFixed(1) + '% · ' + (m.totalKw >= 0 ? '+' : '') + m.totalKw.toFixed(1) + ' kW';
+  document.getElementById('rFuel').value = m.fuelPct;
+  document.getElementById('rRpm').value = m.rpm;
+  document.getElementById('vIce').textContent = m.fuelPct + '% · ' + m.rpm + ' RPM';
+
+  document.getElementById('hvacOnBtn').classList.toggle('active', !!m.hvacOn);
+  document.getElementById('hvacAutoBtn').classList.toggle('active', !!m.hvacAuto);
+  document.getElementById('hvacAcBtn').classList.toggle('active', !!m.hvacAc);
+  document.getElementById('hvacHeatBtn').classList.toggle('active', !!m.hvacHeat);
+  document.getElementById('rHvacTemp').value = m.hvacDrTempC;
+  document.getElementById('rFan').value = m.hvacBlowerStep;
+  document.getElementById('vHvac').textContent = m.hvacDrTempC.toFixed(1) + '° · ' + m.hvacBlowerStep + '단';
+}
+
+function wireEvents() {
+  document.querySelectorAll('#modeSeg .btn').forEach(b => b.onclick = () => patchImmediate({mode: b.dataset.mode}));
+  document.querySelectorAll('#themeSeg .btn').forEach(b => b.onclick = () => patchImmediate({theme: b.dataset.val}));
+  document.querySelectorAll('#ptSeg .btn').forEach(b => b.onclick = () => patchImmediate({pt: b.dataset.val}));
+  document.querySelectorAll('#car3dSeg .btn').forEach(b => b.onclick = () => patchImmediate({car3d: b.dataset.val === '1'}));
+  document.querySelectorAll('#colorSwatches .swatch').forEach(el => el.onclick = () => patchImmediate({carColor: +el.dataset.col}));
+
+  document.querySelectorAll('#gearBtns .btn').forEach(b => b.onclick = () => {
+    const g = b.dataset.gear;
+    const p = { gearPos: g };
+    if (g === 'P') { p.speedKph = 0; p.pbrake = true; }
+    else if (g === 'N') { p.speedKph = 0; p.pbrake = false; }
+    else if (g === 'R') { p.speedKph = 8; p.pbrake = false; }
+    else { p.speedKph = (S && S.sim.speedKph > 5) ? S.sim.speedKph : 78; p.pbrake = false; }
+    patchImmediate(p);
+  });
+
+  document.querySelectorAll('#doorBtns .btn').forEach(b => b.onclick = () => {
+    if (!S) return;
+    const d = S.sim.doors.slice();
+    d[+b.dataset.door] = !d[+b.dataset.door];
+    patchImmediate({ gearPos: 'P', speedKph: 0, pbrake: true, doors: d });
+  });
+
+  const bindRange = (id, fn) => {
+    const el = document.getElementById(id);
+    el.addEventListener('pointerdown', () => dragging = true);
+    el.addEventListener('pointerup', () => dragging = false);
+    el.addEventListener('change', () => dragging = false);
+    el.addEventListener('input', () => fn(el.value));
+  };
+  bindRange('rSpeed', v => { document.getElementById('vSpeed').textContent = v; queuePatch({speedKph: +v}); });
+  bindRange('rCruise', v => { document.getElementById('vCruise').textContent = v + ' km/h'; queuePatch({cruiseKph: +v, cruiseActive: true}); });
+  bindRange('rCurve', v => {
+    const c2 = +v / 10000.0;
+    document.getElementById('vCurve').textContent = (c2 >= 0 ? '+' : '') + c2.toFixed(4);
+    const patch = {curveC2: c2, autoScurve: false, autoSteerSweep: false};
+    if (S && S.sim.linkSteer) {
+      const sd = Math.round(-c2 * 24000);
+      patch.steerDeg = sd;
+      document.getElementById('rSteer').value = -sd;
+      document.getElementById('vSteer').textContent = fmtSteer(sd);
+    }
+    queuePatch(patch);
+  });
+  bindRange('rSteer', v => {
+    const sd = -(+v);
+    document.getElementById('vSteer').textContent = fmtSteer(sd);
+    queuePatch({steerDeg: sd, linkSteer: false, autoSteerSweep: false});
+  });
+  bindRange('rLeadDist', v => { document.getElementById('vLeadDist').textContent = v + ' m'; queuePatch({leadDistM: +v, hasLead: true}); });
+  bindRange('rLeadY', v => {
+    const y = +v / 10.0;
+    document.getElementById('vLeadY').textContent = y.toFixed(1) + ' m';
+    queuePatch({leadYRightM: y, hasLead: true});
+  });
+  bindRange('rLane', v => { document.getElementById('vLane').textContent = v + '%'; queuePatch({laneConfPct: +v}); });
+  bindRange('rTrL1', v => queuePatch({trafficLeftNearD: +v, showTraffic: true, trafficAnimate: false}));
+  bindRange('rTrR1', v => queuePatch({trafficRightNearD: +v, showTraffic: true, trafficAnimate: false}));
+  bindRange('rTrL2', v => queuePatch({trafficLeftFarD: +v, showTraffic: true, trafficAnimate: false}));
+  bindRange('rTrR2', v => queuePatch({trafficRightFarD: +v, showTraffic: true, trafficAnimate: false}));
+  bindRange('rTrLat', v => queuePatch({trafficLaneOffset: +v / 10.0, showTraffic: true}));
+  bindRange('rSdiDist', v => { queuePatch({sdiDistM: +v}); });
+  bindRange('rTbtDist', v => {
+    document.getElementById('vTbtDist').textContent = v + 'm';
+    queuePatch({tbtDistM: +v});
+  });
+  bindRange('rSoc', v => queuePatch({socPct: +v, dteKm: Math.round(+v * 4.5)}));
+  bindRange('rKw', v => queuePatch({totalKw: +v}));
+  bindRange('rFuel', v => queuePatch({fuelPct: +v, iceDteKm: Math.round(+v * 6.0)}));
+  bindRange('rRpm', v => queuePatch({rpm: +v}));
+  bindRange('rHvacTemp', v => queuePatch({hvacDrTempC: +v, hvacOn: true}));
+  bindRange('rFan', v => queuePatch({hvacBlowerStep: +v, hvacOn: +v > 0}));
+}
+
+async function poll() {
+  if (!dragging) {
+    try {
+      S = await api('/api/state');
+      render();
+    } catch (e) {
+      document.getElementById('stText').textContent = '연결 끊김 (:8768)';
+    }
+  }
+}
+
+wireEvents();
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>
