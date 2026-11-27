@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.16";
+    public static final String MONITOR_VERSION = "1.5.17";
     // v1.5.14: 4MB -> 12MB. Clients <= 1.5.13 still stop at 4MB, so build_package.py keeps the b64 below that.
     static final int OTA_JAR_B64_MAX_BYTES = 12 * 1024 * 1024;
     public static final int POWERTRAIN_AUTO = 0;
@@ -104,6 +104,7 @@ public class TurzxMonitorMain {
     public static final String GITHUB_RAW_HOST = "raw.githubusercontent.com";
     public static final String GITHUB_OTA_BASE_PATH = "/GRT47/HKG_5W_TurzxMonitor/main/ota";
     public static final int HTTP_PORT = 8766;
+    public static final int HUB_DISCOVERY_PORT = 8767;
     public static final int CARROT_UDP_PORT_PRIMARY = 7705;
     public static final int CARROT_UDP_PORT_BROADCAST = 7706;
     public static final int CARROT_WS_PORT = 7000;
@@ -994,6 +995,10 @@ public class TurzxMonitorMain {
         private static volatile double lastAckMs = 0.0;
         private static volatile TelemetrySnapshot latestPolledSnap = null;
         private static volatile boolean screenOffActive = false;
+
+        public static boolean isScreenOffActive() {
+            return screenOffActive;
+        }
 
         // Per-stage timing (EMA, ms) for /status.json + debug report
         private static volatile double avgPollMs = 0.0;
@@ -8579,6 +8584,15 @@ public class TurzxMonitorMain {
             }, "Turzx-HttpServer");
             tHttp.setDaemon(true);
             tHttp.start();
+
+            Thread tBeacon = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    runHubDiscoveryBeaconLoop();
+                }
+            }, "Turzx-HubBeacon");
+            tBeacon.setDaemon(true);
+            tBeacon.start();
         }
 
         private static void pollStickyMediaIntentLocked(String action) {
@@ -8931,6 +8945,60 @@ public class TurzxMonitorMain {
             } catch (Throwable ignored) {
             } finally {
                 if (server != null) { try { server.close(); } catch (Throwable ignored) {} }
+            }
+        }
+
+        private static void runHubDiscoveryBeaconLoop() {
+            while (true) {
+                DatagramSocket sock = null;
+                try {
+                    sock = new DatagramSocket(HUB_DISCOVERY_PORT);
+                    sock.setReuseAddress(true);
+                    sock.setBroadcast(true);
+                    sock.setSoTimeout(1500);
+                    byte[] rxBuf = new byte[256];
+                    long lastBcastMs = 0L;
+                    while (true) {
+                        long now = System.currentTimeMillis();
+                        if (now - lastBcastMs >= 1500L) {
+                            lastBcastMs = now;
+                            byte[] beacon = formatHubBeaconJson(getLatestSnapshot()).getBytes(UTF8);
+                            try {
+                                InetAddress global = InetAddress.getByName("255.255.255.255");
+                                sock.send(new DatagramPacket(beacon, beacon.length, global, HUB_DISCOVERY_PORT));
+                            } catch (Throwable ignored) {}
+                            try {
+                                java.util.Enumeration<java.net.NetworkInterface> nifs = java.net.NetworkInterface.getNetworkInterfaces();
+                                while (nifs != null && nifs.hasMoreElements()) {
+                                    java.net.NetworkInterface nif = nifs.nextElement();
+                                    if (!nif.isUp() || nif.isLoopback()) continue;
+                                    for (java.net.InterfaceAddress ia : nif.getInterfaceAddresses()) {
+                                        InetAddress bc = ia.getBroadcast();
+                                        if (bc instanceof java.net.Inet4Address) {
+                                            try {
+                                                sock.send(new DatagramPacket(beacon, beacon.length, bc, HUB_DISCOVERY_PORT));
+                                            } catch (Throwable ignored) {}
+                                        }
+                                    }
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                        try {
+                            DatagramPacket pkt = new DatagramPacket(rxBuf, rxBuf.length);
+                            sock.receive(pkt);
+                            String msg = new String(pkt.getData(), pkt.getOffset(), pkt.getLength(), UTF8).trim();
+                            if (msg.contains("DISCOVER_HKG_HUD")) {
+                                byte[] reply = formatHubBeaconJson(getLatestSnapshot()).getBytes(UTF8);
+                                sock.send(new DatagramPacket(reply, reply.length, pkt.getAddress(), pkt.getPort()));
+                            }
+                        } catch (java.net.SocketTimeoutException ignored) {
+                        }
+                    }
+                } catch (Throwable ignored) {
+                } finally {
+                    if (sock != null) { try { sock.close(); } catch (Throwable ignored) {} }
+                }
+                try { Thread.sleep(3000L); } catch (InterruptedException ignored) {}
             }
         }
 
@@ -14868,10 +14936,20 @@ public class TurzxMonitorMain {
         if (rDef != null) target.hvacRearDefog = rDef.booleanValue();
     }
 
+    public static String formatHubBeaconJson(TelemetrySnapshot ev) {
+        String ip = (ev != null && ev.carrotIp != null) ? ev.carrotIp : "";
+        return "{\"service\":\"hkg_turzx_hub\",\"version\":\"" + MONITOR_VERSION
+                + "\",\"httpPort\":" + HTTP_PORT
+                + ",\"carrotIp\":\"" + escapeJson(ip)
+                + "\",\"screenOff\":" + TurzxUsbDriver.isScreenOffActive() + "}";
+    }
+
     public static String formatTelemetryJson(TelemetrySnapshot ev) {
         if (ev == null) return "{\"ok\":false}";
-        StringBuilder sb = new StringBuilder(1280);
+        long nowMs = System.currentTimeMillis();
+        StringBuilder sb = new StringBuilder(1600);
         sb.append("{\"ok\":true,\"version\":\"").append(MONITOR_VERSION).append("\"");
+        sb.append(",\"screenOff\":").append(TurzxUsbDriver.isScreenOffActive());
         sb.append(",\"powertrain\":\"").append(ev.powertrainLabel(LiveTuning.powertrainMode)).append("\"");
         sb.append(",\"theme\":\"").append(LampProbe.isLightTheme(LiveTuning.hudThemeMode) ? "light" : "dark").append("\"");
         sb.append(",\"themeMode\":\"").append(LiveTuning.hudThemeMode == THEME_DARK ? "dark" : (LiveTuning.hudThemeMode == THEME_LIGHT ? "light" : "auto")).append("\"");
@@ -14888,6 +14966,14 @@ public class TurzxMonitorMain {
         sb.append(String.format(Locale.US, ",\"pedalPct\":%.1f", ev.accelPedalPct));
         sb.append(String.format(Locale.US, ",\"tpms\":{\"fl\":%.1f,\"fr\":%.1f,\"rl\":%.1f,\"rr\":%.1f}",
                 ev.tpmsFlPsi, ev.tpmsFrPsi, ev.tpmsRlPsi, ev.tpmsRrPsi));
+        boolean[] doors = BodyProbe.doors();
+        boolean brakeLampOn = LampProbe.commaFresh(nowMs) ? LampProbe.commaBrake()
+                : (LampProbe.pressureLive() && LampProbe.pressure() > 0.5f);
+        sb.append(",\"body\":{\"doors\":[");
+        for (int i = 0; i < 6; i++) sb.append(i > 0 ? "," : "").append(doors != null && i < doors.length && doors[i]);
+        sb.append("],\"pbrake\":").append(BodyProbe.parkingBrakeOn());
+        sb.append(",\"headLamp\":").append(LampProbe.headLampsOn());
+        sb.append(",\"brakeLamp\":").append(brakeLampOn).append("}");
         sb.append(",\"ice\":{");
         sb.append("\"engineType\":").append(ev.engineType);
         sb.append(",\"hevPresent\":").append(ev.hevServicePresent);
@@ -14937,8 +15023,21 @@ public class TurzxMonitorMain {
         sb.append(",\"tbtTurnInfo\":").append(ev.carrotTbtTurnInfo);
         sb.append(",\"tbtTurnKind\":").append(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(ev));
         sb.append(",\"tbtRoad\":\"").append(escapeJson(ev.carrotTbtRoad)).append("\"");
-        sb.append(String.format(Locale.US, ",\"steerDeg\":%.1f,\"leadDistM\":%.1f,\"hasLead\":%b",
-                ev.steeringAngleDeg, ev.leadDistM, ev.hasLeadCar));
+        float curveC2 = (ev.pathPoly != null && ev.pathPoly.length >= 3)
+                ? Math.max(-0.0025f, Math.min(0.0025f, ev.pathPoly[2])) : 0f;
+        sb.append(String.format(Locale.US, ",\"steerDeg\":%.1f,\"leadDistM\":%.1f,\"leadY\":%.2f,\"leadAccel\":%.2f,\"hasLead\":%b,\"laneConf\":%.1f,\"curve\":%.6f",
+                ev.steeringAngleDeg, ev.leadDistM, ev.leadYRightM, ev.leadAccelMps2, ev.hasLeadCar, ev.laneConfidencePct, curveC2));
+        sb.append(",\"traffic\":[");
+        if (ev.trafficLeads != null && (nowMs - ev.trafficMs) < 1500L) {
+            int maxEntries = Math.min(12, ev.trafficLeads.length / TRAFFIC_STRIDE);
+            for (int i = 0; i < maxEntries; i++) {
+                int base = i * TRAFFIC_STRIDE;
+                if (i > 0) sb.append(",");
+                sb.append(String.format(Locale.US, "[%.2f,%.2f,%.2f,%.2f]",
+                        ev.trafficLeads[base], ev.trafficLeads[base + 1], ev.trafficLeads[base + 2], ev.trafficLeads[base + 3]));
+            }
+        }
+        sb.append("]");
         sb.append(",\"ip\":\"").append(ev.carrotIp != null ? ev.carrotIp : "").append("\"");
         sb.append("}");
         sb.append(",\"media\":{");
@@ -14950,6 +15049,7 @@ public class TurzxMonitorMain {
         sb.append(",\"posSec\":").append(ev.mediaPositionSec);
         sb.append(",\"durSec\":").append(ev.mediaDurationSec);
         sb.append(",\"hasAlbumArt\":").append(ev.albumArtBitmap != null);
+        sb.append(",\"trackKey\":\"").append(escapeJson(ev.albumArtTrackKey)).append("\"");
         sb.append(",\"albumArtSource\":\"").append(escapeJson(ev.albumArtSource)).append("\"");
         sb.append("}");
         sb.append(",\"usb\":{");
@@ -18662,6 +18762,29 @@ public class TurzxMonitorMain {
         jTbt.carrotTbtTurnInfo = 1; // left
         jTbt.carrotTbtTurnInfoMs = 2000L;
         assertTrue(TurzxFrameRenderer.TeslaHud.resolveTbtTurnKind(jTbt) == TurzxFrameRenderer.TeslaHud.TBT_LEFT, "v1.5.16 newer xTurnInfo overrides stale nTBTTurnType");
+
+        // v1.5.17: UDP hub discovery beacon + enriched /status.json for remote Android HUD display
+        TelemetrySnapshot hubSnap = new TelemetrySnapshot();
+        hubSnap.carrotIp = "192.168.43.55";
+        hubSnap.laneConfidencePct = 96.5f;
+        hubSnap.leadDistM = 28.4f;
+        hubSnap.leadYRightM = -0.35f;
+        hubSnap.leadAccelMps2 = -1.8f;
+        hubSnap.hasLeadCar = true;
+        hubSnap.pathPoly = new float[]{0f, 0f, -0.0012f, 0f};
+        hubSnap.trafficLeads = new float[]{21.0f, -3.5f, 0.1f, 18.0f};
+        hubSnap.trafficMs = System.currentTimeMillis();
+        hubSnap.albumArtTrackKey = "Spotify|Supernova|aespa";
+        String beaconJson = formatHubBeaconJson(hubSnap);
+        assertTrue(beaconJson.contains("\"service\":\"hkg_turzx_hub\"") && beaconJson.contains("\"httpPort\":8766")
+                && beaconJson.contains("\"carrotIp\":\"192.168.43.55\""), "v1.5.17 beacon payload: " + beaconJson);
+        String hubStatusJson = formatTelemetryJson(hubSnap);
+        assertTrue(hubStatusJson.contains("\"screenOff\":") && hubStatusJson.contains("\"body\":{\"doors\":[")
+                && hubStatusJson.contains("\"pbrake\":") && hubStatusJson.contains("\"headLamp\":")
+                && hubStatusJson.contains("\"laneConf\":96.5") && hubStatusJson.contains("\"curve\":-0.001200")
+                && hubStatusJson.contains("\"traffic\":[[21.00,-3.50,0.10,18.00]]")
+                && hubStatusJson.contains("\"trackKey\":\"Spotify|Supernova|aespa\""),
+                "v1.5.17 enriched status.json fields present");
 
         System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + Chromium 1:1 HUD Assets + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");
     }
