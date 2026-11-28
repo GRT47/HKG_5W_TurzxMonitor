@@ -1,8 +1,8 @@
 {
   "package": "com.hkg.huddisplay",
-  "versionCode": 102,
-  "versionName": "1.0.2",
-  "apkUrl": "https://github.com/GRT47/HKG_5W_TurzxMonitor/releases/download/hud-v1.0.2/HkgHudDisplay.apk",
-  "sha256": "606546c04aa68883ca7b8b14ea1380ad399c8c84772f42119a0860aa1673e03b",
-  "notes": "앨범아트 갱신 누락 수정(albumArtSeq 추적·캐시 무효화·재시도 백오프·대시보드 리드로우 해시 반영)"
+  "versionCode": 103,
+  "versionName": "1.0.3",
+  "apkUrl": "https://github.com/GRT47/HKG_5W_TurzxMonitor/releases/download/hud-v1.0.3/HkgHudDisplay.apk",
+  "sha256": "39dd646e5e4e5464bbd9b3f8484857c693be60ee2b58f1068daf140ba14d6040",
+  "notes": "3D 지면 6구역 주차센서(PDW) 초음파 아크·RCCA 후측방 경고·43° 주차 카메라·하단 경고 배너 및 :8768 웹 콘솔 주차센서 제어 추가"
 }
