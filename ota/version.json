@@ -1,7 +1,7 @@
 {
   "package": "hkg.turzxmonitor",
-  "version": "1.5.17",
-  "sha256_jar": "a86a5068781af869670bab3382a946e9558d8e163e6f21132ab1d722872ef1b3",
+  "version": "1.5.18",
+  "sha256_jar": "7ef13ddb9c895c83bdb72c4a40e58e8fdb4308d5688afef3cbdbd030ad721598",
   "sha256_daemon": "f06add507d859f736ef004e6cbee67e71940040320fc01bc33e19d9094edfe0f",
   "sha256_launch": "90260e07e269d1240131cbd6c3fd3b244292febc20eb9bf0abcaf6d8577f53db",
   "repo": "GRT47/HKG_5W_TurzxMonitor"
