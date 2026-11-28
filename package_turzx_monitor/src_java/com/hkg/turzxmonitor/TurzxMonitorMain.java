@@ -370,6 +370,7 @@ public class TurzxMonitorMain {
         public Object albumArtBitmap = null;
         public String albumArtSource = "none";
         public String albumArtTrackKey = "";
+        public int albumArtSeq = 0;
 
         public double getEffectiveSocPct() {
             if (displaySocPct >= 0.0) return displaySocPct;
@@ -6335,6 +6336,78 @@ public class TurzxMonitorMain {
         private static volatile long lastDiskArtProbeMs = 0L;
         private static volatile int trackWidgetReqCount = 0;
         private static volatile byte[] latestAlbumArtBytes = null;
+        private static final Object ALBUM_ART_BYTES_LOCK = new Object();
+        private static final Map<Integer, Object[]> artBytesByBitmapId = new LinkedHashMap<Integer, Object[]>(64, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<Integer, Object[]> eldest) {
+                return size() > 48;
+            }
+        };
+        private static Object lastSeqBitmap = null;
+        private static int currentAlbumArtSeq = 0;
+
+        public static void rememberAlbumArtBytes(Object bmp, byte[] bytes) {
+            if (bmp == null || bytes == null || bytes.length <= 32) return;
+            int id = System.identityHashCode(bmp);
+            synchronized (ALBUM_ART_BYTES_LOCK) {
+                artBytesByBitmapId.put(Integer.valueOf(id), new Object[]{bmp, bytes});
+            }
+        }
+
+        private static byte[] encodeBitmapToJpegBytes(Object bmp) {
+            if (bmp == null) return null;
+            try {
+                Class<?> bmpCls = Class.forName("android.graphics.Bitmap");
+                if (!bmpCls.isInstance(bmp)) return null;
+                Class<?> fmtCls = Class.forName("android.graphics.Bitmap$CompressFormat");
+                Object jpegFmt = fmtCls.getField("JPEG").get(null);
+                Method compressM = bmpCls.getMethod("compress", fmtCls, int.class, OutputStream.class);
+                ByteArrayOutputStream baos = new ByteArrayOutputStream(16384);
+                Object ok = compressM.invoke(bmp, jpegFmt, Integer.valueOf(88), baos);
+                if (Boolean.TRUE.equals(ok)) {
+                    byte[] out = baos.toByteArray();
+                    if (out.length > 32) return out;
+                }
+            } catch (Throwable ignored) {
+            }
+            return null;
+        }
+
+        static void syncLiveAlbumArtSeqLocked() {
+            if (liveSnapshot.albumArtBitmap != lastSeqBitmap) {
+                lastSeqBitmap = liveSnapshot.albumArtBitmap;
+                if (lastSeqBitmap != null) {
+                    currentAlbumArtSeq++;
+                    liveSnapshot.albumArtSeq = currentAlbumArtSeq;
+                } else {
+                    liveSnapshot.albumArtSeq = 0;
+                    latestAlbumArtBytes = null;
+                }
+            }
+        }
+
+        public static byte[] resolveCurrentAlbumArtJpegBytes() {
+            Object curBmp;
+            synchronized (liveSnapshot) {
+                syncLiveAlbumArtSeqLocked();
+                curBmp = liveSnapshot.albumArtBitmap;
+            }
+            if (curBmp == null) return null;
+            int id = System.identityHashCode(curBmp);
+            synchronized (ALBUM_ART_BYTES_LOCK) {
+                Object[] entry = artBytesByBitmapId.get(Integer.valueOf(id));
+                if (entry != null && entry[0] == curBmp) {
+                    return (byte[]) entry[1];
+                }
+            }
+            byte[] encoded = encodeBitmapToJpegBytes(curBmp);
+            if (encoded != null && encoded.length > 32) {
+                rememberAlbumArtBytes(curBmp, encoded);
+                latestAlbumArtBytes = encoded;
+                return encoded;
+            }
+            return null;
+        }
         private static volatile String lastRawMediaBroadcastDump = "none";
         private static volatile String lastAvrcpPositionDump = "none";
         private static volatile long lastAvrcpPositionMs = 0L;
@@ -8907,7 +8980,7 @@ public class TurzxMonitorMain {
                                 writeHttpResponse(os, "404 Not Found", "text/plain; charset=utf-8", "Frame not ready".getBytes(UTF8));
                             }
                         } else if (path.startsWith("/albumart.jpg")) {
-                            byte[] art = latestAlbumArtBytes;
+                            byte[] art = resolveCurrentAlbumArtJpegBytes();
                             if (art != null && art.length > 0) {
                                 writeHttpResponse(os, "200 OK", "image/jpeg", art);
                             } else {
@@ -9137,9 +9210,11 @@ public class TurzxMonitorMain {
             c.mediaPlaying = liveSnapshot.mediaPlaying;
             c.mediaPositionSec = liveSnapshot.mediaPositionSec;
             c.mediaDurationSec = liveSnapshot.mediaDurationSec;
+            syncLiveAlbumArtSeqLocked();
             c.albumArtBitmap = liveSnapshot.albumArtBitmap;
             c.albumArtSource = liveSnapshot.albumArtSource;
             c.albumArtTrackKey = liveSnapshot.albumArtTrackKey;
+            c.albumArtSeq = liveSnapshot.albumArtSeq;
             return c;
         }
     }
@@ -15051,6 +15126,7 @@ public class TurzxMonitorMain {
         sb.append(",\"hasAlbumArt\":").append(ev.albumArtBitmap != null);
         sb.append(",\"trackKey\":\"").append(escapeJson(ev.albumArtTrackKey)).append("\"");
         sb.append(",\"albumArtSource\":\"").append(escapeJson(ev.albumArtSource)).append("\"");
+        sb.append(",\"albumArtSeq\":").append(ev.albumArtSeq);
         sb.append("}");
         sb.append(",\"usb\":{");
         sb.append("\"connected\":").append(TurzxUsbDriver.isConnected());
@@ -16108,12 +16184,14 @@ public class TurzxMonitorMain {
             Object bmp = bfCls.getMethod("decodeByteArray", byte[].class, int.class, int.class)
                     .invoke(null, rawArt, Integer.valueOf(0), Integer.valueOf(rawArt.length));
             if (bmp != null) {
+                TelemetryCollector.rememberAlbumArtBytes(bmp, rawArt);
                 return bmp;
             }
         } catch (ClassNotFoundException cnfe) {
             // Host JVM self-test environment without android.graphics.BitmapFactory:
             // accept valid image byte arrays so unit tests can verify end-to-end cover art pipelines.
             if (hasValidImageMagic(rawArt)) {
+                TelemetryCollector.rememberAlbumArtBytes(rawArt, rawArt);
                 return rawArt;
             }
         } catch (Throwable ignored) {
@@ -18783,8 +18861,61 @@ public class TurzxMonitorMain {
                 && hubStatusJson.contains("\"pbrake\":") && hubStatusJson.contains("\"headLamp\":")
                 && hubStatusJson.contains("\"laneConf\":96.5") && hubStatusJson.contains("\"curve\":-0.001200")
                 && hubStatusJson.contains("\"traffic\":[[21.00,-3.50,0.10,18.00]]")
-                && hubStatusJson.contains("\"trackKey\":\"Spotify|Supernova|aespa\""),
+                && hubStatusJson.contains("\"trackKey\":\"Spotify|Supernova|aespa\"")
+                && hubStatusJson.contains("\"albumArtSeq\":"),
                 "v1.5.17 enriched status.json fields present");
+
+        // Verify albumArtSeq & /albumart.jpg bitmap-keyed bytes stay in sync across track switches & LRU cache hits
+        byte[] pngA = new byte[48];
+        System.arraycopy(clearPng, 0, pngA, 0, Math.min(clearPng.length, pngA.length));
+        pngA[40] = 0x11;
+        byte[] pngB = new byte[48];
+        System.arraycopy(clearPng, 0, pngB, 0, Math.min(clearPng.length, pngB.length));
+        pngB[40] = 0x22;
+        Object bmpSeqA = decodeAlbumArtBytes(pngA);
+        Object bmpSeqB = decodeAlbumArtBytes(pngB);
+        synchronized (TelemetryCollector.liveSnapshot) {
+            TelemetryCollector.liveSnapshot.mediaSource = "Bluetooth Audio";
+            TelemetryCollector.liveSnapshot.mediaTitle = "SeqTrackA";
+            TelemetryCollector.liveSnapshot.mediaArtist = "SeqArtistA";
+            TelemetryCollector.liveSnapshot.albumArtBitmap = bmpSeqA;
+            TelemetryCollector.liveSnapshot.albumArtSource = "broadcast_bytes";
+            AlbumArtResolver.putCachedArt("SeqTrackA", "SeqArtistA", bmpSeqA);
+        }
+        byte[] gotBytesA = TelemetryCollector.resolveCurrentAlbumArtJpegBytes();
+        int seqA = TelemetryCollector.getLatestSnapshot().albumArtSeq;
+        assertTrue(gotBytesA == pngA && seqA > 0, "Expected Track A bytes & positive albumArtSeq");
+
+        synchronized (TelemetryCollector.liveSnapshot) {
+            TelemetryCollector.liveSnapshot.mediaTitle = "SeqTrackB";
+            TelemetryCollector.liveSnapshot.mediaArtist = "SeqArtistB";
+            TelemetryCollector.liveSnapshot.albumArtBitmap = bmpSeqB;
+            TelemetryCollector.liveSnapshot.albumArtSource = "broadcast_bytes";
+            AlbumArtResolver.putCachedArt("SeqTrackB", "SeqArtistB", bmpSeqB);
+        }
+        byte[] gotBytesB = TelemetryCollector.resolveCurrentAlbumArtJpegBytes();
+        int seqB = TelemetryCollector.getLatestSnapshot().albumArtSeq;
+        assertTrue(gotBytesB == pngB && seqB > seqA, "Expected Track B bytes & incremented albumArtSeq");
+
+        synchronized (TelemetryCollector.liveSnapshot) {
+            onMediaTrackUpdated(TelemetryCollector.liveSnapshot, "SeqTrackA", "SeqArtistA", "");
+        }
+        byte[] gotCachedA = TelemetryCollector.resolveCurrentAlbumArtJpegBytes();
+        TelemetrySnapshot snapCachedA = TelemetryCollector.getLatestSnapshot();
+        assertTrue("cache".equals(snapCachedA.albumArtSource)
+                && gotCachedA == pngA
+                && snapCachedA.albumArtSeq > seqB
+                && formatTelemetryJson(snapCachedA).contains("\"albumArtSeq\":" + snapCachedA.albumArtSeq),
+                "Expected cache hit back to Track A to update /albumart.jpg bytes & increment albumArtSeq");
+
+        synchronized (TelemetryCollector.liveSnapshot) {
+            TelemetryCollector.liveSnapshot.albumArtBitmap = null;
+            TelemetryCollector.liveSnapshot.albumArtSource = "none";
+            TelemetryCollector.liveSnapshot.albumArtTrackKey = "";
+        }
+        assertTrue(TelemetryCollector.resolveCurrentAlbumArtJpegBytes() == null
+                && TelemetryCollector.getLatestSnapshot().albumArtSeq == 0,
+                "Expected cleared albumArtBitmap to reset albumArtSeq and clear /albumart.jpg bytes");
 
         System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + Chromium 1:1 HUD Assets + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");
     }
