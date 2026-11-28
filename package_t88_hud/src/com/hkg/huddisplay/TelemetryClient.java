@@ -55,7 +55,11 @@ public final class TelemetryClient {
     private volatile String discoveredHubIp = "";
     private volatile String discoveredCommaIp = "";
 
-    private String loadedTrackKey = "";
+    private String loadedArtKey = "";
+    private int loadedArtBytesHash = 0;
+    private String failedArtKey = "";
+    private long nextArtRetryMs = 0L;
+    private long staleReprobeAtMs = 0L;
     private Thread tBeacon, tHttp, tWs;
     private WifiManager.MulticastLock multicastLock;
 
@@ -226,6 +230,17 @@ public final class TelemetryClient {
         }
     }
 
+    private static String buildArtFetchKey(HudState s) {
+        if (s.albumArtSeq > 0) {
+            return "seq:" + s.albumArtSeq;
+        }
+        String tk = s.trackKey != null ? s.trackKey : "";
+        String src = s.albumArtSource != null ? s.albumArtSource : "";
+        String title = s.mediaTitle != null ? s.mediaTitle : "";
+        String artist = s.mediaArtist != null ? s.mediaArtist : "";
+        return "legacy:" + tk + "|" + src + "|" + title + "|" + artist;
+    }
+
     private void runHeadunitHttpLoop() {
         long rateWinStart = System.currentTimeMillis();
         int rateCount = 0;
@@ -244,15 +259,26 @@ public final class TelemetryClient {
                 String json = httpGetText("http://" + ip + ":" + HUB_HTTP_PORT + "/status.json", 1200);
                 if (json != null && json.contains("\"ok\":true")) {
                     long now = System.currentTimeMillis();
-                    String wantTrack = null;
+                    String wantArtKey = null;
+                    int wantSeq = 0;
                     synchronized (stateLock) {
                         state.hubIp = ip;
                         state.mergeHeadunitJson(json, now);
-                        if (state.hasAlbumArt && state.trackKey != null && !state.trackKey.isEmpty()
-                                && !state.trackKey.equals(loadedTrackKey)) {
-                            wantTrack = state.trackKey;
-                        } else if (!state.hasAlbumArt) {
-                            loadedTrackKey = "";
+                        if (!state.hasAlbumArt) {
+                            loadedArtKey = "";
+                            failedArtKey = "";
+                            nextArtRetryMs = 0L;
+                            staleReprobeAtMs = 0L;
+                        } else {
+                            String curArtKey = buildArtFetchKey(state);
+                            boolean needFetch = (!curArtKey.equals(loadedArtKey) || state.albumArt == null)
+                                    && (!curArtKey.equals(failedArtKey) || now >= nextArtRetryMs);
+                            boolean needReprobe = state.albumArtSeq <= 0
+                                    && staleReprobeAtMs > 0L && now >= staleReprobeAtMs;
+                            if (needFetch || needReprobe) {
+                                wantArtKey = curArtKey;
+                                wantSeq = state.albumArtSeq;
+                            }
                         }
                     }
                     rateCount++;
@@ -265,17 +291,39 @@ public final class TelemetryClient {
                             state.hubHz = hz;
                         }
                     }
-                    if (wantTrack != null) {
-                        byte[] img = httpGetBytes("http://" + ip + ":" + HUB_HTTP_PORT + "/albumart.jpg", 2000);
-                        if (img != null && img.length > 100) {
-                            Bitmap bmp = BitmapFactory.decodeByteArray(img, 0, img.length);
-                            if (bmp != null) {
-                                synchronized (stateLock) {
-                                    if (wantTrack.equals(state.trackKey)) {
-                                        state.albumArt = bmp;
-                                        loadedTrackKey = wantTrack;
+                    if (wantArtKey != null) {
+                        String artUrl = "http://" + ip + ":" + HUB_HTTP_PORT + "/albumart.jpg?k="
+                                + (wantArtKey.hashCode() & 0x7FFFFFFF) + "&t=" + now;
+                        byte[] img = null;
+                        try {
+                            img = httpGetBytes(artUrl, 2000);
+                        } catch (Throwable ignored) {
+                        }
+                        Bitmap bmp = (img != null && img.length > 64)
+                                ? BitmapFactory.decodeByteArray(img, 0, img.length) : null;
+                        if (bmp != null) {
+                            int imgHash = java.util.Arrays.hashCode(img);
+                            synchronized (stateLock) {
+                                if (state.hasAlbumArt && wantArtKey.equals(buildArtFetchKey(state))) {
+                                    boolean keyChanged = !wantArtKey.equals(loadedArtKey);
+                                    state.albumArt = bmp;
+                                    if (wantSeq <= 0 && keyChanged && loadedArtBytesHash != 0
+                                            && imgHash == loadedArtBytesHash) {
+                                        staleReprobeAtMs = System.currentTimeMillis() + 2200L;
+                                    } else {
+                                        staleReprobeAtMs = 0L;
                                     }
+                                    loadedArtKey = wantArtKey;
+                                    loadedArtBytesHash = imgHash;
+                                    failedArtKey = "";
+                                    nextArtRetryMs = 0L;
                                 }
+                            }
+                        } else {
+                            synchronized (stateLock) {
+                                failedArtKey = wantArtKey;
+                                nextArtRetryMs = System.currentTimeMillis() + 1500L;
+                                staleReprobeAtMs = 0L;
                             }
                         }
                     }
@@ -665,6 +713,8 @@ public final class TelemetryClient {
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) new URL(urlStr).openConnection();
+            conn.setUseCaches(false);
+            conn.setRequestProperty("Cache-Control", "no-cache");
             conn.setConnectTimeout(timeoutMs);
             conn.setReadTimeout(timeoutMs);
             conn.setRequestMethod("GET");

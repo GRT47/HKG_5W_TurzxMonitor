@@ -121,6 +121,8 @@ public final class HudState {
     public boolean mediaPlaying = false;
     public boolean hasAlbumArt = false;
     public String trackKey = "";
+    public String albumArtSource = "";
+    public int albumArtSeq = 0;
     public Bitmap albumArt = null;
 
     // Driving / CarrotPilot
@@ -240,6 +242,8 @@ public final class HudState {
         c.mediaPlaying = mediaPlaying;
         c.hasAlbumArt = hasAlbumArt;
         c.trackKey = trackKey;
+        c.albumArtSource = albumArtSource;
+        c.albumArtSeq = albumArtSeq;
         c.albumArt = albumArt;
 
         c.speedKph = speedKph;
@@ -472,6 +476,7 @@ public final class HudState {
 
         JSONObject media = root.optJSONObject("media");
         if (media != null) {
+            String prevTrackKey = trackKey != null ? trackKey : "";
             mediaSource = media.optString("source", "");
             mediaTitle = media.optString("title", "");
             mediaArtist = media.optString("artist", "");
@@ -481,7 +486,13 @@ public final class HudState {
             mediaDurSec = media.optInt("durSec", 0);
             hasAlbumArt = media.optBoolean("hasAlbumArt", false);
             trackKey = media.optString("trackKey", "");
-            if (!hasAlbumArt) albumArt = null;
+            albumArtSource = media.optString("albumArtSource", "");
+            albumArtSeq = media.optInt("albumArtSeq", 0);
+            if (!hasAlbumArt) {
+                albumArt = null;
+            } else if (!trackKey.isEmpty() && !prevTrackKey.isEmpty() && !trackKey.equals(prevTrackKey)) {
+                albumArt = null;
+            }
         }
 
         JSONObject carrot = root.optJSONObject("carrot");

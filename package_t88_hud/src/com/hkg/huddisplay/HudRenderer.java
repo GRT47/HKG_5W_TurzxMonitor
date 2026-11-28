@@ -773,6 +773,9 @@ public final class HudRenderer {
         h = 31 * h + (s.mediaTitle != null ? s.mediaTitle.hashCode() : 0);
         h = 31 * h + (s.mediaArtist != null ? s.mediaArtist.hashCode() : 0);
         h = 31 * h + s.mediaPosSec + 31 * s.mediaDurSec + (s.mediaPlaying ? 1 : 0);
+        h = 31 * h + (s.hasAlbumArt ? 1 : 0);
+        h = 31 * h + s.albumArtSeq;
+        h = 31 * h + System.identityHashCode(s.albumArt);
         h = 31 * h + s.hvacBlowerStep + 16 * s.hvacBlowerMode;
         h = 31 * h + (s.hvacAc ? 1 : 0) + (s.hvacAuto ? 2 : 0) + (s.hvacHeat ? 4 : 0)
                 + (s.hvacFrontDefog ? 8 : 0) + (s.hvacRearDefog ? 16 : 0) + (s.hvacRecirc ? 32 : 0);
