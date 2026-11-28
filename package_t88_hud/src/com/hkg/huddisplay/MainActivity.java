@@ -1,10 +1,14 @@
 package com.hkg.huddisplay;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.AlertDialog;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInstaller;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.Color;
 import android.graphics.Outline;
 import android.net.Uri;
@@ -12,6 +16,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
@@ -71,6 +76,10 @@ public final class MainActivity extends Activity {
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private volatile boolean manualModeActive = false;
     private volatile boolean pendingPermissionInstall = false;
+    private boolean isResumedNow = false;
+    private long lastResumeUptimeMs = 0L;
+    private long lastPauseUptimeMs = 0L;
+    private long lastSwitchToLauncherMs = 0L;
     private final Runnable autoUpdateRunnable = new Runnable() {
         @Override
         public void run() {
@@ -102,7 +111,11 @@ public final class MainActivity extends Activity {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
         );
 
-        prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        try {
+            prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        } catch (IllegalStateException e) {
+            prefs = createDeviceProtectedStorageContext().getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        }
         applyLaunchIntent(getIntent());
 
         FrameLayout root = new FrameLayout(this);
@@ -337,6 +350,21 @@ public final class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        if (intent != null && Intent.ACTION_MAIN.equals(intent.getAction())
+                && intent.hasCategory(Intent.CATEGORY_HOME)
+                && (intent.getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0) {
+            long now = SystemClock.uptimeMillis();
+            boolean wasJustOnHud = isResumedNow || (lastPauseUptimeMs > 0L && (now - lastPauseUptimeMs) < 500L);
+            long dwellMs = isResumedNow
+                    ? (now - lastResumeUptimeMs)
+                    : (lastPauseUptimeMs - lastResumeUptimeMs);
+            if (isCurrentDefaultHome() && wasJustOnHud && dwellMs > 1200L
+                    && (now - lastSwitchToLauncherMs) > 1200L) {
+                lastSwitchToLauncherMs = now;
+                openStockLauncher();
+                return;
+            }
+        }
         applyLaunchIntent(intent);
         applyConfigToRuntime();
         applyImmersiveUi();
@@ -430,6 +458,8 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        isResumedNow = true;
+        lastResumeUptimeMs = SystemClock.uptimeMillis();
         if (car3dView != null && prefs != null) {
             car3dView.setRenderPaused(!prefs.getBoolean(KEY_CAR3D, true));
         }
@@ -451,6 +481,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        isResumedNow = false;
+        lastPauseUptimeMs = SystemClock.uptimeMillis();
         if (car3dView != null) car3dView.setRenderPaused(true);
         super.onPause();
     }
@@ -597,6 +629,77 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private boolean isLowRamDevice() {
+        try {
+            ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+            return am != null && am.isLowRamDevice();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private boolean isCurrentDefaultHome() {
+        try {
+            Intent homeIntent = new Intent(Intent.ACTION_MAIN);
+            homeIntent.addCategory(Intent.CATEGORY_HOME);
+            ResolveInfo ri = getPackageManager().resolveActivity(homeIntent, PackageManager.MATCH_DEFAULT_ONLY);
+            return ri != null && ri.activityInfo != null && getPackageName().equals(ri.activityInfo.packageName);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private void openHomeSettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_HOME_SETTINGS));
+        } catch (Throwable ignored) {
+            try {
+                Intent home = new Intent(Intent.ACTION_MAIN);
+                home.addCategory(Intent.CATEGORY_HOME);
+                startActivity(Intent.createChooser(home, "기본 홈 앱 선택"));
+            } catch (Throwable ignored2) {
+                Toast.makeText(this, "홈 앱 설정을 열 수 없습니다", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    private void openStockLauncher() {
+        try {
+            Intent i = new Intent(Intent.ACTION_MAIN);
+            i.addCategory(Intent.CATEGORY_HOME);
+            i.setComponent(new ComponentName("com.tc.launcher", "com.tc.launcher.ui.entry.ActivityEntry"));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+            return;
+        } catch (Throwable ignored) {
+        }
+        try {
+            Intent home = new Intent(Intent.ACTION_MAIN);
+            home.addCategory(Intent.CATEGORY_HOME);
+            home.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(Intent.createChooser(home, "기본 런처 선택"));
+        } catch (Throwable ignored) {
+            Toast.makeText(this, "기본 런처를 열 수 없습니다", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void showOverlayPermissionDialog() {
+        if (isFinishing()) return;
+        new AlertDialog.Builder(this)
+                .setTitle("부팅 자동실행 권한 필요")
+                .setMessage("Android 10 이상에서는 재부팅 시 전체화면 자동실행을 위해 '다른 앱 위에 표시' 권한 허용이 필요합니다.")
+                .setPositiveButton("권한 설정 열기", (d, w) -> {
+                    try {
+                        startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:" + getPackageName())));
+                    } catch (Throwable ignored) {
+                        Toast.makeText(MainActivity.this, "권한 설정 화면을 열 수 없습니다", Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setNegativeButton("나중에", (d, w) -> applyImmersiveUi())
+                .show();
+    }
+
     private void showSettingsDialog() {
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -692,10 +795,40 @@ public final class MainActivity extends Activity {
         cbCommaDirect.setChecked(prefs.getBoolean(KEY_COMMA_DIRECT, true));
         root.addView(cbCommaDirect);
 
+        final boolean lowRam = isLowRamDevice() && Build.VERSION.SDK_INT >= 29;
         final CheckBox cbBoot = new CheckBox(this);
-        cbBoot.setText("부팅 시 자동 전체화면 실행");
+        boolean hasOverlayPerm = Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this);
+        cbBoot.setText(hasOverlayPerm
+                ? "부팅 시 자동 전체화면 실행 (권한 허용됨)"
+                : "부팅 시 자동 전체화면 실행 (다른 앱 위에 표시 권한 필요)");
         cbBoot.setChecked(prefs.getBoolean(KEY_AUTO_START, false));
-        root.addView(cbBoot);
+        if (!lowRam) {
+            root.addView(cbBoot);
+        }
+
+        final boolean isDefHome = isCurrentDefaultHome();
+        TextView homeStatus = new TextView(this);
+        if (isDefHome) {
+            homeStatus.setText("부팅 시 자동 실행 (기본 홈 앱 모드): 활성 ✓\n※ HUD 화면에서 🏠 홈 버튼을 누르면 T88 기본 런처로 전환됩니다.");
+        } else {
+            homeStatus.setText("부팅 시 자동 실행 (기본 홈 앱 모드): 미설정\n※ '기본 홈 앱 선택 열기'에서 HKG HUD Display를 선택하면 부팅 직후 자동 실행됩니다.");
+        }
+        homeStatus.setTextSize(13f);
+        homeStatus.setPadding(6, 8, 6, 8);
+        root.addView(homeStatus);
+
+        LinearLayout homeBtns = new LinearLayout(this);
+        homeBtns.setOrientation(LinearLayout.HORIZONTAL);
+        Button btnHomeSettings = new Button(this);
+        btnHomeSettings.setText("기본 홈 앱 선택 열기");
+        btnHomeSettings.setOnClickListener(v -> openHomeSettings());
+        homeBtns.addView(btnHomeSettings);
+
+        Button btnStockLauncher = new Button(this);
+        btnStockLauncher.setText("T88 기본 런처 열기");
+        btnStockLauncher.setOnClickListener(v -> openStockLauncher());
+        homeBtns.addView(btnStockLauncher);
+        root.addView(homeBtns);
 
         final CheckBox cbStandby = new CheckBox(this);
         cbStandby.setText("시동 OFF 수신 시 절전 대기화면");
@@ -826,6 +959,9 @@ public final class MainActivity extends Activity {
                     if (debugWebServer != null) debugWebServer.setManualModeFlag(false);
                     applyConfigToRuntime();
                     applyImmersiveUi();
+                    if (cbBoot.isChecked() && !lowRam && Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(MainActivity.this)) {
+                        showOverlayPermissionDialog();
+                    }
                 })
                 .setNegativeButton("닫기", (d, w) -> applyImmersiveUi())
                 .create();

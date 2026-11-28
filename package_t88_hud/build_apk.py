@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -80,41 +81,99 @@ def find_build_tool(bt_dir: Path, stem: str) -> str:
     raise RuntimeError(f"Build tool not found in {bt_dir}: {stem}")
 
 
-def render_icon_png(size: int = 96) -> bytes:
-    """Renders a crisp HUD speedometer launcher icon (no external Pillow dependency)."""
+def render_icon_png(size: int = 99) -> bytes:
+    """Renders the ultrawide cluster tile icon matching package_turzx_monitor's launcher icon."""
+    bg_top = (28, 42, 66)
+    bg_bot = (14, 22, 38)
+    border_col = (56, 189, 248)
+    bezel_col = (94, 234, 212)
+    screen_bg = (11, 18, 32)
+    arc_col = (56, 189, 248)
+    accent_col = (52, 211, 153)
+    needle_col = (248, 250, 252)
+    bar1_col = (52, 211, 153)
+    bar2_col = (56, 189, 248)
+    bar3_col = (251, 191, 36)
+
+    cx, cy = 49.5, 49.5
+    bx, by, br = 43.5, 43.5, 22.0
+    scx, scy = 49.5, 47.5
+    sbx, sby, sbr = 27.5, 13.5, 5.2
+    gcx, gcy = 36.8, 48.2
+    ang_rad = math.radians(-35.0)
+    nx0, ny0 = gcx, gcy
+    nx1, ny1 = gcx + math.cos(ang_rad) * 6.0, gcy + math.sin(ang_rad) * 6.0
+    ndx, ndy = nx1 - nx0, ny1 - ny0
+    nlen2 = ndx * ndx + ndy * ndy
+
+    def rr_dist(px: float, py: float, rcx: float, rcy: float, hx: float, hy: float, r: float) -> float:
+        dx = max(abs(px - rcx) - (hx - r), 0.0)
+        dy = max(abs(py - rcy) - (hy - r), 0.0)
+        return math.hypot(dx, dy) + min(max(abs(px - rcx) - (hx - r), abs(py - rcy) - (hy - r)), 0.0) - r
+
+    def sample(px: float, py: float) -> tuple[int, int, int, int]:
+        dist = rr_dist(px, py, cx, cy, bx, by, br)
+        if dist > 0.0:
+            return (0, 0, 0, 0)
+
+        t = max(0.0, min(1.0, (py - 6.0) / 87.0))
+        r = int(bg_top[0] + (bg_bot[0] - bg_top[0]) * t)
+        g = int(bg_top[1] + (bg_bot[1] - bg_top[1]) * t)
+        b = int(bg_top[2] + (bg_bot[2] - bg_top[2]) * t)
+
+        if dist >= -2.4:
+            r, g, b = border_col
+
+        if (abs(px - scx) <= 3.2 and 60.5 <= py <= 64.2) or (
+            rr_dist(px, py, scx, 65.5, 12.0, 2.0, 1.8) <= 0.0
+        ):
+            r, g, b = bezel_col
+
+        sdist = rr_dist(px, py, scx, scy, sbx, sby, sbr)
+        if sdist <= 0.0:
+            if sdist >= -2.2:
+                r, g, b = bezel_col
+            else:
+                r, g, b = screen_bg
+
+                gdx, gdy = px - gcx, py - gcy
+                gr = math.hypot(gdx, gdy)
+                if 4.5 <= gr <= 7.0:
+                    deg = math.degrees(math.atan2(gdy, gdx))
+                    if deg < 40.0:
+                        deg += 360.0
+                    if 135.0 <= deg <= 400.0:
+                        r, g, b = accent_col if deg >= 315.0 else arc_col
+
+                proj = max(0.0, min(1.0, ((px - nx0) * ndx + (py - ny0) * ndy) / nlen2))
+                ndist = math.hypot(px - (nx0 + proj * ndx), py - (ny0 + proj * ndy))
+                if ndist <= 1.25 or gr <= 2.0:
+                    r, g, b = needle_col
+
+                if 48.0 <= px <= 70.5 and 41.2 <= py <= 44.2:
+                    r, g, b = bar1_col
+                elif 48.0 <= px <= 65.5 and 46.2 <= py <= 49.0:
+                    r, g, b = bar2_col
+                elif 48.0 <= px <= 68.5 and 51.0 <= py <= 53.8:
+                    r, g, b = bar3_col
+
+        return (r, g, b, 255)
+
+    scale = 99.0 / float(size)
     rows = bytearray()
-    cx = (size - 1) / 2.0
-    cy = (size - 1) / 2.0
+    offsets = (0.25, 0.75)
     for y in range(size):
         rows.append(0)
         for x in range(size):
-            dx = x - cx
-            dy = y - cy
-            d = (dx * dx + dy * dy) ** 0.5
-            r_bg = size * 0.44
-            if abs(dx) < size * 0.44 and abs(dy) < size * 0.44:
-                # Rounded square background (#11141B)
-                cr = size * 0.14
-                qx = max(abs(dx) - (r_bg - cr), 0.0)
-                qy = max(abs(dy) - (r_bg - cr), 0.0)
-                inside = (qx * qx + qy * qy) <= cr * cr
-            else:
-                inside = False
-            if not inside:
-                rows.extend((0, 0, 0, 0))
-                continue
-            r, g, b, a = 17, 20, 28, 255
-            # Speed arc
-            if size * 0.25 <= d <= size * 0.34 and dy <= size * 0.14:
-                r, g, b = 62, 106, 225  # #3E6AE1
-                if dx > size * 0.08:
-                    r, g, b = 110, 149, 255
-            # Center hub + needle
-            if d <= size * 0.055:
-                r, g, b = 245, 245, 247
-            elif dx > 0 and dy < 0 and abs(dy + dx * 0.65) < size * 0.025 and d < size * 0.29:
-                r, g, b = 245, 245, 247
-            rows.extend((r, g, b, a))
+            sr = sg = sb = sa = 0
+            for ox in offsets:
+                for oy in offsets:
+                    cr, cg, cb, ca = sample((x + ox) * scale, (y + oy) * scale)
+                    sr += cr
+                    sg += cg
+                    sb += cb
+                    sa += ca
+            rows.extend((sr >> 2, sg >> 2, sb >> 2, sa >> 2))
 
     def chunk(tag: bytes, data: bytes) -> bytes:
         return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
@@ -196,7 +255,10 @@ def stage_assets() -> None:
 
     drawable = RES_DIR / "drawable"
     drawable.mkdir(parents=True, exist_ok=True)
-    (drawable / "ic_launcher.png").write_bytes(render_icon_png(96))
+    (drawable / "ic_launcher.png").write_bytes(render_icon_png(99))
+    drawable_xx = RES_DIR / "drawable-xxhdpi"
+    drawable_xx.mkdir(parents=True, exist_ok=True)
+    (drawable_xx / "ic_launcher.png").write_bytes(render_icon_png(198))
     print(f"Staged {copied} HUD assets + 2 fonts cleanly into {ASSETS_DIR}")
 
 

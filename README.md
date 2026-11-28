@@ -24,6 +24,9 @@
 
 ## 2. 주요 기능
 
+> **시연 영상 ([hud-v1.0.1 Showcase MP4](https://github.com/GRT47/HKG_5W_TurzxMonitor/releases/download/hud-v1.0.1/hkg_hud_showcase.mp4))**
+> 문열림 경고·3D 자동 포커스, 주행 중 좌우 3D 스크롤·5초 자동 복귀, 방향지시등 및 후측방(BSD/BCA) 경고 동작을 실기기 화면 녹화로 확인할 수 있습니다.
+
 ### 실시간 OpenGL ES 3.0 3D 니로 EV (`Car3dView`)
 - **컴팩트 `C3D2` 메시 (`niro_ev.c3d`)**: 5개 분리 파츠(차체 + 4륜)와 13개 재질을 지원하며, `niro_ev.c3d`가 없거나 비활성화된 환경에서는 기존 2D 스프라이트(`navdy_*`)로 자동 폴백됩니다.
 - **차체 색상 5종**: 실버(`0`), 그라파이트(`1`), 화이트(`2`), 블루(`3`), 블랙(`4`).
@@ -54,7 +57,7 @@
 - **파워트레인 자동/수동 전환**: EV(SoC, 주행가능거리, 전비, BMS/SOH, 배터리 온도, 셀 편차, 출력 바) 및 ICE(연료 잔량, DTE, 연비, RPM/냉각수/12V, 누적·트립 거리) 자동 전환.
 - **자동 테마 (다크 / 라이트)**: 헤드유닛 전조등/일루미네이션 신호에 맞춰 주간(라이트)·야간(다크) 테마를 자동 전환(설정에서 수동 고정 가능).
 - **미디어 & 공조 바**: 앨범 아트, 곡 정보/진행 바, 실내·외 온도, 설정 온도, `AUTO`/`A/C`/`HEAT`/열선/내기 순환, 3방향 풍향·7단계 풍량 표시.
-- **전원·자동 실행**: 시동 OFF 수신 시 절전 대기화면 전환, `BootReceiver`를 통한 부팅/QuickBoot 자동 전체화면 실행 지원.
+- **전원·부팅 자동 실행**: 시동 OFF 수신 시 절전 대기화면 전환, 일반 Android 기기용 `BootReceiver` 및 T88(`Android 10 Go`)용 Direct-Boot **기본 홈 앱(`.HomeLauncherAlias`) 모드** 부팅 자동실행 지원(HUD 화면에서 🏠 홈 버튼으로 T88 기본 런처와 즉시 전환).
 - **GitHub 자동 업데이트 (`AppUpdater` · `UpdateInstallReceiver`)**:
   - `package_t88_hud/update.json` 및 GitHub Releases(`.apk` + SHA-256)를 이중 확인해 신규 버전을 감지합니다.
   - 주행 중에는 팝업을 띄우지 않고 상단 상태 배지(`· 업데이트 vX.Y.Z`)로만 안내하며, 주차/대기 상태 또는 설정 화면에서 다운로드 → ZIP/SHA-256/패키지명 무결성 검증 → Android `PackageInstaller.Session` 설치 및 완료 후 자동 전체화면 복귀를 수행합니다.
@@ -92,7 +95,7 @@
 
 | 경로 | 역할 |
 |---|---|
-| `AndroidManifest.xml` | `com.hkg.huddisplay`, `minSdk 26` / `targetSdk 29`, 가로 전체화면, 부팅 리시버 |
+| `AndroidManifest.xml` | `com.hkg.huddisplay`, `minSdk 26` / `targetSdk 29`, 가로 전체화면, Direct-Boot 기본 홈 앱(`.HomeLauncherAlias`), `BootReceiver` |
 | `src/com/hkg/huddisplay/MainActivity.java` | 전체화면 몰입 UI, 설정 다이얼로그, `SharedPreferences`, 인텐트·웹 콘솔 연동 |
 | `src/com/hkg/huddisplay/HudView.java` | 3층 합성 루프(`HudVizBgView` + `Car3dView` + `HudOverlayView`), 우측 대시보드, 미디어 카드 탭 |
 | `src/com/hkg/huddisplay/Car3dView.java` | OpenGL ES 3.0 `C3D2` 렌더러, 셰이더 램프·노면 빔·퍼들·조향/회전 휠 |
