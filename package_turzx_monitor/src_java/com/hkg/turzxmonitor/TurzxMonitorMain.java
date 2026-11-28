@@ -73,7 +73,7 @@ import javax.net.ssl.X509TrustManager;
  */
 public class TurzxMonitorMain {
 
-    public static final String MONITOR_VERSION = "1.5.18";
+    public static final String MONITOR_VERSION = "1.5.19";
     // v1.5.14: 4MB -> 12MB. Clients <= 1.5.13 still stop at 4MB, so build_package.py keeps the b64 below that.
     static final int OTA_JAR_B64_MAX_BYTES = 12 * 1024 * 1024;
     public static final int POWERTRAIN_AUTO = 0;
