@@ -134,6 +134,7 @@
     <button class="btn sm" onclick="applyPreset('drive_left')">주행 · 좌커브 AP</button>
     <button class="btn sm" onclick="applyPreset('drive_brake')">주행 · 전방 급제동 경고</button>
     <button class="btn sm" onclick="applyPreset('bsd_warn')">주행 · 깜빡이+후측방 경고</button>
+    <button class="btn sm" onclick="applyPreset('pdw_park')">후진 · 주차센서 (PDW)</button>
     <button class="btn sm" onclick="applyPreset('traffic_close')">주행 · 밀집 근접</button>
     <button class="btn sm" onclick="applyPreset('reverse')">후진 (R)</button>
     <button class="btn sm" onclick="applyPreset('ice_day')">ICE(내연) · 주간 주행</button>
@@ -266,6 +267,22 @@
       <div class="toggles">
         <button class="btn warn" id="leftBsdBtn" onclick="toggleSim('leftBlindspot')">⚠ 좌 후측방 (BSD)</button>
         <button class="btn warn" id="rightBsdBtn" onclick="toggleSim('rightBlindspot')">⚠ 우 후측방 (BSD)</button>
+      </div>
+      <div class="row" style="margin-top:4px">
+        <span class="sub">주차센서 (PDW · 6구역 0~3단계)</span>
+        <button class="btn sm" onclick="clearPdw()">PDW 초기화</button>
+      </div>
+      <div class="toggles3" id="pdwBtns">
+        <button class="btn warn" data-pdw="pdwFl" onclick="cyclePdw('pdwFl')">전좌 FL: 0</button>
+        <button class="btn warn" data-pdw="pdwFc" onclick="cyclePdw('pdwFc')">전중 FC: 0</button>
+        <button class="btn warn" data-pdw="pdwFr" onclick="cyclePdw('pdwFr')">전우 FR: 0</button>
+        <button class="btn warn" data-pdw="pdwRl" onclick="cyclePdw('pdwRl')">후좌 RL: 0</button>
+        <button class="btn warn" data-pdw="pdwRc" onclick="cyclePdw('pdwRc')">후중 RC: 0</button>
+        <button class="btn warn" data-pdw="pdwRr" onclick="cyclePdw('pdwRr')">후우 RR: 0</button>
+      </div>
+      <div class="toggles">
+        <button class="btn danger" id="rccaLBtn" onclick="toggleSim('rccaLeft')">◀ 후방교차 (RCCA L)</button>
+        <button class="btn danger" id="rccaRBtn" onclick="toggleSim('rccaRight')">▶ 후방교차 (RCCA R)</button>
       </div>
       <button class="btn" id="screenOffBtn" onclick="toggleSim('screenOff')">시동 OFF 절전 대기화면</button>
       <div class="row" style="margin-top:4px">
@@ -506,6 +523,24 @@ function toggleSim(key) {
   patchImmediate(o);
 }
 
+function cyclePdw(key) {
+  if (!S) return;
+  const cur = +(S.sim[key] || 0);
+  const nxt = (cur + 1) % 4;
+  const o = { pdwActive: true, pdwOption: 2 };
+  o[key] = nxt;
+  patchImmediate(o);
+}
+
+function clearPdw() {
+  patchImmediate({
+    pdwActive: false, pdwOption: 0,
+    pdwFl: 0, pdwFc: 0, pdwFr: 0,
+    pdwRl: 0, pdwRc: 0, pdwRr: 0,
+    rccaLeft: false, rccaRight: false
+  });
+}
+
 function fmtSteer(sd) {
   const n = Math.min(1, Math.abs(sd) / 500);
   const p = n * 0.62 + (1 - (1 - n) * (1 - n)) * 0.38;
@@ -619,6 +654,15 @@ function render() {
   document.getElementById('hazardBtn').classList.toggle('active', !!(m.leftBlinker && m.rightBlinker));
   document.getElementById('leftBsdBtn').classList.toggle('active', !!m.leftBlindspot);
   document.getElementById('rightBsdBtn').classList.toggle('active', !!m.rightBlindspot);
+  const pdwLabels = { pdwFl: '전좌 FL', pdwFc: '전중 FC', pdwFr: '전우 FR', pdwRl: '후좌 RL', pdwRc: '후중 RC', pdwRr: '후우 RR' };
+  document.querySelectorAll('#pdwBtns .btn').forEach(b => {
+    const k = b.dataset.pdw;
+    const lv = +(m[k] || 0);
+    b.textContent = pdwLabels[k] + ': ' + lv;
+    b.classList.toggle('active', lv > 0);
+  });
+  document.getElementById('rccaLBtn').classList.toggle('active', !!m.rccaLeft);
+  document.getElementById('rccaRBtn').classList.toggle('active', !!m.rccaRight);
   document.getElementById('pbrakeBtn').classList.toggle('active', !!m.pbrake);
   document.getElementById('milBtn').classList.toggle('active', !!m.milOn);
   document.getElementById('screenOffBtn').classList.toggle('active', !!m.screenOff);

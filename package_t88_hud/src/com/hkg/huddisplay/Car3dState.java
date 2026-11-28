@@ -21,6 +21,11 @@ public final class Car3dState {
     public float blindRightDanger;
     public final float[] doorEased = new float[6];
     public float doorBlink;
+    public boolean pdwActive;
+    public final float[] pdwLevel = new float[6]; // FL, FC, FR, RL, RC, RR (0..3)
+    public float pdwPulse;
+    public float rccaLeftAnim;
+    public float rccaRightAnim;
     public int bodyColorId;
     public boolean demoMode;
     public boolean visible = true;
@@ -49,6 +54,11 @@ public final class Car3dState {
         blindRightDanger = s.blindRightDanger;
         System.arraycopy(s.doorEased, 0, doorEased, 0, 6);
         doorBlink = s.doorBlink;
+        pdwActive = s.pdwActive;
+        System.arraycopy(s.pdwLevel, 0, pdwLevel, 0, 6);
+        pdwPulse = s.pdwPulse;
+        rccaLeftAnim = s.rccaLeftAnim;
+        rccaRightAnim = s.rccaRightAnim;
         bodyColorId = s.bodyColorId;
         demoMode = s.demoMode;
         visible = s.visible;

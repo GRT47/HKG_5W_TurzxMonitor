@@ -95,6 +95,11 @@ public final class HudState {
     public float tpmsFrPsi = 0f;
     public float tpmsRlPsi = 0f;
     public float tpmsRrPsi = 0f;
+    public boolean pdwActive = false;
+    public int pdwOption = 0;
+    public int pdwFl = 0, pdwFc = 0, pdwFr = 0;
+    public int pdwRl = 0, pdwRc = 0, pdwRr = 0;
+    public boolean rccaLeft = false, rccaRight = false;
 
     // Climate
     public boolean hvacValid = false;
@@ -218,6 +223,16 @@ public final class HudState {
         c.tpmsFrPsi = tpmsFrPsi;
         c.tpmsRlPsi = tpmsRlPsi;
         c.tpmsRrPsi = tpmsRrPsi;
+        c.pdwActive = pdwActive;
+        c.pdwOption = pdwOption;
+        c.pdwFl = pdwFl;
+        c.pdwFc = pdwFc;
+        c.pdwFr = pdwFr;
+        c.pdwRl = pdwRl;
+        c.pdwRc = pdwRc;
+        c.pdwRr = pdwRr;
+        c.rccaLeft = rccaLeft;
+        c.rccaRight = rccaRight;
 
         c.hvacValid = hvacValid;
         c.hvacOn = hvacOn;
@@ -436,6 +451,20 @@ public final class HudState {
             pbrake = body.optBoolean("pbrake", false);
             headLamp = body.optBoolean("headLamp", false);
             if (!directFresh) brakeLamp = body.optBoolean("brakeLamp", false);
+        }
+
+        JSONObject pdw = root.optJSONObject("pdw");
+        if (pdw != null) {
+            pdwActive = pdw.optBoolean("active", false);
+            pdwOption = pdw.optInt("option", 0);
+            pdwFl = Math.max(0, Math.min(3, pdw.optInt("fl", 0)));
+            pdwFc = Math.max(0, Math.min(3, pdw.optInt("fc", 0)));
+            pdwFr = Math.max(0, Math.min(3, pdw.optInt("fr", 0)));
+            pdwRl = Math.max(0, Math.min(3, pdw.optInt("rl", 0)));
+            pdwRc = Math.max(0, Math.min(3, pdw.optInt("rc", 0)));
+            pdwRr = Math.max(0, Math.min(3, pdw.optInt("rr", 0)));
+            rccaLeft = pdw.optBoolean("rccaL", false);
+            rccaRight = pdw.optBoolean("rccaR", false);
         }
 
         JSONObject ice = root.optJSONObject("ice");

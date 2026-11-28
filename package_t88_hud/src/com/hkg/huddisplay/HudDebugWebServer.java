@@ -415,6 +415,16 @@ public final class HudDebugWebServer {
             if (j.has("rightBlinker")) { manual.rightBlinker = j.optBoolean("rightBlinker"); simChanged = true; }
             if (j.has("leftBlindspot")) { manual.leftBlindspot = j.optBoolean("leftBlindspot"); simChanged = true; }
             if (j.has("rightBlindspot")) { manual.rightBlindspot = j.optBoolean("rightBlindspot"); simChanged = true; }
+            if (j.has("pdwActive")) { manual.pdwActive = j.optBoolean("pdwActive"); simChanged = true; }
+            if (j.has("pdwOption")) { manual.pdwOption = j.optInt("pdwOption"); simChanged = true; }
+            if (j.has("pdwFl")) { manual.pdwFl = Math.max(0, Math.min(3, j.optInt("pdwFl"))); simChanged = true; }
+            if (j.has("pdwFc")) { manual.pdwFc = Math.max(0, Math.min(3, j.optInt("pdwFc"))); simChanged = true; }
+            if (j.has("pdwFr")) { manual.pdwFr = Math.max(0, Math.min(3, j.optInt("pdwFr"))); simChanged = true; }
+            if (j.has("pdwRl")) { manual.pdwRl = Math.max(0, Math.min(3, j.optInt("pdwRl"))); simChanged = true; }
+            if (j.has("pdwRc")) { manual.pdwRc = Math.max(0, Math.min(3, j.optInt("pdwRc"))); simChanged = true; }
+            if (j.has("pdwRr")) { manual.pdwRr = Math.max(0, Math.min(3, j.optInt("pdwRr"))); simChanged = true; }
+            if (j.has("rccaLeft")) { manual.rccaLeft = j.optBoolean("rccaLeft"); simChanged = true; }
+            if (j.has("rccaRight")) { manual.rccaRight = j.optBoolean("rccaRight"); simChanged = true; }
             if (j.has("pbrake")) { manual.pbrake = j.optBoolean("pbrake"); simChanged = true; }
             if (j.has("milOn")) { manual.milOn = j.optBoolean("milOn"); simChanged = true; }
             if (j.has("screenOff")) { manual.screenOff = j.optBoolean("screenOff"); simChanged = true; }
@@ -501,6 +511,11 @@ public final class HudDebugWebServer {
             manual.rightBlinker = false;
             manual.leftBlindspot = false;
             manual.rightBlindspot = false;
+            manual.pdwActive = false;
+            manual.pdwOption = 0;
+            manual.pdwFl = 0; manual.pdwFc = 0; manual.pdwFr = 0;
+            manual.pdwRl = 0; manual.pdwRc = 0; manual.pdwRr = 0;
+            manual.rccaLeft = false; manual.rccaRight = false;
             for (int i = 0; i < 6; i++) manual.doors[i] = false;
 
             Integer wantTheme = null;
@@ -583,6 +598,16 @@ public final class HudDebugWebServer {
                 trafficRightFarD = 42.0f;
                 trafficLaneOffset = 3.4f;
                 wantTheme = Integer.valueOf(HudState.THEME_DARK);
+            } else if ("pdw_park".equals(name)) {
+                manual.gearPos = "R"; manual.speedKph = 4; manual.pbrake = false;
+                manual.cruiseActive = false; manual.latActive = false;
+                manual.headLamp = true; manual.brakeLamp = false;
+                manual.curveC2 = 0f; manual.steerDeg = 35f;
+                manual.hasLead = false; showTraffic = false;
+                manual.pdwActive = true; manual.pdwOption = 2;
+                manual.pdwFl = 2; manual.pdwFc = 0; manual.pdwFr = 1;
+                manual.pdwRl = 3; manual.pdwRc = 2; manual.pdwRr = 1;
+                wantTheme = Integer.valueOf(HudState.THEME_DARK);
             }
             if (listener != null) {
                 listener.onApplyAppConfig("manual", wantTheme, wantPt, null, null, null);
@@ -650,6 +675,16 @@ public final class HudDebugWebServer {
             sim.put("rightBlinker", manual.rightBlinker);
             sim.put("leftBlindspot", manual.leftBlindspot);
             sim.put("rightBlindspot", manual.rightBlindspot);
+            sim.put("pdwActive", manual.pdwActive);
+            sim.put("pdwOption", manual.pdwOption);
+            sim.put("pdwFl", manual.pdwFl);
+            sim.put("pdwFc", manual.pdwFc);
+            sim.put("pdwFr", manual.pdwFr);
+            sim.put("pdwRl", manual.pdwRl);
+            sim.put("pdwRc", manual.pdwRc);
+            sim.put("pdwRr", manual.pdwRr);
+            sim.put("rccaLeft", manual.rccaLeft);
+            sim.put("rccaRight", manual.rccaRight);
             sim.put("pbrake", manual.pbrake);
             sim.put("milOn", manual.milOn);
             sim.put("screenOff", manual.screenOff);

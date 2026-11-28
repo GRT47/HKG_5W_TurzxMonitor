@@ -158,6 +158,9 @@ public final class HudRenderer {
     private float blindLeftFade = 0f, blindRightFade = 0f;
     private float blindLeftDanger = 0f, blindRightDanger = 0f;
     private float blindLeftAnim = 0f, blindRightAnim = 0f;
+    private float pdwCamBlend = 0f;
+    private float curPdwPulse = 0f;
+    private float rccaLeftAnim = 0f, rccaRightAnim = 0f;
     private volatile boolean forceParkView = false;
     private volatile String availableUpdateVer = "";
 
@@ -659,6 +662,28 @@ public final class HudRenderer {
             float bsdUrg = 0.25f + 0.75f * (ut * ut * (3f - 2f * ut));
             blindLeftAnim = blindLeftFade * (bsdCalm + (bsdUrg - bsdCalm) * blindLeftDanger);
             blindRightAnim = blindRightFade * (bsdCalm + (bsdUrg - bsdCalm) * blindRightDanger);
+
+            int maxPdw = Math.max(Math.max(s.pdwFl, Math.max(s.pdwFc, s.pdwFr)),
+                    Math.max(s.pdwRl, Math.max(s.pdwRc, s.pdwRr)));
+            boolean pdwEngage = !parked && ("R".equals(gear) || maxPdw > 0 || s.rccaLeft || s.rccaRight);
+            float pdwStep = dt / 0.72f;
+            if (pdwEngage) pdwCamBlend = Math.min(1f, pdwCamBlend + pdwStep);
+            else pdwCamBlend = Math.max(0f, pdwCamBlend - pdwStep);
+            float pe = pdwCamBlend * pdwCamBlend * pdwCamBlend * (pdwCamBlend * (pdwCamBlend * 6f - 15f) + 10f);
+
+            float rawPdwP = 0.5f + 0.5f * (float) Math.sin(camSimTimeSec * Math.PI * 2.0 * 3.6);
+            float ptNorm = Math.max(0f, Math.min(1f, (rawPdwP - 0.14f) / 0.72f));
+            curPdwPulse = ptNorm * ptNorm * (3f - 2f * ptNorm);
+
+            float rccaUp = dt / 0.14f;
+            float rccaDown = dt / 0.22f;
+            boolean rccaLOn = !parked && s.rccaLeft;
+            boolean rccaROn = !parked && s.rccaRight;
+            if (rccaLeftAnim < (rccaLOn ? 1f : 0f)) rccaLeftAnim = Math.min(1f, rccaLeftAnim + rccaUp);
+            else if (rccaLeftAnim > (rccaLOn ? 1f : 0f)) rccaLeftAnim = Math.max(0f, rccaLeftAnim - rccaDown);
+            if (rccaRightAnim < (rccaROn ? 1f : 0f)) rccaRightAnim = Math.min(1f, rccaRightAnim + rccaUp);
+            else if (rccaRightAnim > (rccaROn ? 1f : 0f)) rccaRightAnim = Math.max(0f, rccaRightAnim - rccaDown);
+
             if (driveAutoReturnArmed && !orbitTouchActive && driveOrbitIdleSec >= ORBIT_AUTO_RESET_SEC) {
                 driveAutoReturnArmed = false;
                 driveResetting = true;
@@ -686,6 +711,16 @@ public final class HudRenderer {
             float dYawDeg = wrapDeg180(driveYawDeg - curChaseYawDeg * (1f - om * 0.7f));
             float dPitchDeg = 3.60f + drivePitchDeg;
             float dFov = 20.0f + (32.0f - 20.0f) * om;
+
+            float pdwW = pe * (1f - om);
+            if (pdwW > 0.001f) {
+                dTgtX = dTgtX + (0.0f - dTgtX) * pdwW;
+                dTgtY = dTgtY + (0.28f - dTgtY) * pdwW;
+                dTgtZ = dTgtZ + (-0.08f - dTgtZ) * pdwW;
+                dDist = dDist + (10.4f * driveZoom - dDist) * pdwW;
+                dPitchDeg = dPitchDeg + ((43.0f + drivePitchDeg) - dPitchDeg) * pdwW;
+                dFov = dFov + (34.0f - dFov) * pdwW;
+            }
 
             float demoSway = (demoMode && doorMask == 0 && !doorFocusActive
                     && !parkAutoReturnArmed && !orbitTouchActive && camOrbitIdleSec > 3.5f)
@@ -740,6 +775,17 @@ public final class HudRenderer {
             out3dState.blindRightAnim = blindRightAnim;
             out3dState.blindLeftDanger = blindLeftDanger;
             out3dState.blindRightDanger = blindRightDanger;
+            boolean pdwArmed = !parked && (s.pdwActive || "R".equals(gear));
+            out3dState.pdwActive = pdwArmed;
+            out3dState.pdwLevel[0] = parked ? 0f : s.pdwFl;
+            out3dState.pdwLevel[1] = parked ? 0f : s.pdwFc;
+            out3dState.pdwLevel[2] = parked ? 0f : s.pdwFr;
+            out3dState.pdwLevel[3] = parked ? 0f : s.pdwRl;
+            out3dState.pdwLevel[4] = parked ? 0f : s.pdwRc;
+            out3dState.pdwLevel[5] = parked ? 0f : s.pdwRr;
+            out3dState.pdwPulse = curPdwPulse;
+            out3dState.rccaLeftAnim = rccaLeftAnim;
+            out3dState.rccaRightAnim = rccaRightAnim;
             System.arraycopy(doorEased, 0, out3dState.doorEased, 0, 6);
             out3dState.doorBlink = curDoorBlink;
             out3dState.bodyColorId = bodyColorId;
@@ -893,6 +939,9 @@ public final class HudRenderer {
         }
         if (anyDoor && vz != null) {
             drawDoorAlertBanner(c, vz, drivingGear, driveOrbit, anyBlinker);
+        }
+        if (vz != null && drivingGear) {
+            drawPdwAlertBanner(c, s, vz);
         }
         if (showStatusPill || (!demoMode && !s.hubConnected)) {
             drawStatusPill(c, s, fps, demoMode);
@@ -1191,6 +1240,59 @@ public final class HudRenderer {
             text(c, lbl, bx0 + 19f, by0 + bh * 0.5f + 5.4f, tSize, true,
                     withAlpha(0xFFFFFF, fade));
         }
+    }
+
+    private void drawPdwAlertBanner(Canvas c, HudState s, float[] vz) {
+        int fMax = Math.max(s.pdwFl, Math.max(s.pdwFc, s.pdwFr));
+        int rMax = Math.max(s.pdwRl, Math.max(s.pdwRc, s.pdwRr));
+        int maxL = Math.max(fMax, rMax);
+        boolean rcca = s.rccaLeft || s.rccaRight;
+        if (maxL <= 0 && !rcca) return;
+
+        String msg;
+        if (rcca) {
+            msg = (s.rccaLeft && s.rccaRight) ? "후방 좌·우 교차 위험"
+                    : (s.rccaLeft ? "후방 좌측 교차 위험" : "후방 우측 교차 위험");
+        } else if (fMax > 0 && rMax > 0) {
+            msg = "전·후방 주차센서 감지";
+        } else if (fMax > 0) {
+            msg = "전방 주차센서 감지";
+        } else {
+            msg = "후방 주차센서 감지";
+        }
+
+        int effL = rcca ? 3 : maxL;
+        int coreRgb;
+        if (effL >= 3) coreRgb = 0xEF4444;
+        else if (effL == 2) coreRgb = 0xF97316;
+        else coreRgb = 0xEAB308;
+
+        float blink = (effL >= 3) ? curPdwPulse : 0.7f;
+        float tSize = 14.5f;
+        float tw = measure(msg, tSize, true);
+        float bw = tw + 38f;
+        float bh = 28f;
+        float bx0 = vz[0] + vz[2] * 0.50f - bw * 0.5f;
+        float by0 = vz[1] + vz[3] - bh - 16f;
+
+        if (effL >= 3 && blink > 0.15f) {
+            roundRect(c, bx0 - 3f, by0 - 3f, bx0 + bw + 3f, by0 + bh + 3f, 16f,
+                    withAlpha(coreRgb, 0.30f * blink));
+        }
+        int bgOff = lightTheme ? 0xF5FFFFFF : 0xEB111620;
+        int bgCol = (effL >= 3) ? blendRgb(bgOff, 0xDC2626, blink * 0.85f) : bgOff;
+        roundRect(c, bx0, by0, bx0 + bw, by0 + bh, 14f, bgCol);
+        pStroke.setColor(withAlpha(coreRgb, 0.72f + 0.28f * blink));
+        pStroke.setStrokeWidth(1.8f);
+        rf.set(bx0, by0, bx0 + bw, by0 + bh);
+        c.drawRoundRect(rf, 14f, 14f, pStroke);
+
+        pFill.setShader(null);
+        pFill.setColor(coreRgb);
+        c.drawCircle(bx0 + 13f, by0 + bh * 0.5f, 4.2f, pFill);
+
+        int txtCol = (effL >= 3 || !lightTheme) ? 0xFFFFFFFF : 0xFF0F172A;
+        text(c, msg, bx0 + 23f, by0 + bh * 0.5f + 5.2f, tSize, true, txtCol);
     }
 
     private void drawDoorAlertBanner(Canvas c, float[] vz, boolean driving, boolean belowResetPill, boolean belowBlinkers) {

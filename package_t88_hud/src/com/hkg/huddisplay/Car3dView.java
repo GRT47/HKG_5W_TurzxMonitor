@@ -318,7 +318,55 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     + "uniform vec4 uDoorsEnd;\n"
                     + "uniform vec4 uTurnBlind;\n"
                     + "uniform vec2 uBlindDanger;\n"
+                    + "uniform vec3 uPdwFront;\n"
+                    + "uniform vec3 uPdwRear;\n"
+                    + "uniform vec4 uPdwMeta;\n"
                     + "out vec4 fragColor;\n"
+                    + "vec4 pdwEndArcs(vec2 p, float endSign, vec3 lvls, float pulse, float armed, float lightTheme) {\n"
+                    + "    float maxL = max(lvls.x, max(lvls.y, lvls.z));\n"
+                    + "    if (maxL < 0.05 && armed < 0.05) return vec4(0.0);\n"
+                    + "    vec2 d = vec2(p.x, (p.y - endSign * 1.38) * endSign);\n"
+                    + "    if (d.y < 0.50) return vec4(0.0);\n"
+                    + "    float r = length(vec2(d.x / 1.32, d.y / 0.95));\n"
+                    + "    if (r < 0.88 || r > 2.10) return vec4(0.0);\n"
+                    + "    float ang = atan(d.x, d.y);\n"
+                    + "    float mL = smoothstep(-1.04, -0.99, ang) * (1.0 - smoothstep(-0.42, -0.37, ang));\n"
+                    + "    float mC = smoothstep(0.35, 0.31, abs(ang));\n"
+                    + "    float mR = smoothstep(0.37, 0.42, ang) * (1.0 - smoothstep(0.99, 1.04, ang));\n"
+                    + "    float secM = max(mL, max(mC, mR));\n"
+                    + "    if (secM <= 0.01) return vec4(0.0);\n"
+                    + "    float lvl = (ang < -0.37) ? lvls.x : ((ang > 0.37) ? lvls.z : lvls.y);\n"
+                    + "    float b3 = smoothstep(0.95, 1.00, r) * (1.0 - smoothstep(1.22, 1.27, r));\n"
+                    + "    float b2 = smoothstep(1.31, 1.36, r) * (1.0 - smoothstep(1.58, 1.63, r));\n"
+                    + "    float b1 = smoothstep(1.67, 1.72, r) * (1.0 - smoothstep(1.94, 1.99, r));\n"
+                    + "    float allBars = max(b1, max(b2, b3));\n"
+                    + "    float lit = 0.0;\n"
+                    + "    if (lvl >= 0.5) lit = max(lit, b1);\n"
+                    + "    if (lvl >= 1.5) lit = max(lit, b2);\n"
+                    + "    if (lvl >= 2.5) lit = max(lit, b3);\n"
+                    + "    if (lit > 0.01) {\n"
+                    + "        vec3 c1 = mix(vec3(1.00, 0.82, 0.14), vec3(0.86, 0.62, 0.02), lightTheme);\n"
+                    + "        vec3 c2 = mix(vec3(1.00, 0.46, 0.08), vec3(0.92, 0.36, 0.04), lightTheme);\n"
+                    + "        vec3 c3 = vec3(1.00, 0.16, 0.14);\n"
+                    + "        vec3 col = (lvl < 1.5) ? c1 : ((lvl < 2.5) ? c2 : c3);\n"
+                    + "        float pMul = (lvl >= 2.5) ? (0.58 + 0.42 * pulse) : 1.0;\n"
+                    + "        float a = clamp(lit * secM * mix(0.86, 0.78, lightTheme) * pMul, 0.0, 0.90);\n"
+                    + "        return vec4(col, a);\n"
+                    + "    }\n"
+                    + "    float ghostA = allBars * secM * 0.11 * armed;\n"
+                    + "    vec3 ghostCol = mix(vec3(0.55, 0.64, 0.78), vec3(0.35, 0.42, 0.55), lightTheme);\n"
+                    + "    return vec4(ghostCol, ghostA);\n"
+                    + "}\n"
+                    + "float rccaWave(vec2 p, float sideSign, float anim, float pulse) {\n"
+                    + "    if (anim <= 0.01) return 0.0;\n"
+                    + "    float sx = p.x * sideSign;\n"
+                    + "    if (sx < 0.85 || sx > 2.90 || p.y < 1.35 || p.y > 3.90) return 0.0;\n"
+                    + "    vec2 q = vec2(sx - 0.85, (p.y - 2.15) * 0.82);\n"
+                    + "    float rad = length(q);\n"
+                    + "    float arcs = smoothstep(0.11, 0.0, abs(rad - 0.72)) + smoothstep(0.11, 0.0, abs(rad - 1.18)) * 0.82;\n"
+                    + "    float env = exp(-rad * 0.65) * smoothstep(0.85, 1.15, sx);\n"
+                    + "    return clamp(arcs * env * anim * (0.52 + 0.48 * pulse), 0.0, 0.82);\n"
+                    + "}\n"
                     + "float doorPuddle(vec2 p, vec2 c, vec2 r, float open) {\n"
                     + "    if (open <= 0.01) return 0.0;\n"
                     + "    vec2 d = (p - c) / r;\n"
@@ -417,8 +465,14 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     + "    vec3 bLCol = mix(vec3(1.00, 0.48, 0.08), vec3(1.00, 0.14, 0.20), uBlindDanger.x);\n"
                     + "    vec3 bRCol = mix(vec3(1.00, 0.48, 0.08), vec3(1.00, 0.14, 0.20), uBlindDanger.y);\n"
                     + "\n"
-                    + "    float outA = clamp(shAlpha + beamA + tailA + revBeamA + doorA + turnA + bLA + bRA, 0.0, 0.94) * edge;\n"
-                    + "    vec3 premul = (shRgb * shAlpha + beamRgb * beamA + rearGlowCol * tailA + revBeamRgb * revBeamA + doorRgb * doorA + turnRgb * turnA + bLCol * bLA + bRCol * bRA) * edge;\n"
+                    + "    vec4 pdwF = pdwEndArcs(vXZ, -1.0, uPdwFront, uPdwMeta.x, uPdwMeta.y, uLightTheme);\n"
+                    + "    vec4 pdwR = pdwEndArcs(vXZ,  1.0, uPdwRear,  uPdwMeta.x, uPdwMeta.y, uLightTheme);\n"
+                    + "    float rccaLA = rccaWave(vXZ, -1.0, uPdwMeta.z, uPdwMeta.x) * mix(0.82, 0.65, uLightTheme);\n"
+                    + "    float rccaRA = rccaWave(vXZ,  1.0, uPdwMeta.w, uPdwMeta.x) * mix(0.82, 0.65, uLightTheme);\n"
+                    + "    vec3 rccaCol = vec3(1.00, 0.14, 0.16);\n"
+                    + "\n"
+                    + "    float outA = clamp(shAlpha + beamA + tailA + revBeamA + doorA + turnA + bLA + bRA + pdwF.a + pdwR.a + rccaLA + rccaRA, 0.0, 0.94) * edge;\n"
+                    + "    vec3 premul = (shRgb * shAlpha + beamRgb * beamA + rearGlowCol * tailA + revBeamRgb * revBeamA + doorRgb * doorA + turnRgb * turnA + bLCol * bLA + bRCol * bRA + pdwF.rgb * pdwF.a + pdwR.rgb * pdwR.a + rccaCol * (rccaLA + rccaRA)) * edge;\n"
                     + "    fragColor = vec4(premul, outA);\n"
                     + "}\n";
 
@@ -624,7 +678,7 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
         private int uModelLoc, uVpLoc, uPosScaleLoc, uMatLoc, uCamPosLoc, uBodyRgbLoc, uHeadLoc, uBrakeLoc, uRevLoc, uLightLoc, uTurnLeftLoc, uTurnRightLoc;
 
         private int floorProgram;
-        private int fVpLoc, fHeadLoc, fBrakeLoc, fRevLoc, fParkLoc, fLightLoc, fDoorsSideLoc, fDoorsEndLoc, fTurnBlindLoc, fBlindDangerLoc;
+        private int fVpLoc, fHeadLoc, fBrakeLoc, fRevLoc, fParkLoc, fLightLoc, fDoorsSideLoc, fDoorsEndLoc, fTurnBlindLoc, fBlindDangerLoc, fPdwFrontLoc, fPdwRearLoc, fPdwMetaLoc;
 
         private int bloomProgram;
         private int bModelLoc, bVpLoc, bCamPosLoc, bBrakeLoc, bLightLoc, bBloomModeLoc, bFaceDirLoc;
@@ -885,6 +939,9 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
             fDoorsEndLoc = GLES30.glGetUniformLocation(floorProgram, "uDoorsEnd");
             fTurnBlindLoc = GLES30.glGetUniformLocation(floorProgram, "uTurnBlind");
             fBlindDangerLoc = GLES30.glGetUniformLocation(floorProgram, "uBlindDanger");
+            fPdwFrontLoc = GLES30.glGetUniformLocation(floorProgram, "uPdwFront");
+            fPdwRearLoc = GLES30.glGetUniformLocation(floorProgram, "uPdwRear");
+            fPdwMetaLoc = GLES30.glGetUniformLocation(floorProgram, "uPdwMeta");
 
             bModelLoc = GLES30.glGetUniformLocation(bloomProgram, "uModel");
             bVpLoc = GLES30.glGetUniformLocation(bloomProgram, "uViewProj");
@@ -1231,6 +1288,13 @@ public final class Car3dView extends TextureView implements TextureView.SurfaceT
                     localState.blindLeftAnim, localState.blindRightAnim);
             GLES30.glUniform2f(fBlindDangerLoc,
                     localState.blindLeftDanger, localState.blindRightDanger);
+            GLES30.glUniform3f(fPdwFrontLoc,
+                    localState.pdwLevel[0], localState.pdwLevel[1], localState.pdwLevel[2]);
+            GLES30.glUniform3f(fPdwRearLoc,
+                    localState.pdwLevel[3], localState.pdwLevel[4], localState.pdwLevel[5]);
+            GLES30.glUniform4f(fPdwMetaLoc,
+                    localState.pdwPulse, localState.pdwActive ? 1f : 0f,
+                    localState.rccaLeftAnim, localState.rccaRightAnim);
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, floorVbo);
             GLES30.glEnableVertexAttribArray(0);
             GLES30.glDisableVertexAttribArray(1);
