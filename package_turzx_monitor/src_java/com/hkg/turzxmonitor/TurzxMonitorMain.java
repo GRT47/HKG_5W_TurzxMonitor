@@ -371,6 +371,12 @@ public class TurzxMonitorMain {
         public String albumArtSource = "none";
         public String albumArtTrackKey = "";
         public int albumArtSeq = 0;
+        public boolean reverseMicom = false;
+        public int pdwOption = 0;
+        public int pdwFl = 0, pdwFc = 0, pdwFr = 0;
+        public int pdwRl = 0, pdwRc = 0, pdwRr = 0;
+        public boolean rccaLeft = false, rccaRight = false;
+        public long pdwLastRxMs = 0L;
 
         public double getEffectiveSocPct() {
             if (displaySocPct >= 0.0) return displaySocPct;
@@ -7320,11 +7326,45 @@ public class TurzxMonitorMain {
             }
         }
 
+        static void parseMicomPdwPacket(int rcv, int fh, int fl, byte[] data, TelemetrySnapshot s) {
+            if (data == null || s == null || rcv != 0x8A || fh != 0x81) return;
+            if (fl == 0x1B && data.length >= 1) {
+                s.reverseMicom = (data[0] & 0xFF) != 0;
+                return;
+            }
+            if (fl == 0x34 && data.length >= 2) {
+                int type = data[0] & 0xFF;
+                int val = data[1] & 0xFF;
+                int lvl = Math.max(0, Math.min(3, val));
+                s.pdwLastRxMs = System.currentTimeMillis();
+                switch (type) {
+                    case 0x07: s.rccaLeft = (val != 0); break;
+                    case 0x08: s.rccaRight = (val != 0); break;
+                    case 0x09: s.pdwFl = lvl; break;
+                    case 0x0A: s.pdwFc = lvl; break;
+                    case 0x0B: s.pdwFr = lvl; break;
+                    case 0x0C: s.pdwRl = lvl; break;
+                    case 0x0D: s.pdwRc = lvl; break;
+                    case 0x0E: s.pdwRr = lvl; break;
+                    case 0x0F:
+                        s.pdwOption = val;
+                        if (val == 0) {
+                            s.pdwFl = 0; s.pdwFc = 0; s.pdwFr = 0;
+                            s.pdwRl = 0; s.pdwRc = 0; s.pdwRr = 0;
+                            s.rccaLeft = false; s.rccaRight = false;
+                        }
+                        break;
+                    default: break;
+                }
+            }
+        }
+
         static void onMicomPacket(byte rcv, byte fh, byte fl, byte[] data) {
             try {
                 String g;
                 synchronized (liveSnapshot) {
                     g = parseMicomIcePacket(rcv, fh, fl, data, liveSnapshot);
+                    parseMicomPdwPacket(rcv & 0xFF, fh & 0xFF, fl & 0xFF, data, liveSnapshot);
                 }
                 if (g != null && !g.isEmpty()) {
                     lastMicomGearPos = g;
@@ -9215,6 +9255,17 @@ public class TurzxMonitorMain {
             c.albumArtSource = liveSnapshot.albumArtSource;
             c.albumArtTrackKey = liveSnapshot.albumArtTrackKey;
             c.albumArtSeq = liveSnapshot.albumArtSeq;
+            c.reverseMicom = liveSnapshot.reverseMicom;
+            c.pdwOption = liveSnapshot.pdwOption;
+            c.pdwFl = liveSnapshot.pdwFl;
+            c.pdwFc = liveSnapshot.pdwFc;
+            c.pdwFr = liveSnapshot.pdwFr;
+            c.pdwRl = liveSnapshot.pdwRl;
+            c.pdwRc = liveSnapshot.pdwRc;
+            c.pdwRr = liveSnapshot.pdwRr;
+            c.rccaLeft = liveSnapshot.rccaLeft;
+            c.rccaRight = liveSnapshot.rccaRight;
+            c.pdwLastRxMs = liveSnapshot.pdwLastRxMs;
             return c;
         }
     }
@@ -15128,6 +15179,20 @@ public class TurzxMonitorMain {
         sb.append(",\"albumArtSource\":\"").append(escapeJson(ev.albumArtSource)).append("\"");
         sb.append(",\"albumArtSeq\":").append(ev.albumArtSeq);
         sb.append("}");
+        boolean pdwActive = ev.pdwOption > 0 || ev.pdwFl > 0 || ev.pdwFc > 0 || ev.pdwFr > 0
+                || ev.pdwRl > 0 || ev.pdwRc > 0 || ev.pdwRr > 0 || ev.rccaLeft || ev.rccaRight;
+        sb.append(",\"pdw\":{");
+        sb.append("\"active\":").append(pdwActive);
+        sb.append(",\"option\":").append(ev.pdwOption);
+        sb.append(",\"fl\":").append(ev.pdwFl);
+        sb.append(",\"fc\":").append(ev.pdwFc);
+        sb.append(",\"fr\":").append(ev.pdwFr);
+        sb.append(",\"rl\":").append(ev.pdwRl);
+        sb.append(",\"rc\":").append(ev.pdwRc);
+        sb.append(",\"rr\":").append(ev.pdwRr);
+        sb.append(",\"rccaL\":").append(ev.rccaLeft);
+        sb.append(",\"rccaR\":").append(ev.rccaRight);
+        sb.append("}");
         sb.append(",\"usb\":{");
         sb.append("\"connected\":").append(TurzxUsbDriver.isConnected());
         sb.append(",\"panel\":\"").append(escapeJson(TurzxFrameRenderer.getActivePanelLabel())).append("\"");
@@ -18916,6 +18981,27 @@ public class TurzxMonitorMain {
         assertTrue(TelemetryCollector.resolveCurrentAlbumArtJpegBytes() == null
                 && TelemetryCollector.getLatestSnapshot().albumArtSeq == 0,
                 "Expected cleared albumArtBitmap to reset albumArtSeq and clear /albumart.jpg bytes");
+
+        // Replay real-car 8A.81.1B / 8A.81.34 PDW & RCCA parking sensor sequence from HKG_TurzxMonitor_Log
+        TelemetryCollector.onMicomPacket((byte) 0x8A, (byte) 0x81, (byte) 0x1B, new byte[]{0x01});
+        TelemetryCollector.onMicomPacket((byte) 0x8A, (byte) 0x81, (byte) 0x34, new byte[]{0x0F, 0x02});
+        TelemetryCollector.onMicomPacket((byte) 0x8A, (byte) 0x81, (byte) 0x34, new byte[]{0x0C, 0x02});
+        TelemetryCollector.onMicomPacket((byte) 0x8A, (byte) 0x81, (byte) 0x34, new byte[]{0x0D, 0x01});
+        TelemetryCollector.onMicomPacket((byte) 0x8A, (byte) 0x81, (byte) 0x34, new byte[]{0x09, 0x02});
+        TelemetryCollector.onMicomPacket((byte) 0x8A, (byte) 0x81, (byte) 0x34, new byte[]{0x07, 0x01});
+        TelemetrySnapshot pdwSnap = TelemetryCollector.getLatestSnapshot();
+        assertTrue(pdwSnap.reverseMicom && pdwSnap.pdwOption == 2
+                && pdwSnap.pdwRl == 2 && pdwSnap.pdwRc == 1 && pdwSnap.pdwFl == 2 && pdwSnap.rccaLeft,
+                "Expected 8A.81.34 PDW & RCCA states to populate TelemetrySnapshot");
+        String pdwJson = formatTelemetryJson(pdwSnap);
+        assertTrue(pdwJson.contains("\"pdw\":{\"active\":true,\"option\":2,\"fl\":2,\"fc\":0,\"fr\":0,\"rl\":2,\"rc\":1,\"rr\":0,\"rccaL\":true,\"rccaR\":false}"),
+                "Expected serialized /status.json pdw object: " + pdwJson);
+        TelemetryCollector.onMicomPacket((byte) 0x8A, (byte) 0x81, (byte) 0x34, new byte[]{0x0F, 0x00});
+        TelemetryCollector.onMicomPacket((byte) 0x8A, (byte) 0x81, (byte) 0x1B, new byte[]{0x00});
+        TelemetrySnapshot pdwCleared = TelemetryCollector.getLatestSnapshot();
+        assertTrue(!pdwCleared.reverseMicom && pdwCleared.pdwOption == 0
+                && pdwCleared.pdwRl == 0 && pdwCleared.pdwFl == 0 && !pdwCleared.rccaLeft,
+                "Expected 8A.81.34 [0F 00] to clear all PDW & RCCA states");
 
         System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + Chromium 1:1 HUD Assets + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");
     }
