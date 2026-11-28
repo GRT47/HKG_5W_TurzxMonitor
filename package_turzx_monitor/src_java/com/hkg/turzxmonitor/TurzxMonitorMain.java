@@ -3514,6 +3514,7 @@ public class TurzxMonitorMain {
                 // 1. Driving visualisation
                 float[] vz = L.rect("viz");
                 boolean parked = "P".equals(gear);
+                boolean pdwActive = isPdwVisualActive(s, gear);
                 if (vz != null) {
                     int sc = ((Integer) mSave.invoke(c)).intValue();
                     mPReset.invoke(path);
@@ -3521,11 +3522,15 @@ public class TurzxMonitorMain {
                     float rad = vz.length > 4 ? vz[4] : 28f;
                     mPAddRRect.invoke(path, rf, rad, rad, dirCW);
                     mClipPath.invoke(c, path);
-                    if (parked) drawParkedCached(c, vz, head, brake, iceMode);
-                    else drawRoad(c, s, vz, gear, spd, head, brake);
+                    if (parked || pdwActive) {
+                        drawParkedCached(c, vz, head, brake, iceMode);
+                        if (pdwActive) drawPdwOverlay(c, s, vz, now);
+                    } else {
+                        drawRoad(c, s, vz, gear, spd, head, brake);
+                    }
                     mRestore.invoke(c, sc);
                 }
-                drawVizOverlays(c, s, vz, gear, spd, parked, iceMode);
+                drawVizOverlays(c, s, vz, gear, spd, parked, pdwActive, iceMode);
                 if (iceMode) drawIceFuel(c, s);
                 else drawBattery(c, s, totalKw);
                 drawMedia(c, s);
@@ -4490,8 +4495,206 @@ public class TurzxMonitorMain {
                 }
             }
 
+            static int clampPdwLevel(int v) {
+                return Math.max(0, Math.min(3, v));
+            }
+
+            static int pdwMaxLevel(TelemetrySnapshot s) {
+                if (s == null) return 0;
+                int m = clampPdwLevel(s.pdwFl);
+                m = Math.max(m, clampPdwLevel(s.pdwFc));
+                m = Math.max(m, clampPdwLevel(s.pdwFr));
+                m = Math.max(m, clampPdwLevel(s.pdwRl));
+                m = Math.max(m, clampPdwLevel(s.pdwRc));
+                m = Math.max(m, clampPdwLevel(s.pdwRr));
+                return m;
+            }
+
+            static boolean isPdwVisualActive(TelemetrySnapshot s, String gear) {
+                if (s == null || "P".equals(gear)) return false;
+                return "R".equals(gear)
+                        || s.reverseMicom
+                        || s.pdwOption > 0
+                        || pdwMaxLevel(s) > 0
+                        || s.rccaLeft
+                        || s.rccaRight;
+            }
+
+            static String pdwBannerText(TelemetrySnapshot s) {
+                if (s == null) return "";
+                if (s.rccaLeft && s.rccaRight) return "후방 좌·우측 접근 위험";
+                if (s.rccaLeft) return "후방 좌측 접근 위험";
+                if (s.rccaRight) return "후방 우측 접근 위험";
+                int frontMax = Math.max(clampPdwLevel(s.pdwFl), Math.max(clampPdwLevel(s.pdwFc), clampPdwLevel(s.pdwFr)));
+                int rearMax = Math.max(clampPdwLevel(s.pdwRl), Math.max(clampPdwLevel(s.pdwRc), clampPdwLevel(s.pdwRr)));
+                if (frontMax > 0 && rearMax > 0) return "전·후방 주차센서 감지";
+                if (frontMax > 0) return "전방 주차센서 감지";
+                if (rearMax > 0) return "후방 주차센서 감지";
+                return "";
+            }
+
+            static int pdwLevelColor(int level, boolean light) {
+                if (level >= 3) return light ? 0xFFDC2626 : 0xFFFF3B4E;
+                if (level == 2) return light ? 0xFFEA580C : 0xFFFF8C24;
+                if (level == 1) return light ? 0xFFCA8A04 : 0xFFFACC15;
+                return light ? 0x261E293B : 0x22FFFFFF;
+            }
+
+            private static void drawPdwZoneArcs(Object c, float ox, float oy, float ppm,
+                                                float startDeg, float sweepDeg, int level, float pulse) throws Exception {
+                float[] radii = {1.24f * ppm, 1.50f * ppm, 1.76f * ppm};
+                float sw = Math.max(4f, 0.135f * ppm);
+                int ghostCol = pdwLevelColor(0, lightTheme);
+                int activeCol = pdwLevelColor(level, lightTheme);
+                int activeRgb = activeCol & 0x00FFFFFF;
+                float alphaMul = (level >= 3) ? (0.62f + 0.38f * pulse) : 1.0f;
+
+                for (int rIdx = 0; rIdx < 3; rIdx++) {
+                    float rad = radii[rIdx];
+                    boolean lit = (level == 1 && rIdx == 2)
+                            || (level == 2 && rIdx >= 1)
+                            || (level >= 3);
+                    if (!lit) {
+                        mSetColor.invoke(pIcon, ghostCol);
+                        mSetStrokeW.invoke(pIcon, sw * 0.65f);
+                        mPReset.invoke(path);
+                        mSetRf.invoke(rf, ox - rad, oy - rad, ox + rad, oy + rad);
+                        mPAddArc.invoke(path, rf, startDeg, sweepDeg);
+                        mDrawPath.invoke(c, path, pIcon);
+                        continue;
+                    }
+                    if (level >= 3 && rIdx == 0) {
+                        double midRad = Math.toRadians(startDeg + sweepDeg * 0.5f);
+                        float gx = ox + rad * (float) Math.cos(midRad);
+                        float gy = oy + rad * (float) Math.sin(midRad);
+                        softGlow(c, gx, gy, 0.72f * ppm, activeRgb, (lightTheme ? 0.22f : 0.32f) * alphaMul, !lightTheme);
+                    }
+                    int glowA = Math.max(0, Math.min(255, Math.round((lightTheme ? 52 : 76) * alphaMul)));
+                    mSetColor.invoke(pIcon, (glowA << 24) | activeRgb);
+                    mSetStrokeW.invoke(pIcon, sw * 2.1f);
+                    mPReset.invoke(path);
+                    mSetRf.invoke(rf, ox - rad, oy - rad, ox + rad, oy + rad);
+                    mPAddArc.invoke(path, rf, startDeg, sweepDeg);
+                    mDrawPath.invoke(c, path, pIcon);
+
+                    int coreA = Math.max(0, Math.min(255, Math.round(255f * alphaMul)));
+                    mSetColor.invoke(pIcon, (coreA << 24) | activeRgb);
+                    mSetStrokeW.invoke(pIcon, sw);
+                    mPReset.invoke(path);
+                    mSetRf.invoke(rf, ox - rad, oy - rad, ox + rad, oy + rad);
+                    mPAddArc.invoke(path, rf, startDeg, sweepDeg);
+                    mDrawPath.invoke(c, path, pIcon);
+                }
+            }
+
+            private static void drawRccaChevrons(Object c, float rx, float cy, float ppm,
+                                                 boolean isLeft, double tSec, float pulse) throws Exception {
+                float side = isLeft ? -1f : 1f;
+                int redRgb = pdwLevelColor(3, lightTheme) & 0x00FFFFFF;
+                float gcx = rx - 1.35f * ppm;
+                float gcy = cy + side * 1.15f * ppm;
+                softGlow(c, gcx, gcy, 0.68f * ppm, redRgb, (lightTheme ? 0.22f : 0.32f) * (0.65f + 0.35f * pulse), !lightTheme);
+
+                // Travel inward from rear flank (outer) toward rear bumper (inner)
+                float sx = rx - 1.65f * ppm, sy = cy + side * 1.30f * ppm;
+                float ex = rx - 0.95f * ppm, ey = cy + side * 0.85f * ppm;
+                float vxDir = ex - sx, vyDir = ey - sy;
+                float len = (float) Math.hypot(vxDir, vyDir);
+                if (len < 1f) return;
+                float ux = vxDir / len, uy = vyDir / len;
+                float px = -uy, py = ux;
+                float wave = (float) ((tSec * 2.4) % 1.0);
+                float arm = 0.22f * ppm;
+                float sw = Math.max(3.5f, 0.085f * ppm);
+
+                mSetStrokeW.invoke(pIcon, sw);
+                for (int i = 0; i < 3; i++) {
+                    float tPos = i / 2.0f;
+                    float tx = sx + vxDir * tPos;
+                    float ty = sy + vyDir * tPos;
+                    float dist = Math.abs(wave - (i / 3.0f));
+                    dist = Math.min(dist, 1.0f - dist);
+                    float wAlpha = Math.max(0.35f, 1.0f - dist * 1.6f);
+                    int alpha = Math.max(0, Math.min(255, Math.round(wAlpha * 255f)));
+                    mSetColor.invoke(pIcon, (alpha << 24) | redRgb);
+                    mPReset.invoke(path);
+                    mPMove.invoke(path, tx - ux * arm + px * arm, ty - uy * arm + py * arm);
+                    mPLine.invoke(path, tx, ty);
+                    mPLine.invoke(path, tx - ux * arm - px * arm, ty - uy * arm - py * arm);
+                    mDrawPath.invoke(c, path, pIcon);
+                }
+            }
+
+            private static void drawPdwOverlay(Object c, TelemetrySnapshot s, float[] vz, long nowNs) throws Exception {
+                if (s == null || vz == null) return;
+                float vx = vz[0], vy = vz[1], vw = vz[2], vh = vz[3];
+                boolean wide = (vh > 0f) && ((vw / vh) > 1.75f);
+                final float ppm = wide ? Math.min(vw * 0.098f, vh * 0.215f) : Math.min(vw * 0.115f, vh * 0.24f);
+                final float cx = vx + vw * (wide ? 0.535f : 0.55f);
+                final float cy = vy + vh * (wide ? 0.60f : 0.54f);
+                double tSec = nowNs / 1e9;
+                float pulse = 0.5f + 0.5f * (float) Math.sin(tSec * Math.PI * 5.0);
+
+                if (navTop != null && navReady() && navTop.bmp != null && pIcon != null && mPAddArc != null) {
+                    float fx = cx + 1.30f * ppm;
+                    float rx = cx - 1.30f * ppm;
+                    drawPdwZoneArcs(c, fx, cy, ppm, -62f, 38f, clampPdwLevel(s.pdwFl), pulse);
+                    drawPdwZoneArcs(c, fx, cy, ppm, -18f, 36f, clampPdwLevel(s.pdwFc), pulse);
+                    drawPdwZoneArcs(c, fx, cy, ppm, 24f, 38f, clampPdwLevel(s.pdwFr), pulse);
+                    drawPdwZoneArcs(c, rx, cy, ppm, 118f, 38f, clampPdwLevel(s.pdwRr), pulse);
+                    drawPdwZoneArcs(c, rx, cy, ppm, 162f, 36f, clampPdwLevel(s.pdwRc), pulse);
+                    drawPdwZoneArcs(c, rx, cy, ppm, 204f, 38f, clampPdwLevel(s.pdwRl), pulse);
+
+                    if (s.rccaLeft) drawRccaChevrons(c, rx, cy, ppm, true, tSec, pulse);
+                    if (s.rccaRight) drawRccaChevrons(c, rx, cy, ppm, false, tSec, pulse);
+                }
+
+                String banner = pdwBannerText(s);
+                if (!banner.isEmpty()) {
+                    int maxLv = pdwMaxLevel(s);
+                    boolean critical = s.rccaLeft || s.rccaRight || maxLv >= 3;
+                    int accent = pdwLevelColor(critical ? 3 : maxLv, lightTheme);
+                    float textSize = wide ? 18.5f : 22f;
+                    float tw = measure(banner, textSize, true);
+                    float pillH = wide ? 36f : 44f;
+                    float dotR = textSize * 0.24f;
+                    float padX = textSize * 0.85f;
+                    float gapDot = textSize * 0.45f;
+                    float pillW = padX * 2f + dotR * 2f + gapDot + tw;
+                    float px0 = Math.max(vx + 16f, Math.min(vx + vw - 16f - pillW, cx - pillW / 2f));
+                    float py1 = vy + vh - (wide ? 12f : 16f);
+                    float py0 = py1 - pillH;
+                    float rad = pillH * 0.5f;
+
+                    int bgCol = lightTheme
+                            ? (critical ? 0xF5FFF1F2 : 0xF2FFFFFF)
+                            : (critical ? 0xEB261216 : 0xE614161B);
+                    roundRect(c, px0, py0, px0 + pillW, py1, rad, bgCol);
+
+                    int borderCol = accent;
+                    if (critical) {
+                        int ba = Math.max(120, Math.min(255, Math.round((0.55f + 0.45f * pulse) * 255f)));
+                        borderCol = (ba << 24) | (accent & 0x00FFFFFF);
+                    }
+                    mSetStrokeW.invoke(pStroke, 2.2f);
+                    mSetColor.invoke(pStroke, borderCol);
+                    mSetRf.invoke(rf, px0, py0, px0 + pillW, py1);
+                    mDrawRoundRect.invoke(c, rf, rad, rad, pStroke);
+
+                    float dotCx = px0 + padX + dotR;
+                    float dotCy = py0 + pillH * 0.5f;
+                    mSetShader.invoke(pFill, new Object[]{null});
+                    mSetColor.invoke(pFill, borderCol);
+                    mSetRf.invoke(rf, dotCx - dotR, dotCy - dotR, dotCx + dotR, dotCy + dotR);
+                    mDrawOval.invoke(c, rf, pFill);
+
+                    int txtCol = themeColor(0xFFF5F5F7, lightTheme);
+                    text(c, banner, dotCx + dotR + gapDot, py0 + pillH * 0.5f + textSize * 0.35f, textSize, true, txtCol);
+                }
+            }
+
             private static void drawVizOverlays(Object c, TelemetrySnapshot s, float[] vz, String gear, int spd, boolean parked,
-                                                boolean iceMode) throws Exception {
+                                                boolean pdwActive, boolean iceMode) throws Exception {
                 copyActive(c, L.rect("prnd" + gear));
                 field(c, "speed", String.valueOf(spd), 0);
                 drawTelltales(c, String.valueOf(spd), BodyProbe.parkingBrakeOn(),
@@ -4547,8 +4750,8 @@ public class TurzxMonitorMain {
                 // turn-by-turn card (hidden without a destination)
                 boolean tbt = s.carrotTbtDistM > 0 && vz != null;
                 if (tbt) drawTbt(c, s, vz);
-                drawTpms(c, s, vz, parked && !tbt);
-                if (!parked) {
+                if (!pdwActive) drawTpms(c, s, vz, parked && !tbt);
+                if (!parked && !pdwActive) {
                     Field lf = L.fields.get("lane");
                     String lane = s.laneConfidencePct > 0f ? String.format(Locale.US, "%.0f%%", s.laneConfidencePct)
                             : (s.carrotConnected ? ((s.isCruiseEngaged() || s.isSteeringEngaged()) ? "ON" : "대기") : "--");
@@ -19002,6 +19205,46 @@ public class TurzxMonitorMain {
         assertTrue(!pdwCleared.reverseMicom && pdwCleared.pdwOption == 0
                 && pdwCleared.pdwRl == 0 && pdwCleared.pdwFl == 0 && !pdwCleared.rccaLeft,
                 "Expected 8A.81.34 [0F 00] to clear all PDW & RCCA states");
+
+        // Verify TeslaHud PDW visual helpers (activation, banner text, max level, dark/light palette)
+        TelemetrySnapshot uiPdw = new TelemetrySnapshot();
+        assertTrue(!TurzxFrameRenderer.TeslaHud.isPdwVisualActive(uiPdw, "D")
+                && TurzxFrameRenderer.TeslaHud.isPdwVisualActive(uiPdw, "R"),
+                "Expected PDW visual inactive in idle D and active in R");
+        uiPdw.pdwOption = 2;
+        uiPdw.pdwFl = 2;
+        uiPdw.pdwFc = 5;
+        assertTrue(!TurzxFrameRenderer.TeslaHud.isPdwVisualActive(uiPdw, "P")
+                && TurzxFrameRenderer.TeslaHud.isPdwVisualActive(uiPdw, "D")
+                && TurzxFrameRenderer.TeslaHud.pdwMaxLevel(uiPdw) == 3,
+                "Expected P gear to suppress PDW visual and clamp out-of-range PDW level");
+        assertTrue("전방 주차센서 감지".equals(TurzxFrameRenderer.TeslaHud.pdwBannerText(uiPdw)),
+                "Expected front-only PDW banner");
+        uiPdw.pdwRc = 1;
+        assertTrue("전·후방 주차센서 감지".equals(TurzxFrameRenderer.TeslaHud.pdwBannerText(uiPdw)),
+                "Expected front+rear PDW banner");
+        uiPdw.rccaLeft = true;
+        assertTrue("후방 좌측 접근 위험".equals(TurzxFrameRenderer.TeslaHud.pdwBannerText(uiPdw)),
+                "Expected RCCA Left banner priority");
+        uiPdw.rccaRight = true;
+        assertTrue("후방 좌·우측 접근 위험".equals(TurzxFrameRenderer.TeslaHud.pdwBannerText(uiPdw)),
+                "Expected RCCA both banner priority");
+        TelemetrySnapshot rearOnlyPdw = new TelemetrySnapshot();
+        rearOnlyPdw.pdwOption = 2;
+        rearOnlyPdw.pdwRr = 2;
+        assertTrue("후방 주차센서 감지".equals(TurzxFrameRenderer.TeslaHud.pdwBannerText(rearOnlyPdw)),
+                "Expected rear-only PDW banner");
+        TelemetrySnapshot armedQuiet = new TelemetrySnapshot();
+        armedQuiet.pdwOption = 2;
+        assertTrue("".equals(TurzxFrameRenderer.TeslaHud.pdwBannerText(armedQuiet)),
+                "Expected empty banner when armed with zero obstacles");
+        assertTrue(TurzxFrameRenderer.TeslaHud.pdwLevelColor(0, false) != TurzxFrameRenderer.TeslaHud.pdwLevelColor(1, false)
+                && TurzxFrameRenderer.TeslaHud.pdwLevelColor(1, false) != TurzxFrameRenderer.TeslaHud.pdwLevelColor(2, false)
+                && TurzxFrameRenderer.TeslaHud.pdwLevelColor(2, false) != TurzxFrameRenderer.TeslaHud.pdwLevelColor(3, false)
+                && TurzxFrameRenderer.TeslaHud.pdwLevelColor(0, true) != TurzxFrameRenderer.TeslaHud.pdwLevelColor(1, true)
+                && TurzxFrameRenderer.TeslaHud.pdwLevelColor(1, true) != TurzxFrameRenderer.TeslaHud.pdwLevelColor(2, true)
+                && TurzxFrameRenderer.TeslaHud.pdwLevelColor(2, true) != TurzxFrameRenderer.TeslaHud.pdwLevelColor(3, true),
+                "Expected distinct PDW colors across levels 0..3 for dark and light themes");
 
         System.out.println("[TurzxMonitor] All TURZX DES-CBC USB + Chromium 1:1 HUD Assets + 4-Domain Telemetry + CVS1 + DATC + Media + GitHub OTA + DebugManager self-tests passed.");
     }
