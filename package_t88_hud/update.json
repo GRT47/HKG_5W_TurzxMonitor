@@ -1,8 +1,8 @@
 {
   "package": "com.hkg.huddisplay",
-  "versionCode": 101,
-  "versionName": "1.0.1",
-  "apkUrl": "https://github.com/GRT47/HKG_5W_TurzxMonitor/releases/download/hud-v1.0.1/HkgHudDisplay.apk",
-  "sha256": "0e945aad495e0242ea02c4985f350aa7eead8b63428949dae5054b4aa751b929",
-  "notes": "패키지 통일 클러스터 아이콘 적용, T88(Android 10 Go) Direct-Boot 기본 홈 앱 부팅 자동실행 및 홈 버튼 런처 전환, 설정 UI 개선"
+  "versionCode": 102,
+  "versionName": "1.0.2",
+  "apkUrl": "https://github.com/GRT47/HKG_5W_TurzxMonitor/releases/download/hud-v1.0.2/HkgHudDisplay.apk",
+  "sha256": "606546c04aa68883ca7b8b14ea1380ad399c8c84772f42119a0860aa1673e03b",
+  "notes": "앨범아트 갱신 누락 수정(albumArtSeq 추적·캐시 무효화·재시도 백오프·대시보드 리드로우 해시 반영)"
 }
